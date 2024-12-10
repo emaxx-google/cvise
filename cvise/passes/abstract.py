@@ -28,6 +28,7 @@ class BinaryState:
         self.instances = instances
         self.chunk = instances
         self.index = 0
+        self.counter = 0
         return self
 
     def copy(self):

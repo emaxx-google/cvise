@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 import shutil
 import subprocess
 import tempfile
@@ -61,10 +62,17 @@ class LinesPass(AbstractPass):
                 logging.warning('Skipping pass as sanity check fails for topformflat output')
                 return None
         instances = self.__count_instances(test_case)
-        return BinaryState.create(instances)
+        r = BinaryState.create(instances)
+        logging.warning(f'LinesPass.new: instances={instances}')
+        return r
 
     def advance(self, test_case, state):
-        return state.advance()
+        r = state.copy()
+        r.counter += 1
+        if r.counter <= r.chunk * 2 and r.counter <= 10:
+            return r
+        r.counter = 0
+        return r.advance()
 
     def advance_on_success(self, test_case, state):
         return state.advance_on_success(self.__count_instances(test_case))
@@ -73,8 +81,29 @@ class LinesPass(AbstractPass):
         with open(test_case) as in_file:
             data = in_file.readlines()
 
+        # Randomize the cut block sizes a little bit, as the |chunk| parameter is
+        # coming from a fixed sequence (|instances|, |instances/2|,
+        # |instances/4|, ...).
+        block = random.randint(int(state.chunk / 2) + 1, state.chunk)
+        if state.index + block > state.instances:
+            return (PassResult.INVALID, state)
+        # Randomize the cut start positions as well, as the |index| parameter is
+        # coming from a fixed sequence (0, |chunk|, |2*chunk|, |3*chunk|, ...).
+        start_row = random.randint(state.index, min(state.index + state.chunk - 1, state.instances - block))
+        if state.counter % 2 == 0:
+            # Stategy 1: cut out the block of the size determined above with a fair dice roll.
+            end_row = start_row + block
+        else:
+            # Strategy 2: grow the block until the braces balance is zero.
+            bal = 0
+            end_row = start_row
+            while end_row < state.instances and (end_row - start_row < block or bal != 0):
+                s = data[end_row]
+                bal += s.count('{') - s.count('}')
+                end_row += 1
+
         old_len = len(data)
-        data = data[0 : state.index] + data[state.end() :]
+        data = data[0 : start_row] + data[end_row :]
         assert len(data) < old_len
 
         tmp = os.path.dirname(test_case)
