@@ -68,9 +68,13 @@ class LinesPass(AbstractPass):
 
     def advance(self, test_case, state):
         r = state.copy()
+        # Try 10 times on the same (index, chunk) state, as we use randomization
+        # and different strategies (see |transform()| below).
         r.counter += 1
         if r.counter <= r.chunk * 2 and r.counter <= 10:
             return r
+        # Otherwise, switch to the next (index, chunk) state according to the
+        # standard logic.
         r.counter = 0
         return r.advance()
 
