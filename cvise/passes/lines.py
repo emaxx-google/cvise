@@ -68,7 +68,7 @@ class LinesPass(AbstractPass):
 
     def advance(self, test_case, state):
         r = state.copy()
-        # Try 10 times on the same (index, chunk) state, as we use randomization
+        # Try at least 10 times on the same (index, chunk) state, as we use randomization
         # and different strategies (see |transform()| below).
         r.counter += 1
         if r.counter <= r.chunk * 2 and r.counter <= 10:
@@ -79,7 +79,10 @@ class LinesPass(AbstractPass):
         return r.advance()
 
     def advance_on_success(self, test_case, state):
-        return state.advance_on_success(self.__count_instances(test_case))
+        r = state.advance_on_success(self.__count_instances(test_case))
+        r = r.copy()
+        r.counter = 0
+        return r
 
     def transform(self, test_case, state, process_event_notifier):
         with open(test_case) as in_file:
