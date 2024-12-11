@@ -67,6 +67,9 @@ class LinesPass(AbstractPass):
         return r
 
     def advance(self, test_case, state):
+        # Don't waste time on very small chunks on the first run.
+        if state.chunk < 10 and self.arg == '0':
+            return None
         r = state.copy()
         # Try at least 10 times on the same (index, chunk) state, as we use randomization
         # and different strategies (see |transform()| below).
