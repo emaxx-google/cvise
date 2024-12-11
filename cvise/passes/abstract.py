@@ -18,7 +18,7 @@ class BinaryState:
         pass
 
     def __repr__(self):
-        return f'BinaryState({self.index}-{self.end()}, {self.instances} instances, step: {self.chunk})'
+        return f'BinaryState({self.index}-{self.end()}, {self.instances} instances, step: {self.chunk}, counter: {self.counter})'
 
     @staticmethod
     def create(instances):

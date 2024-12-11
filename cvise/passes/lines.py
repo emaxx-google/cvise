@@ -63,18 +63,18 @@ class LinesPass(AbstractPass):
                 return None
         instances = self.__count_instances(test_case)
         r = BinaryState.create(instances)
-        logging.warning(f'LinesPass.new: instances={instances}')
+        # logging.warning(f'LinesPass.new: instances={instances}')
         return r
 
     def advance(self, test_case, state):
-        # Don't waste time on very small chunks on the first run.
-        if state.chunk < 10 and self.arg == '0':
+        # Don't waste time on very small chunks on first runs.
+        if state.chunk < 10 and int(self.arg) < 5:
             return None
         r = state.copy()
         # Try at least 10 times on the same (index, chunk) state, as we use randomization
         # and different strategies (see |transform()| below).
         r.counter += 1
-        if r.counter <= r.chunk * 2 and r.counter <= 10:
+        if r.counter <= r.chunk * 2 and r.counter <= max(2, r.chunk//10):
             return r
         # Otherwise, switch to the next (index, chunk) state according to the
         # standard logic.
@@ -94,9 +94,9 @@ class LinesPass(AbstractPass):
             data = in_file.readlines()
 
         # Randomize the cut block sizes a little bit, as the |chunk| parameter is
-        # coming from a fixed sequence (|instances|, |instances/2|,
-        # |instances/4|, ...).
-        block = random.randint(int(state.chunk / 2) + 1, state.chunk)
+        # coming from a fixed sequence (|instances|, |instances//2|,
+        # |instances//4|, ...).
+        block = random.randint(state.chunk // 2 + 1, state.chunk)
         if state.index + block > state.instances:
             return (PassResult.INVALID, state)
         # Randomize the cut start positions as well, as the |index| parameter is
