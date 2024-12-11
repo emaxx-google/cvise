@@ -83,6 +83,8 @@ class LinesPass(AbstractPass):
 
     def advance_on_success(self, test_case, state):
         r = state.advance_on_success(self.__count_instances(test_case))
+        if r is None:
+            return r
         r = r.copy()
         r.counter = 0
         return r
