@@ -1,3 +1,4 @@
+import copy
 import logging
 import os
 import random
@@ -5,10 +6,63 @@ import shutil
 import subprocess
 import tempfile
 
-from cvise.passes.abstract import AbstractPass, BinaryState, PassResult
+from cvise.passes.abstract import AbstractPass, PassResult
 from cvise.utils.error import InsaneTestCaseError
 from cvise.utils.misc import CloseableTemporaryFile
 
+
+class LinesState:
+    def __repr__(self):
+        return f'LinesState({self.index}-{self.end()}, {self.instances} instances, step: {self.chunk}, counter: {self.unsuccess_counter})'
+
+    @staticmethod
+    def create(instances):
+        if not instances:
+            return None
+        self = LinesState()
+        self.instances = instances
+        self.chunk = instances
+        self.index = 0
+        self.unsuccess_counter = 0
+        self.success_on_current_level = False
+        return self
+
+    def copy(self):
+        return copy.copy(self)
+
+    def end(self):
+        return min(self.index + self.chunk, self.instances)
+
+    def advance(self):
+        self = self.copy()
+        self.unsuccess_counter += 1
+        return self.__advance_if_exhausted()
+
+    def advance_on_success(self, instances):
+        if not instances:
+            return None
+        self.instances = instances
+        self = self.copy()
+        self.unsuccess_counter = 0
+        self.success_on_current_level = True
+        return self.__advance_if_exhausted()
+
+    def __advance_if_exhausted(self):
+        if self.index < self.instances and self.unsuccess_counter < 10:
+            return self
+        self = self.copy()
+        self.unsuccess_counter = 0
+        if self.index + self.chunk < self.instances:
+            self.index += self.chunk
+        elif self.success_on_current_level:
+            self.index = 0
+            self.success_on_current_level = False
+        elif self.chunk == 1:
+            return None
+        else:
+            self.index = 0
+            self.chunk //= 2
+        return self
 
 class LinesPass(AbstractPass):
     def check_prerequisites(self):
@@ -62,31 +116,22 @@ class LinesPass(AbstractPass):
                 logging.warning('Skipping pass as sanity check fails for topformflat output')
                 return None
         instances = self.__count_instances(test_case)
-        r = BinaryState.create(instances)
-        # logging.warning(f'LinesPass.new: instances={instances}')
+        r = LinesState.create(instances)
+        logging.info(f'[{os.getpid()}] LinesPass.new: r={r}')
         return r
 
     def advance(self, test_case, state):
-        # Don't waste time on very small chunks on first runs.
-        if state.chunk < 10 and int(self.arg) < 5:
+        r = state.advance()
+        if r is None or r.chunk < int(self.arg):
             return None
-        r = state.copy()
-        # Try at least 10 times on the same (index, chunk) state, as we use randomization
-        # and different strategies (see |transform()| below).
-        r.counter += 1
-        if r.counter <= r.chunk * 2 and r.counter <= max(2, r.chunk//10):
-            return r
-        # Otherwise, switch to the next (index, chunk) state according to the
-        # standard logic.
-        r.counter = 0
-        return r.advance()
+        return r
 
     def advance_on_success(self, test_case, state):
+        old = state.copy()
         r = state.advance_on_success(self.__count_instances(test_case))
         if r is None:
             return r
-        r = r.copy()
-        r.counter = 0
+        logging.info(f'[{os.getpid()}] LinesPass.advance_on_success: delta={old.instances-r.instances} old={old} new={r}')
         return r
 
     def transform(self, test_case, state, process_event_notifier):
@@ -102,7 +147,7 @@ class LinesPass(AbstractPass):
         # Randomize the cut start positions as well, as the |index| parameter is
         # coming from a fixed sequence (0, |chunk|, |2*chunk|, |3*chunk|, ...).
         start_row = random.randint(state.index, min(state.index + state.chunk - 1, state.instances - block))
-        if state.counter % 2 == 0:
+        if state.unsuccess_counter % 2 == 0:
             # Stategy 1: cut out the block of the size determined above with a fair dice roll.
             end_row = start_row + block
         else:
