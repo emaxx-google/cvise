@@ -1,4 +1,5 @@
 import re
+import logging
 
 from cvise.passes.abstract import AbstractPass, PassResult
 
@@ -17,6 +18,7 @@ class CommentsPass(AbstractPass):
         return state
 
     def transform(self, test_case, state, process_event_notifier):
+        logging.info(f'CommentsPass.transform: state={state}')
         with open(test_case) as in_file:
             prog = in_file.read()
             prog2 = prog
@@ -29,11 +31,13 @@ class CommentsPass(AbstractPass):
                 prog2 = re.sub(r'/\*(?:\*(?!/)|[^*])*\*/', '', prog2, flags=re.DOTALL)
             elif state == -1:
                 # Remove all single line comments
-                prog2 = re.sub(r'//.*$', '', prog2, flags=re.MULTILINE)
+                # prog2 = re.sub(r'//.*$', '', prog2, flags=re.MULTILINE)
+                pass
             else:
                 return (PassResult.STOP, state)
 
             if prog != prog2:
+                logging.info(f'CommentsPass: reduced from {len(prog)} to {len(prog2)} state={state}')
                 with open(test_case, 'w') as out_file:
                     out_file.write(prog2)
 
