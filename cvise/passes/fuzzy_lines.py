@@ -40,7 +40,7 @@ class FuzzyLinesState:
 
     def advance(self):
         self = self.copy()
-        if self.unsuccess_counter + 1 < min(20, len(self.begin_cands)): # math.isqrt(self.chunk):
+        if self.unsuccess_counter + 1 < min(100, len(self.begin_cands)): # math.isqrt(self.chunk):
             self.unsuccess_counter += 1
         else:
             self.unsuccess_counter = 0
@@ -80,6 +80,7 @@ class FuzzyLinesState:
 
     def calc_cands(self):
         self.begin_cands = [i for i in range(self.begin(), self.end) if self.bal_per_line[i] == self.nesting_depth]
+        random.shuffle(self.begin_cands)
 
 
 class FuzzyLinesPass(AbstractPass):
@@ -200,10 +201,7 @@ class FuzzyLinesPass(AbstractPass):
         if cut_size_at_least > state.instances:
             return (PassResult.INVALID, state)
 
-        if state.unsuccess_counter < 10:
-            cut_begin = state.begin_cands[state.unsuccess_counter]
-        else:
-            cut_begin = random.choice(state.begin_cands)
+        cut_begin = state.begin_cands[state.unsuccess_counter]
         # if state.bal_per_line[cut_begin] != state.nesting_depth:
         #     logging.info(f'cut_begin={cut_begin} state.nesting_depth={state.nesting_depth} state.bal_per_line[cut_begin]={state.bal_per_line[cut_begin]} begin_cands={state.begin_cands}')
         assert state.bal_per_line[cut_begin] == state.nesting_depth
