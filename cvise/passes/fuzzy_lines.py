@@ -17,13 +17,13 @@ class FuzzyLinesState:
         return f'FuzzyLinesState({self.end}, chunk: {self.chunk}, min_chunk: {self.min_chunk}, nesting_depth: {self.nesting_depth}, unsuccess counter: {self.unsuccess_counter}, {self.instances} instances, begin_cands: {len(self.begin_cands)})'
 
     @staticmethod
-    def create(instances, min_chunk, bal_per_line):
+    def create(instances, min_chunk, nesting_depth, bal_per_line):
         if not instances:
             return None
         self = FuzzyLinesState()
         self.instances = instances
         self.min_chunk = min_chunk
-        self.nesting_depth = 0
+        self.nesting_depth = nesting_depth
         self.end = instances
         self.chunk = instances
         self.unsuccess_counter = 0
@@ -40,7 +40,7 @@ class FuzzyLinesState:
 
     def advance(self):
         self = self.copy()
-        if self.unsuccess_counter + 1 < min(100, len(self.begin_cands)): # math.isqrt(self.chunk):
+        if self.unsuccess_counter + 1 < min(10, len(self.begin_cands)): # math.isqrt(self.chunk):
             self.unsuccess_counter += 1
         else:
             self.unsuccess_counter = 0
@@ -55,7 +55,7 @@ class FuzzyLinesState:
             elif self.chunk // 2 >= self.min_chunk:
                 self.chunk //= 2
                 self.end = self.instances
-                self.nesting_depth = 0
+                # self.nesting_depth = 0
             else:
                 return None
             self.calc_cands()
@@ -87,7 +87,7 @@ class FuzzyLinesPass(AbstractPass):
     def check_prerequisites(self):
         return self.check_external_program('topformflat')
 
-    def __format(self, test_case, check_sanity):
+    def __format(self, test_case, nesting_depth, check_sanity):
         tmp = os.path.dirname(test_case)
 
         with (
@@ -97,7 +97,7 @@ class FuzzyLinesPass(AbstractPass):
             backup.close()
             with open(test_case) as in_file:
                 try:
-                    cmd = [self.external_programs['topformflat'], '0']
+                    cmd = [self.external_programs['topformflat'], str(nesting_depth)]
                     proc = subprocess.run(cmd, stdin=in_file, capture_output=True, text=True)
                 except subprocess.SubprocessError:
                     return
@@ -128,14 +128,13 @@ class FuzzyLinesPass(AbstractPass):
 
     def new(self, test_case, check_sanity=None):
         self.bailout = False
-        self.__bal_per_line_cache = {}
 
-        # None means no topformflat
-        if self.arg != 'None':
-            self.__format(test_case, check_sanity)
-            if self.bailout:
-                logging.warning('Skipping pass as sanity check fails for topformflat output')
-                return None
+        min_chunk, nesting_depth = map(int, self.arg.split('-'))
+
+        self.__format(test_case, nesting_depth, check_sanity)
+        if self.bailout:
+            logging.warning('Skipping pass as sanity check fails for topformflat output')
+            return None
 
         with open(test_case) as in_file:
             data = in_file.readlines()
@@ -143,10 +142,9 @@ class FuzzyLinesPass(AbstractPass):
         if bal_per_line is None:
             assert False
         instances = self.__count_instances(test_case)
-        min_chunk = max(1, int(self.arg)) if self.arg is not None else 1
         if min_chunk > instances:
             return None
-        r = FuzzyLinesState.create(instances, min_chunk, bal_per_line)
+        r = FuzzyLinesState.create(instances, min_chunk, nesting_depth, bal_per_line)
         while r is not None and not r.begin_cands:
             r = r.advance_quick()
         # r.chunk = 10
