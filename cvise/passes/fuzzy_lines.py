@@ -176,6 +176,8 @@ class FuzzyLinesPass(AbstractPass):
         old = state.copy()
         logging.info(f'[{os.getpid()}] FuzzyLinesPass.advance_on_success: BEGIN{{: old={old}')
         state = state.advance_on_success(self.__count_instances(test_case))
+        if state is None:
+            return None
         with open(test_case) as in_file:
             data = in_file.readlines()
         state.bal_per_line = self.__get_brace_balance_per_line(data)

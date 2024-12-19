@@ -350,7 +350,7 @@ class TestManager:
         logging.info(f'****** {event} ******')
 
     def kill_pid_queue(self):
-        logging.info('TestManager.kill_pid_queue: BEGIN{')
+        # logging.info('TestManager.kill_pid_queue: BEGIN{')
         active_pids = set()
         while not self.pid_queue.empty():
             event = self.pid_queue.get()
@@ -371,7 +371,7 @@ class TestManager:
                         pass
             except psutil.NoSuchProcess:
                 pass
-        logging.info('TestManager.kill_pid_queue: }END')
+        # logging.info('TestManager.kill_pid_queue: }END')
 
     def release_future(self, future):
         self.futures.remove(future)
@@ -385,13 +385,13 @@ class TestManager:
             logging.info(f'Created extra directory {extra_dir} for you to look at later')
 
     def process_done_futures(self):
-        logging.info(f'[{os.getpid()}] TestManager.process_done_futures: BEGIN{{')
+        # logging.info(f'[{os.getpid()}] TestManager.process_done_futures: BEGIN{{')
         quit_loop = False
         new_futures = set()
         for future in self.futures:
             # all items after first successfull (or STOP) should be cancelled
             if quit_loop:
-                logging.info(f'[{os.getpid()}] TestManager.process_done_futures: canceling future')
+                # logging.info(f'[{os.getpid()}] TestManager.process_done_futures: canceling future')
                 future.cancel()
                 continue
 
@@ -444,7 +444,7 @@ class TestManager:
         for f in removed_futures:
             self.release_future(f)
 
-        logging.info(f'[{os.getpid()}] TestManager.process_done_futures: }}END')
+        # logging.info(f'[{os.getpid()}] TestManager.process_done_futures: }}END')
         return quit_loop
 
     def wait_for_first_success(self):
@@ -460,11 +460,11 @@ class TestManager:
 
     @classmethod
     def terminate_all(cls, pool):
-        logging.info(f'TestManager.terminate_all: BEGIN{{: pool.active={pool.active} pool._context.status={pool._context.status} pool._context.task_queue.qsize={pool._context.task_queue.qsize()}')
+        # logging.info(f'TestManager.terminate_all: BEGIN{{: pool.active={pool.active} pool._context.status={pool._context.status} pool._context.task_queue.qsize={pool._context.task_queue.qsize()}')
         pool.stop()
-        logging.info(f'TestManager.terminate_all: join: pool.active={pool.active} pool._context.status={pool._context.status} pool._context.task_queue.qsize={pool._context.task_queue.qsize()}')
+        # logging.info(f'TestManager.terminate_all: join: pool.active={pool.active} pool._context.status={pool._context.status} pool._context.task_queue.qsize={pool._context.task_queue.qsize()}')
         pool.join()
-        logging.info(f'TestManager.terminate_all: }}END: pool.active={pool.active} pool._context.status={pool._context.status} pool._context.task_queue.qsize={pool._context.task_queue.qsize()}')
+        # logging.info(f'TestManager.terminate_all: }}END: pool.active={pool.active} pool._context.status={pool._context.status} pool._context.task_queue.qsize={pool._context.task_queue.qsize()}')
 
     def run_parallel_tests(self):
         assert not self.futures
@@ -483,9 +483,9 @@ class TestManager:
                 quit_loop = self.process_done_futures()
                 # logging.info('TestManager.run_parallel_tests: process_done_futures: }END')
                 if quit_loop:
-                    logging.info('TestManager.run_parallel_tests: wait_for_first_success: BEGIN{')
+                    # logging.info('TestManager.run_parallel_tests: wait_for_first_success: BEGIN{')
                     success = self.wait_for_first_success()
-                    logging.info('TestManager.run_parallel_tests: wait_for_first_success: }END')
+                    # logging.info('TestManager.run_parallel_tests: wait_for_first_success: }END')
                     self.terminate_all(pool)
                     return success
 
@@ -508,9 +508,9 @@ class TestManager:
                 state = self.current_pass.advance(self.current_test_case, self.state)
                 # we are at the end of enumeration
                 if state is None:
-                    logging.info('TestManager.run_parallel_tests: wait_for_first_success#2: BEGIN{')
+                    # logging.info('TestManager.run_parallel_tests: wait_for_first_success#2: BEGIN{')
                     success = self.wait_for_first_success()
-                    logging.info('TestManager.run_parallel_tests: wait_for_first_success#2: }END')
+                    # logging.info('TestManager.run_parallel_tests: wait_for_first_success#2: }END')
                     self.terminate_all(pool)
                     return success
                 else:
