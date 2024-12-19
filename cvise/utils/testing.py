@@ -385,11 +385,13 @@ class TestManager:
             logging.info(f'Created extra directory {extra_dir} for you to look at later')
 
     def process_done_futures(self):
+        logging.info(f'[{os.getpid()}] TestManager.process_done_futures: BEGIN{{')
         quit_loop = False
         new_futures = set()
         for future in self.futures:
             # all items after first successfull (or STOP) should be cancelled
             if quit_loop:
+                logging.info(f'[{os.getpid()}] TestManager.process_done_futures: canceling future')
                 future.cancel()
                 continue
 
@@ -442,6 +444,7 @@ class TestManager:
         for f in removed_futures:
             self.release_future(f)
 
+        logging.info(f'[{os.getpid()}] TestManager.process_done_futures: }}END')
         return quit_loop
 
     def wait_for_first_success(self):
