@@ -462,8 +462,9 @@ class TestManager:
     def terminate_all(cls, pool):
         # logging.info(f'TestManager.terminate_all: BEGIN{{: pool.active={pool.active} pool._context.status={pool._context.status} pool._context.task_queue.qsize={pool._context.task_queue.qsize()}')
         pool.stop()
-        # logging.info(f'TestManager.terminate_all: join: pool.active={pool.active} pool._context.status={pool._context.status} pool._context.task_queue.qsize={pool._context.task_queue.qsize()}')
+        logging.info(f'TestManager.terminate_all: join: BEGIN{{')
         pool.join()
+        logging.info(f'TestManager.terminate_all: join: }}END')
         # logging.info(f'TestManager.terminate_all: }}END: pool.active={pool.active} pool._context.status={pool._context.status} pool._context.task_queue.qsize={pool._context.task_queue.qsize()}')
 
     def run_parallel_tests(self):
