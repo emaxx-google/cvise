@@ -15,10 +15,10 @@ from cvise.utils.misc import CloseableTemporaryFile
 
 class FuzzyLinesState:
     def __repr__(self):
-        return f'FuzzyLinesState(nesting_depth: {self.nesting_depth}, global_counter: {self.global_counter}, unsuccess counter: {self.unsuccess_counter}, success_on_current_level: {self.success_on_current_level}, {self.size} bytes, {self.instances} lines, {self.size_history[-1] if len(self.size_history) else None} current size, {self.size_history[0] if len(self.size_history) else None} old size, size history {len(self.size_history)}, begin_cands: {len(self.begin_cands)})'
+        return f'FuzzyLinesState(nesting_depth: {self.nesting_depth}, global_counter: {self.global_counter}, unsuccess counter: {self.unsuccess_counter}, success_on_current_level: {self.success_on_current_level}, {self.size} bytes, {self.instances} lines, {self.size_history[-1] if len(self.size_history) else None} current size, {self.size_history[0] if len(self.size_history) else None} old size, size history {len(self.size_history)}, begin_cands: {len(self.begin_cands)} percent_per_1000={round(100*self.size/self.size_history[0],2) if len(self.size_history)==self.size_history.maxlen else ""})'
 
     @staticmethod
-    def create(size, instances, nesting_depth, bal_per_line):
+    def create(size, instances, nesting_depth, bal_per_line, threshold_per_1000):
         self = FuzzyLinesState()
         self.global_counter = 0
         self.size = size
@@ -27,8 +27,9 @@ class FuzzyLinesState:
         self.unsuccess_counter = 0
         self.success_on_current_level = False
         self.bal_per_line = bal_per_line
+        self.threshold_per_1000 = threshold_per_1000
         self.calc_cands()
-        self.size_history = collections.deque(maxlen=10000)
+        self.size_history = collections.deque(maxlen=1000)
         self.size_history.append(size)
         if not self.begin_cands:
             return None
@@ -42,8 +43,8 @@ class FuzzyLinesState:
         self.size = size
         self.global_counter += 1
         self.size_history.append(size)
-        if len(self.size_history) == self.size_history.maxlen and size >= self.size_history[0] * 0.99:
-            logging.info(f'[{os.getpid()}] FuzzyLinesState.advance: stuck: old size {self.size_history[0]} current size {size} counter {self.global_counter}')
+        if len(self.size_history) == self.size_history.maxlen and size >= self.size_history[0] * self.threshold_per_1000:
+            logging.info(f'[{os.getpid()}] FuzzyLinesState.advance: stuck: old size {self.size_history[0]} current size {size} counter {self.global_counter} percent_per_1000={round(100*size/self.size_history[0],2)}')
             return None
         if self.unsuccess_counter < len(self.begin_cands) * math.isqrt(len(self.begin_cands)):
             self.unsuccess_counter += 1
@@ -115,7 +116,9 @@ class FuzzyLinesPass(AbstractPass):
     def new(self, test_case, check_sanity=None):
         self.bailout = False
 
-        nesting_depth = int(self.arg)
+        nesting_depth, threshold_per_1000 = self.arg.split('-')
+        nesting_depth = int(nesting_depth)
+        threshold_per_1000 = float(threshold_per_1000)
 
         self.__format(test_case, nesting_depth, check_sanity)
         if self.bailout:
@@ -129,7 +132,7 @@ class FuzzyLinesPass(AbstractPass):
             assert False
         size = sum(len(s) for s in data)
         instances = len(data)
-        r = FuzzyLinesState.create(size, instances, nesting_depth, bal_per_line)
+        r = FuzzyLinesState.create(size, instances, nesting_depth, bal_per_line, threshold_per_1000)
         logging.info(f'[{os.getpid()}] FuzzyLinesPass.new: r={r}')
         return r
     
