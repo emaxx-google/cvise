@@ -180,7 +180,7 @@ class FuzzyLinesPass(AbstractPass):
         cut_size_approx = 0
         while cut_size_approx < 1 or cut_begin + cut_size_approx > state.instances:
             peak = math.isqrt(state.instances)
-            cut_size_approx = round(random.gauss(peak, peak))
+            cut_size_approx = round(random.gauss(peak, peak/2))
         cut_end = cut_begin
         if cut_end + cut_size_approx >= state.instances:
             # logging.info(f'FuzzyLinesPass.transform: INVALID: cut_end >=: cut_begin={cut_begin} cut_size_approx={cut_size_approx} state={state}')
