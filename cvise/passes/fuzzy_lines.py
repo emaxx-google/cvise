@@ -162,11 +162,7 @@ class FuzzyLinesPass(AbstractPass):
             assert False
         # assert bal_per_line == self.__get_brace_balance_per_line(data)
 
-        p = (state.unsuccess_counter // 2) % len(state.begin_cands)
-        if state.unsuccess_counter % 2 == 0:
-            cut_begin = state.begin_cands[len(state.begin_cands) - 1 - p]
-        else:
-            cut_begin = state.begin_cands_shuffled[p]
+        cut_begin = random.choice(state.begin_cands)
         if state.bal_per_line[cut_begin] != state.nesting_depth:
             # logging.info(f'cut_begin={cut_begin} state.nesting_depth={state.nesting_depth} state.bal_per_line[cut_begin]={state.bal_per_line[cut_begin]} begin_cands={state.begin_cands}')
             assert False
