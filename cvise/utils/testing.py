@@ -411,6 +411,9 @@ class TestManager:
 
                 test_env = future.result()
                 if test_env.success:
+                    self.current_pass.on_success(test_env.state)
+                    test_env.exitcode = -1
+                if test_env.success and False:
                     if self.max_improvement is not None and test_env.size_improvement > self.max_improvement:
                         logging.debug(f'Too large improvement: {test_env.size_improvement} B')
                     else:
@@ -462,9 +465,9 @@ class TestManager:
     def terminate_all(cls, pool):
         # logging.info(f'TestManager.terminate_all: BEGIN{{: pool.active={pool.active} pool._context.status={pool._context.status} pool._context.task_queue.qsize={pool._context.task_queue.qsize()}')
         pool.stop()
-        logging.info(f'TestManager.terminate_all: join: BEGIN{{')
+        # logging.info(f'TestManager.terminate_all: join: BEGIN{{')
         pool.join()
-        logging.info(f'TestManager.terminate_all: join: }}END')
+        # logging.info(f'TestManager.terminate_all: join: }}END')
         # logging.info(f'TestManager.terminate_all: }}END: pool.active={pool.active} pool._context.status={pool._context.status} pool._context.task_queue.qsize={pool._context.task_queue.qsize()}')
 
     def run_parallel_tests(self):
@@ -509,9 +512,9 @@ class TestManager:
                 state = self.current_pass.advance(self.current_test_case, self.state)
                 # we are at the end of enumeration
                 if state is None:
-                    # logging.info('TestManager.run_parallel_tests: wait_for_first_success#2: BEGIN{')
+                    logging.info('TestManager.run_parallel_tests: wait_for_first_success#2: BEGIN{')
                     success = self.wait_for_first_success()
-                    # logging.info('TestManager.run_parallel_tests: wait_for_first_success#2: }END')
+                    logging.info('TestManager.run_parallel_tests: wait_for_first_success#2: }END')
                     self.terminate_all(pool)
                     return success
                 else:
@@ -635,6 +638,8 @@ class TestManager:
             ) from None
 
         self.state = self.current_pass.advance_on_success(test_env.test_case_path, test_env.state)
+        if 'Fuzzy' in str(self.current_pass):
+            sys.exit(0)
         self.pass_statistic.add_success(self.current_pass)
 
         pct = 100 - (self.total_file_size * 100.0 / self.orig_total_file_size)

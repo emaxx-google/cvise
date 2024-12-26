@@ -43,7 +43,7 @@ class FuzzyLinesState:
         self.size = size
         self.global_counter += 1
         self.size_history.append(size)
-        if self.unsuccess_counter < len(self.begin_cands) * self.cands_coeff:
+        if self.unsuccess_counter < len(self.begin_cands) * self.cands_coeff or True:
             self.unsuccess_counter += 1
         else:
             self.unsuccess_counter = 0
@@ -137,6 +137,8 @@ class FuzzyLinesPass(AbstractPass):
             data = in_file.readlines()
         size = sum(len(s) for s in data)
         state = state.advance(size)
+        if state is not None:
+            state.dbg_cut = None
         # logging.info(f'[{os.getpid()}] FuzzyLinesPass.advance: old={old} new={state}')
         return state
 
@@ -151,8 +153,11 @@ class FuzzyLinesPass(AbstractPass):
         if bal_per_line is None:
             assert False
         state = state.advance_on_success(new_size, new_instances, bal_per_line)
-        logging.info(f'[{os.getpid()}] FuzzyLinesPass.advance_on_success: }}END: sizedelta={old.size-new_size} linedelta={old.instances-new_instances} old={old} new={state}')
+        logging.info(f'[{os.getpid()}] FuzzyLinesPass.advance_on_success: }}END: sizedelta={old.size-new_size} linedelta={old.instances-new_instances} old={old} new={state} dbg_cut={old.dbg_cut}')
         return state
+
+    def on_success(self, state):
+        logging.info(f'[{os.getpid()}] FuzzyLinesPass.on_success: dbg_cut={state.dbg_cut} dbg_cut_last_len={state.dbg_cut[-1][1] - state.dbg_cut[-1][0] + 1}')
 
     def transform(self, test_case, state, process_event_notifier):
         bal_per_line = state.bal_per_line
@@ -173,10 +178,10 @@ class FuzzyLinesPass(AbstractPass):
         #     cut_size_approx = round(random.triangular(low=1, high=math.isqrt(state.instances), mode=math.isqrt(state.instances)))
         # assert cut_size_approx >= 1
         # assert cut_size_approx <= state.instances
-        cut_size_approx = 0
-        while cut_size_approx < 1 or cut_begin + cut_size_approx > state.instances:
-            peak = math.isqrt(state.instances)
-            cut_size_approx = round(random.gauss(peak, peak/2))
+        cut_size_approx = random.randint(1, state.instances - cut_begin)
+        if random.random() < 0.5:
+            cut_size_approx = min(cut_size_approx, random.triangular(1, state.instances - cut_begin, 1))
+            cut_size_approx = min(cut_size_approx, random.triangular(1, state.instances - cut_begin, 1))
         cut_end = cut_begin
         if cut_end + cut_size_approx >= state.instances:
             # logging.info(f'FuzzyLinesPass.transform: INVALID: cut_end >=: cut_begin={cut_begin} cut_size_approx={cut_size_approx} state={state}')
@@ -185,6 +190,7 @@ class FuzzyLinesPass(AbstractPass):
         is_removing = False
         nesting_at_block_begin = None
         retained = []
+        dbg_cut = []
         # dbg = ['***\n']
         # if cut_begin > 0:
         #     dbg.append(f'      # bal={bal_per_line[cut_begin]} #{cut_begin-1}# {data[cut_begin-1]}')
@@ -192,6 +198,7 @@ class FuzzyLinesPass(AbstractPass):
             if not is_removing and bal_per_line[cut_end] >= state.nesting_depth:
                 is_removing = True
                 nesting_at_block_begin = bal_per_line[cut_end]
+                dbg_cut.append([cut_end, cut_end])
             if is_removing and bal_per_line[cut_end + 1] < state.nesting_depth:
                 if bal_per_line[cut_end] != nesting_at_block_begin:
                     # dbg.append(f'      # bal={bal_per_line[cut_end+1]} #{cut_end}# {data[cut_end]}')
@@ -204,11 +211,13 @@ class FuzzyLinesPass(AbstractPass):
             # logging.info(f'cut_end={cut_end} is_removing={is_removing} line={data[cut_end]}')
             if is_removing:
                 cut_removing += 1
+                dbg_cut[-1][1] = cut_end
                 # dbg.append(f'---   # bal={bal_per_line[cut_end+1]} #{cut_end}# {data[cut_end]}')
             else:
                 retained.append(cut_end)
                 # dbg.append(f'      # bal={bal_per_line[cut_end+1]} #{cut_end}# {data[cut_end]}')
             cut_end += 1
+        state.dbg_cut = dbg_cut
         # if cut_end < state.instances:   
         #     dbg.append(f'      # bal={bal_per_line[cut_end+1]} #{cut_end}# {data[cut_end]}')
         # dbg.append('***')
