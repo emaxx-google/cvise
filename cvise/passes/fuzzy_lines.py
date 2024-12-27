@@ -156,8 +156,11 @@ class FuzzyLinesPass(AbstractPass):
         logging.info(f'[{os.getpid()}] FuzzyLinesPass.advance_on_success: }}END: sizedelta={old.size-new_size} linedelta={old.instances-new_instances} old={old} new={state} dbg_cut={old.dbg_cut}')
         return state
 
-    def on_success(self, state):
-        logging.info(f'[{os.getpid()}] FuzzyLinesPass.on_success: dbg_cut={state.dbg_cut} dbg_cut_last_len={state.dbg_cut[-1][1] - state.dbg_cut[-1][0] + 1}')
+    def on_success(self, test_case, state):
+        with open(test_case) as in_file:
+            data = in_file.readlines()
+        new_size = sum(len(s) for s in data)
+        logging.info(f'[{os.getpid()}] FuzzyLinesPass.on_success: dbg_cut_sizedelta={state.size-new_size} dbg_cut={state.dbg_cut} dbg_cut_last_len={state.dbg_cut[-1][1] - state.dbg_cut[-1][0] + 1}')
 
     def transform(self, test_case, state, process_event_notifier):
         bal_per_line = state.bal_per_line
@@ -178,10 +181,14 @@ class FuzzyLinesPass(AbstractPass):
         #     cut_size_approx = round(random.triangular(low=1, high=math.isqrt(state.instances), mode=math.isqrt(state.instances)))
         # assert cut_size_approx >= 1
         # assert cut_size_approx <= state.instances
-        cut_size_approx = random.randint(1, state.instances - cut_begin)
-        if random.random() < 0.5:
-            cut_size_approx = min(cut_size_approx, random.triangular(1, state.instances - cut_begin, 1))
-            cut_size_approx = min(cut_size_approx, random.triangular(1, state.instances - cut_begin, 1))
+        mi = 250
+        mx = 400
+        if mi > min(mx, state.instances - cut_begin):
+            return (PassResult.INVALID, state)
+        cut_size_approx = random.randint(mi, min(mx, state.instances - cut_begin))
+        # if random.random() < 0.5:
+        #     cut_size_approx = min(cut_size_approx, random.triangular(1, state.instances - cut_begin, 1))
+        #     cut_size_approx = min(cut_size_approx, random.triangular(1, state.instances - cut_begin, 1))
         cut_end = cut_begin
         if cut_end + cut_size_approx >= state.instances:
             # logging.info(f'FuzzyLinesPass.transform: INVALID: cut_end >=: cut_begin={cut_begin} cut_size_approx={cut_size_approx} state={state}')

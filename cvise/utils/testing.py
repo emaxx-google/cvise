@@ -411,7 +411,7 @@ class TestManager:
 
                 test_env = future.result()
                 if test_env.success:
-                    self.current_pass.on_success(test_env.state)
+                    self.current_pass.on_success(test_env.test_case_path, test_env.state)
                     test_env.exitcode = -1
                 if test_env.success and False:
                     if self.max_improvement is not None and test_env.size_improvement > self.max_improvement:
