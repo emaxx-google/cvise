@@ -15,17 +15,17 @@ from cvise.utils.misc import CloseableTemporaryFile
 
 class FuzzyLinesState:
     def __repr__(self):
-        return f'FuzzyLinesState(nesting_depth: {self.nesting_depth}, global_counter: {self.global_counter}, unsuccess counter: {self.unsuccess_counter}, success_on_current_level: {self.success_on_current_level}, {self.size} bytes, {self.instances} lines, {self.size_history[-1] if len(self.size_history) else None} current size, {self.size_history[0] if len(self.size_history) else None} old size, size history {len(self.size_history)}, begin_cands: {len(self.begin_cands)} percent_per_1000={round(100*self.size/self.size_history[0],2) if len(self.size_history)==self.size_history.maxlen else ""})'
+        return f'FuzzyLinesState(nesting_depth: {self.nesting_depth}, global_counter: {self.global_counter}, unsuccess counter: {self.unsuccess_counter}, {self.size} bytes, {self.instances} lines, {self.size_history[-1] if len(self.size_history) else None} current size, {self.size_history[0] if len(self.size_history) else None} old size, size history {len(self.size_history)}, begin_cands: {len(self.begin_cands)} percent_per_1000={round(100*self.size/self.size_history[0],2) if len(self.size_history)==self.size_history.maxlen else ""})'
 
     @staticmethod
-    def create(size, instances, nesting_depth, bal_per_line, cands_coeff):
+    def create(size, instances, nesting_depth, line_len, bal_per_line, cands_coeff):
         self = FuzzyLinesState()
         self.global_counter = 0
         self.size = size
         self.instances = instances
         self.nesting_depth = nesting_depth
         self.unsuccess_counter = 0
-        self.success_on_current_level = False
+        self.line_len = line_len
         self.bal_per_line = bal_per_line
         self.cands_coeff = cands_coeff
         self.calc_cands()
@@ -46,11 +46,7 @@ class FuzzyLinesState:
         if self.unsuccess_counter < len(self.begin_cands) * self.cands_coeff:
             self.unsuccess_counter += 1
         else:
-            self.unsuccess_counter = 0
-            if self.success_on_current_level and False:  # DISABLED
-                self.success_on_current_level = False
-            else:
-                return None
+            return None
         return self
 
     def advance_on_success(self, size, instances, bal_per_line):
@@ -60,7 +56,6 @@ class FuzzyLinesState:
         self.size_history.append(size)
         self.instances = instances
         self.bal_per_line = bal_per_line
-        self.success_on_current_level = True
         self.calc_cands()
         if not self.begin_cands:
             return None
@@ -122,12 +117,13 @@ class FuzzyLinesPass(AbstractPass):
 
         with open(test_case) as in_file:
             data = in_file.readlines()
+        line_len = [len(s) for s in data]
         bal_per_line = self.__get_brace_balance_per_line(data)
         if bal_per_line is None:
             assert False
         size = sum(len(s) for s in data)
         instances = len(data)
-        r = FuzzyLinesState.create(size, instances, nesting_depth, bal_per_line, cands_coeff)
+        r = FuzzyLinesState.create(size, instances, nesting_depth, line_len, bal_per_line, cands_coeff)
         logging.info(f'[{os.getpid()}] FuzzyLinesPass.new: r={r}')
         return r
     
@@ -167,28 +163,19 @@ class FuzzyLinesPass(AbstractPass):
             # logging.info(f'cut_begin={cut_begin} state.nesting_depth={state.nesting_depth} state.bal_per_line[cut_begin]={state.bal_per_line[cut_begin]} begin_cands={state.begin_cands}')
             assert False
 
-        # if state.unsuccess_counter // 2 % 2 == 0:
-        #     cut_size_approx = round(random.triangular(low=1, high=state.instances, mode=1))
-        # else:
-        #     cut_size_approx = round(random.triangular(low=1, high=math.isqrt(state.instances), mode=math.isqrt(state.instances)))
-        # assert cut_size_approx >= 1
-        # assert cut_size_approx <= state.instances
-        cut_size_approx = 0
-        while cut_size_approx < 1 or cut_begin + cut_size_approx > state.instances:
-            peak = math.isqrt(state.instances)
-            cut_size_approx = round(random.gauss(peak, peak/2))
+        cut_bytes_approx = 0
+        while cut_bytes_approx < 1 or cut_bytes_approx > state.size:
+            peak = state.size // 100
+            cut_bytes_approx = round(random.gauss(peak, peak/2))
         cut_end = cut_begin
-        if cut_end + cut_size_approx >= state.instances:
-            # logging.info(f'FuzzyLinesPass.transform: INVALID: cut_end >=: cut_begin={cut_begin} cut_size_approx={cut_size_approx} state={state}')
-            return (PassResult.INVALID, state)
-        cut_removing = 0
+        cut_bytes_removing = 0
         is_removing = False
         nesting_at_block_begin = None
         retained = []
         # dbg = ['***\n']
         # if cut_begin > 0:
         #     dbg.append(f'      # bal={bal_per_line[cut_begin]} #{cut_begin-1}# {data[cut_begin-1]}')
-        while cut_end < state.instances and (cut_removing < cut_size_approx or bal_per_line[cut_end] > state.nesting_depth):
+        while cut_end < state.instances and (cut_bytes_removing < cut_bytes_approx or bal_per_line[cut_end] > state.nesting_depth):
             if not is_removing and bal_per_line[cut_end] >= state.nesting_depth:
                 is_removing = True
                 nesting_at_block_begin = bal_per_line[cut_end]
@@ -203,7 +190,7 @@ class FuzzyLinesPass(AbstractPass):
                 nesting_at_block_begin = None
             # logging.info(f'cut_end={cut_end} is_removing={is_removing} line={data[cut_end]}')
             if is_removing:
-                cut_removing += 1
+                cut_bytes_removing += state.line_len[cut_end]
                 # dbg.append(f'---   # bal={bal_per_line[cut_end+1]} #{cut_end}# {data[cut_end]}')
             else:
                 retained.append(cut_end)
@@ -213,10 +200,9 @@ class FuzzyLinesPass(AbstractPass):
         #     dbg.append(f'      # bal={bal_per_line[cut_end+1]} #{cut_end}# {data[cut_end]}')
         # dbg.append('***')
         # logging.info(f'cut_begin={cut_begin} cut_end={cut_end} state={state} cut_removing={cut_removing} retained={len(retained)}')
-        if cut_removing < cut_size_approx or bal_per_line[cut_end] > state.nesting_depth:
+        if cut_bytes_removing < cut_bytes_approx or bal_per_line[cut_end] > state.nesting_depth:
             # logging.info(f'FuzzyLinesPass.transform: INVALID: cut_removing small; state={state} cut_begin={cut_begin} cut_end={cut_end} cut_removing={cut_removing} cut_size_approx={cut_size_approx}')
             return (PassResult.INVALID, state)
-        assert cut_end - cut_begin >= cut_size_approx
         # logging.info(''.join(dbg))
 
         with open(test_case) as in_file:

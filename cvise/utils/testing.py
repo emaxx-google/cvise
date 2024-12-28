@@ -452,11 +452,26 @@ class TestManager:
             try:
                 test_env = future.result()
                 if test_env.success:
-                    return test_env
+                    break
             # starting with Python 3.11: concurrent.futures.TimeoutError == TimeoutError
             except (TimeoutError, concurrent.futures.TimeoutError):
                 pass
-        return None
+        else:
+            return None
+        return self.select_best_success()
+
+    def select_best_success(self):
+        best = None
+        best_improv = None
+        for future in self.futures:
+            if future.done() and future.result().success:
+                improv = future.result().size_improvement
+                if best_improv is None or improv > best_improv:
+                    if best_improv is not None:
+                        logging.info(f'TestManager.select_best_success: improved from {best_improv} to {improv}')
+                    best = future.result()
+                    best_improv = improv
+        return best
 
     @classmethod
     def terminate_all(cls, pool):
