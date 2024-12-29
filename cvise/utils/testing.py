@@ -464,7 +464,7 @@ class TestManager:
         best = None
         best_improv = None
         for future in self.futures:
-            if future.done() and future.result().success:
+            if future.done() and future.exception() is None and future.result().success:
                 improv = future.result().size_improvement
                 if best_improv is None or improv > best_improv:
                     if best_improv is not None:
