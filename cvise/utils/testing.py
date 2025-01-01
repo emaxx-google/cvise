@@ -437,6 +437,7 @@ class TestManager:
                     if not self.no_give_up and test_env.order > self.GIVEUP_CONSTANT:
                         self.report_pass_bug(test_env, 'pass got stuck')
                         quit_loop = True
+                        sys.exit(-1)
             else:
                 new_futures.add(future)
 
