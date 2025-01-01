@@ -44,7 +44,7 @@ class FuzzyLinesState:
         return f'FuzzyLinesState(nesting_depth: {self.nesting_depth}, global_counter: {self.global_counter}, {self.size} bytes, {self.instances} lines, {self.size_history[-1] if len(self.size_history) else None} current size, {self.size_history[0] if len(self.size_history) else None} old size, size history {len(self.size_history)}, begin_cands: {len(self.begin_cands)} percent_per_1000={round(100*self.size/self.size_history[0],2) if len(self.size_history)==self.size_history.maxlen else ""} cut_begin={self.cut_begin} cut_end={self.cut_end} peak_dbg=[{self.peak_dbg}] last_peak={self.last_peak} cut_len_approx={self.cut_len_approx} cut_actually_removing={self.cut_actually_removing})'
 
     @staticmethod
-    def create(size, instances, nesting_depth, line_len, bal_per_line, cands_coeff):
+    def create(size, instances, nesting_depth, line_len, bal_per_line, min_cut):
         self = FuzzyLinesState()
         self.global_counter = 0
         self.size = size
@@ -52,7 +52,7 @@ class FuzzyLinesState:
         self.nesting_depth = nesting_depth
         self.line_len = line_len
         self.bal_per_line = bal_per_line
-        self.cands_coeff = cands_coeff
+        self.min_cut = min_cut
         self.calc_cands()
         self.size_history = collections.deque(maxlen=1000)
         self.size_history.append(size)
@@ -135,11 +135,11 @@ class FuzzyLinesState:
         assert self.bal_per_line[cut_begin] == self.nesting_depth
         peak = self.choose_peak()
         if peak is None:
-            peak = 10
-        if self.instances - self.begin_cands[0] < 10:
+            peak = self.min_cut
+        if self.instances - self.begin_cands[0] < self.min_cut:
             return False
         peak = min(peak, self.instances - self.begin_cands[0])
-        peak = max(peak, 10)
+        peak = max(peak, self.min_cut)
         cut_len_approx = None
         while cut_len_approx is None or cut_len_approx < 2 or cut_len_approx > self.instances:
             cut_len_approx = round(random.gauss(peak, peak/2))
@@ -235,7 +235,7 @@ class FuzzyLinesPass(AbstractPass):
     def new(self, test_case, check_sanity=None):
         self.bailout = False
 
-        nesting_depth, cands_coeff = map(int, self.arg.split('-'))
+        nesting_depth, min_cut = map(int, self.arg.split('-'))
 
         self.__format(test_case, nesting_depth, check_sanity)
         if self.bailout:
@@ -250,9 +250,7 @@ class FuzzyLinesPass(AbstractPass):
             assert False
         size = sum(len(s) for s in data)
         instances = len(data)
-        if instances < 10:
-            return None
-        r = FuzzyLinesState.create(size, instances, nesting_depth, line_len, bal_per_line, cands_coeff)
+        r = FuzzyLinesState.create(size, instances, nesting_depth, line_len, bal_per_line, min_cut)
         if r is None or not r.prepare_next_step():
             return None
         logging.info(f'[{os.getpid()}] FuzzyLinesPass.new: r={r}')
@@ -267,7 +265,7 @@ class FuzzyLinesPass(AbstractPass):
         state = state.advance(size)
         if state is None or not state.prepare_next_step():
             return None
-        if state.last_peak <= 10 and len(state.success_history) == state.success_history.maxlen:
+        if state.last_peak <= state.min_cut and len(state.success_history) == state.success_history.maxlen:
             logging.info(f'[{os.getpid()}] FuzzyLinesPass.advance: exiting: peak is too lot, state={state}')
             return None
         # logging.info(f'[{os.getpid()}] FuzzyLinesPass.advance: }}END: old={old} new={state}')
@@ -280,8 +278,6 @@ class FuzzyLinesPass(AbstractPass):
             data = in_file.readlines()
         new_size = sum(len(s) for s in data)
         new_instances = len(data)
-        if new_instances < 10:
-            return None
         bal_per_line = self.__get_brace_balance_per_line(data)
         if bal_per_line is None:
             assert False
@@ -291,14 +287,14 @@ class FuzzyLinesPass(AbstractPass):
         assert state.cut_actually_removing == old.instances-new_instances
         if not state.prepare_next_step():
             return None
-        if state.last_peak <= 10 and len(state.success_history) == state.success_history.maxlen:
+        if state.last_peak <= state.min_cut and len(state.success_history) == state.success_history.maxlen:
             logging.info(f'[{os.getpid()}] FuzzyLinesPass.advance_on_success: }}END: exiting: peak is too lot, state={state}')
             return None
         logging.info(f'[{os.getpid()}] FuzzyLinesPass.advance_on_success: }}END: sizedelta={old.size-new_size} linedelta={old.instances-new_instances} old={old} new={state} linedelta={old.instances-new_instances} old_peak={old.last_peak}')
         return state
 
     def transform(self, test_case, state, process_event_notifier):
-        logging.info(f'[{os.getpid()}] FuzzyLinesPass.transform: BEGIN{{: state={state}')
+        # logging.info(f'[{os.getpid()}] FuzzyLinesPass.transform: BEGIN{{: state={state}')
         bal_per_line = state.bal_per_line
         if bal_per_line is None:
             # logging.info(f'FuzzyLinesPass.transform: INVALID: bal_per_line is None; state={state}')
@@ -348,7 +344,7 @@ class FuzzyLinesPass(AbstractPass):
 
         shutil.move(tmp_file.name, test_case)
 
-        logging.info(f'[{os.getpid()}] FuzzyLinesPass.transform: }}END: state={state}')
+        # logging.info(f'[{os.getpid()}] FuzzyLinesPass.transform: }}END: state={state}')
 
         return (PassResult.OK, state)
 
