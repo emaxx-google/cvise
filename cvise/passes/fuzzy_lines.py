@@ -41,7 +41,7 @@ CORES = get_available_cores()
 
 class FuzzyLinesState:
     def __repr__(self):
-        return f'FuzzyLinesState(nesting_depth: {self.nesting_depth}, global_counter: {self.global_counter}, {self.size} bytes, {self.instances} lines, {self.size_history[-1] if len(self.size_history) else None} current size, {self.size_history[0] if len(self.size_history) else None} old size, size history {len(self.size_history)}, begin_cands: {len(self.begin_cands)} percent_per_1000={round(100*self.size/self.size_history[0],2) if len(self.size_history)==self.size_history.maxlen else ""} cut_begin={self.cut_begin} cut_end={self.cut_end} peak_dbg=[{self.peak_dbg}] last_peak={self.last_peak} cut_len_approx={self.cut_len_approx} cut_actually_removing={self.cut_actually_removing})'
+        return f'FuzzyLinesState(nesting_depth: {self.nesting_depth}, global_counter: {self.global_counter}, {self.size} bytes, {self.instances} lines, {self.size_history[-1] if len(self.size_history) else None} current size, {self.size_history[0] if len(self.size_history) else None} old size, size history {len(self.size_history)}, begin_cands: {len(self.begin_cands)} percent_per_window={round(100*self.size/self.size_history[0],2) if len(self.size_history)==self.size_history.maxlen else ""} cut_begin={self.cut_begin} cut_end={self.cut_end} peak_dbg=[{self.peak_dbg}] last_peak={self.last_peak} cut_len_approx={self.cut_len_approx} cut_actually_removing={self.cut_actually_removing})'
 
     @staticmethod
     def create(size, instances, nesting_depth, line_len, bal_per_line, min_cut):
@@ -54,16 +54,17 @@ class FuzzyLinesState:
         self.bal_per_line = bal_per_line
         self.min_cut = min_cut
         self.calc_cands()
-        self.size_history = collections.deque(maxlen=1000)
-        self.size_history.append(size)
+        self.size_history = collections.deque(maxlen=get_available_cores()*50)
+        self.size_history.append(instances)
         self.successes = {}
         self.unsuccesses = {}
-        self.success_history = collections.deque(maxlen=get_available_cores()*100)
+        self.success_history = collections.deque(maxlen=get_available_cores()*5)
         self.cut_begin = None
         self.cut_end = None
         self.cut_len_approx = None
         self.cut_actually_removing = None
         self.last_peak = None
+        self.peak_dbg = ''
         if not self.begin_cands:
             return None
         return self
@@ -75,14 +76,20 @@ class FuzzyLinesState:
         self = self.copy()
         self.size = size
         self.global_counter += 1
-        self.size_history.append(size)
+        self.size_history.append(self.instances)
+        if len(self.size_history) == self.size_history.maxlen:
+            improv = self.size_history[0] - self.size_history[-1]
+            min_improv = self.size_history.maxlen * self.min_cut // CORES
+            if improv < min_improv:
+                logging.info(f'[{os.getpid()}] FuzzyLinesState.advance: too small improv over window: improv={improv} min_improv={min_improv} self.size_history[0]={self.size_history[0]} self.size_history[-1]={self.size_history[-1]}')
+                return None
         return self
 
     def advance_on_success(self, size, instances, bal_per_line):
         self = self.copy()
         self.size = size
         self.global_counter += 1
-        self.size_history.append(size)
+        self.size_history.append(instances)
         self.instances = instances
         self.bal_per_line = bal_per_line
         self.calc_cands()
@@ -97,53 +104,34 @@ class FuzzyLinesState:
         self.begin_cands_shuffled = copy.copy(self.begin_cands)
         random.shuffle(self.begin_cands_shuffled)
 
-    def choose_peak(self):
-        cands = list(set(self.successes.keys()) | set(self.unsuccesses.keys()))
-        best = None
-        best_exp = None
-        dbg = ''
-        cnt_succ = 0
-        cnt_unsucc = 0
-        for x in sorted(cands, reverse=True):
-            if x > self.instances:
-                continue
-            cnt_succ += self.successes.get(x, 0)
-            assert cnt_succ >= 0
-            assert cnt_succ <= self.success_history.maxlen
-            cnt_unsucc += self.unsuccesses.get(x, 0)
-            assert cnt_unsucc <= self.success_history.maxlen
-            if cnt_succ > 0:
-                exp = x / (1 + max(0, cnt_unsucc) / cnt_succ / CORES)
-                dbg += f'cand={x} cnt_succ={cnt_succ} cnt_unsucc={cnt_unsucc} exp={exp}, '
-                if best_exp is None or exp > best_exp:
-                    best_exp = exp
-                    best = x
-        # logging.info(f'[{os.getpid()}] FuzzyLinesState.choose_peak: best={best} among {dbg}')
-        self.peak_dbg = dbg
-        return best
+    def choose_peak(self, current_success):
+        if not self.successes:
+            self.peak_dbg = ''
+            return None
+        return max(self.successes.keys())
 
-    def prepare_next_step(self):
+    def prepare_next_step(self, current_success=None):
         for _ in range(10):
-            if self.prepare_next_step_internal():
+            if self.prepare_next_step_internal(current_success):
                 return True
         return False
 
-    def prepare_next_step_internal(self):
+    def prepare_next_step_internal(self, current_success):
         # logging.info(f'[{os.getpid()}] FuzzyLinesState.prepare_next_step_internal: BEGIN{{')
         self.cut_begin = None
         cut_begin = random.choice(self.begin_cands)
         assert self.bal_per_line[cut_begin] == self.nesting_depth
-        peak = self.choose_peak()
+        peak = self.choose_peak(current_success)
         if peak is None:
-            peak = self.min_cut
-        if self.instances - self.begin_cands[0] < self.min_cut:
+            peak = self.min_cut * 2
+        if self.instances - self.begin_cands[0] < self.min_cut * 2:
             return False
         peak = min(peak, self.instances - self.begin_cands[0])
-        peak = max(peak, self.min_cut)
+        peak = max(peak, self.min_cut * 2)
         cut_len_approx = None
         while cut_len_approx is None or cut_len_approx < 2 or cut_len_approx > self.instances:
             cut_len_approx = round(random.gauss(peak, peak/2))
-            # logging.info(f'[{os.getpid()}] FuzzyLinesState.prepare_next_step: peak={peak} cut_len_approx={cut_len_approx} instances={self.instances}')
+        # logging.info(f'[{os.getpid()}] FuzzyLinesState.prepare_next_step: peak={peak} cut_len_approx={cut_len_approx} instances={self.instances} current_success={current_success}')
         cut_end = cut_begin
         cut_actually_removing = 0
         is_removing = False
@@ -265,9 +253,9 @@ class FuzzyLinesPass(AbstractPass):
         state = state.advance(size)
         if state is None or not state.prepare_next_step():
             return None
-        if state.last_peak <= state.min_cut and len(state.success_history) == state.success_history.maxlen:
-            logging.info(f'[{os.getpid()}] FuzzyLinesPass.advance: exiting: peak is too lot, state={state}')
-            return None
+        # if state.last_peak <= state.min_cut and len(state.success_history) == state.success_history.maxlen:
+        #     logging.info(f'[{os.getpid()}] FuzzyLinesPass.advance: exiting: peak is too low, state={state}')
+        #     return None
         # logging.info(f'[{os.getpid()}] FuzzyLinesPass.advance: }}END: old={old} new={state}')
         return state
 
@@ -285,7 +273,7 @@ class FuzzyLinesPass(AbstractPass):
         if state is None:
             return None
         assert state.cut_actually_removing == old.instances-new_instances
-        if not state.prepare_next_step():
+        if not state.prepare_next_step(state.cut_actually_removing):
             return None
         if state.last_peak <= state.min_cut and len(state.success_history) == state.success_history.maxlen:
             logging.info(f'[{os.getpid()}] FuzzyLinesPass.advance_on_success: }}END: exiting: peak is too lot, state={state}')
