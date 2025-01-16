@@ -45,6 +45,53 @@ It also tries to reduce the typedef chain, e.g. \n\
 static RegisterTransformation<ReplaceDependentTypedef>
          Trans("replace-dependent-typedef", DescriptionMsg);
 
+namespace {
+
+bool DependsOnTypedef(const Type &Ty) {
+  switch (Ty.getTypeClass()) {
+  case Type::SubstTemplateTypeParm: {
+    const SubstTemplateTypeParmType *TP =
+      dyn_cast<SubstTemplateTypeParmType>(&Ty);
+    const Type *ReplTy = TP->getReplacementType().getTypePtr();
+    return DependsOnTypedef(*ReplTy);
+  }
+
+  case Type::Elaborated: {
+    const ElaboratedType *ETy = dyn_cast<ElaboratedType>(&Ty);
+    const Type *NamedTy = ETy->getNamedType().getTypePtr();
+    return DependsOnTypedef(*NamedTy);
+  }
+
+  case Type::Typedef: {
+    return true;
+  }
+
+  case Type::DependentName: {
+    const DependentNameType *DNT = dyn_cast<DependentNameType>(&Ty);
+    const NestedNameSpecifier *Specifier = DNT->getQualifier();
+    if (!Specifier)
+      return false;
+    const Type *NestedTy = Specifier->getAsType();
+    if (!NestedTy)
+      return false;
+    return DependsOnTypedef(*NestedTy);
+  }
+
+  case Type::Record:
+  case Type::Builtin: { // fall-through
+    return false;
+  }
+
+  default:
+    return false;
+  }
+
+  TransAssert(0 && "Unreachable code!");
+  return false;
+}
+
+}  // namespace
+
 class ReplaceDependentTypedefCollectionVisitor : public
   RecursiveASTVisitor<ReplaceDependentTypedefCollectionVisitor> {
 
@@ -136,6 +183,8 @@ void ReplaceDependentTypedef::handleOneTypedefDecl(const TypedefNameDecl *D)
     return;
 
   if (!isValidType(D->getUnderlyingType()))
+    return;
+  if (!DependsOnTypedef(*D->getUnderlyingType()))
     return;
 
   std::string Str = "";
