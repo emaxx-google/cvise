@@ -1,3 +1,4 @@
+import collections
 from concurrent.futures import FIRST_COMPLETED, wait
 import difflib
 import filecmp
@@ -7,12 +8,14 @@ from multiprocessing import Manager
 import os
 from pathlib import Path
 import platform
+import random
 import shutil
 import subprocess
 import sys
 import tempfile
 import traceback
 import concurrent.futures
+import statistics
 
 from cvise.cvise import CVise
 from cvise.passes.abstract import PassResult, ProcessEventNotifier, ProcessEventType
@@ -123,6 +126,69 @@ class TestEnvironment:
             os.chdir(self.pwd)
         return returncode
 
+def get_available_cores():
+    try:
+        # try to detect only physical cores, ignore HyperThreading
+        # in order to speed up parallel execution
+        core_count = psutil.cpu_count(logical=False)
+        if not core_count:
+            core_count = psutil.cpu_count(logical=True)
+        # respect affinity
+        try:
+            affinity = len(psutil.Process().cpu_affinity())
+            assert affinity >= 1
+        except AttributeError:
+            return core_count
+
+        if core_count:
+            core_count = min(core_count, affinity)
+        else:
+            core_count = affinity
+        return core_count
+    except NotImplementedError:
+        return 1
+
+CORES = get_available_cores()
+
+desired_pace = None
+size_pass = None
+size_history = collections.deque(maxlen=500*CORES)
+
+def check_pass(current_pass):
+    global size_pass
+    if size_pass != current_pass:
+        size_history.clear()
+        size_pass = current_pass
+
+def on_scheduled(current_pass, size):
+    check_pass(current_pass)
+    size_history.append(size)
+
+def on_succeeded(current_pass, size):
+    check_pass(current_pass)
+    size_history.append(size)
+
+def get_conf_interval(current_pass):
+    check_pass(current_pass)
+    if len(size_history) < 30:
+        return None
+    szdiff = [size_history[i] - size_history[i+1] for i in range(len(size_history)-1)]
+    mean = statistics.mean(szdiff)
+    sigma = statistics.stdev(szdiff)
+    K = 4.47
+    return mean + K * sigma / math.sqrt(len(szdiff))
+
+def is_pace_good(current_pass, desired):
+    if desired is None:
+        return True
+    check_pass(current_pass)
+    if len(size_history) < 5*CORES:
+        return None
+    conf_r = get_conf_interval(current_pass)
+    if conf_r is None:
+        return True
+    logging.info(f'is_pace_good: len={len(size_history)} conf=0..{round(conf_r,1)} desired={desired}')
+    return desired <= conf_r
 
 class TestManager:
     GIVEUP_CONSTANT = 50000
@@ -474,6 +540,11 @@ class TestManager:
                     self.terminate_all(pool)
                     return success
 
+                if self.current_pass.min_transforms is not None and self.success_count >= self.current_pass.min_transforms and random.random() < 0.01 and not is_pace_good(self.current_pass, desired_pace):
+                    logging.info(f'run_parallel_tests: BAILING OUT')
+                    self.terminate_all(pool)
+                    return None
+
                 folder = Path(tempfile.mkdtemp(prefix=self.TEMP_PREFIX, dir=self.root))
                 test_env = TestEnvironment(
                     self.state,
@@ -489,6 +560,7 @@ class TestManager:
                 self.temporary_folders[future] = folder
                 self.futures.append(future)
                 self.pass_statistic.add_executed(self.current_pass)
+                on_scheduled(self.current_pass, self.total_file_size)
                 order += 1
                 state = self.current_pass.advance(self.current_test_case, self.state)
                 # we are at the end of enumeration
@@ -498,6 +570,13 @@ class TestManager:
                     return success
                 else:
                     self.state = state
+
+    def set_desired_pace(self, pace):
+        global desired_pace
+        desired_pace = pace
+
+    def get_estimated_pace(self):
+        return get_conf_interval(self.current_pass)
 
     def run_pass(self, pass_):
         if self.start_with_pass:
@@ -527,7 +606,7 @@ class TestManager:
             for test_case in self.sorted_test_cases:
                 self.current_test_case = test_case
                 starting_test_case_size = test_case.stat().st_size
-                success_count = 0
+                self.success_count = 0
 
                 if self.get_file_size([test_case]) == 0:
                     continue
@@ -563,7 +642,7 @@ class TestManager:
 
                     if success_env:
                         self.process_result(success_env)
-                        success_count += 1
+                        self.success_count += 1
 
                     # if the file increases significantly, bail out the current pass
                     test_case_size = self.current_test_case.stat().st_size
@@ -580,10 +659,10 @@ class TestManager:
                         break
 
                     # skip after N transformations if requested
-                    if (self.skip_after_n_transforms and success_count >= self.skip_after_n_transforms) or (
-                        self.current_pass.max_transforms and success_count >= self.current_pass.max_transforms
+                    if (self.skip_after_n_transforms and self.success_count >= self.skip_after_n_transforms) or (
+                        self.current_pass.max_transforms and self.success_count >= self.current_pass.max_transforms
                     ):
-                        logging.info(f'skipping after {success_count} successful transformations')
+                        logging.info(f'skipping after {self.success_count} successful transformations')
                         break
 
                 # Cache result of this pass
@@ -618,6 +697,7 @@ class TestManager:
 
         self.state = self.current_pass.advance_on_success(test_env.test_case_path, test_env.state)
         self.pass_statistic.add_success(self.current_pass)
+        on_succeeded(self.current_pass, self.total_file_size)
 
         pct = 100 - (self.total_file_size * 100.0 / self.orig_total_file_size)
         notes = []
