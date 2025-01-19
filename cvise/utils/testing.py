@@ -152,7 +152,7 @@ CORES = get_available_cores()
 
 desired_pace = None
 size_pass = None
-size_history = collections.deque(maxlen=500*CORES)
+size_history = collections.deque(maxlen=100*CORES)
 
 def check_pass(current_pass):
     global size_pass
@@ -168,12 +168,16 @@ def on_succeeded(current_pass, size):
     check_pass(current_pass)
     size_history.append(size)
 
+ME = None
+
 def get_conf_interval(current_pass):
     check_pass(current_pass)
     if len(size_history) < 30:
         return None
     szdiff = [size_history[i] - size_history[i+1] for i in range(len(size_history)-1)]
     mean = statistics.mean(szdiff)
+    global ME
+    ME = mean
     sigma = statistics.stdev(szdiff)
     K = 4.47
     return mean + K * sigma / math.sqrt(len(szdiff))
@@ -182,12 +186,12 @@ def is_pace_good(current_pass, desired):
     if desired is None:
         return True
     check_pass(current_pass)
-    if len(size_history) < 5*CORES:
-        return None
+    if len(size_history) < 10*CORES:
+        return True
     conf_r = get_conf_interval(current_pass)
     if conf_r is None:
         return True
-    logging.info(f'is_pace_good: len={len(size_history)} conf=0..{round(conf_r,1)} desired={desired}')
+    logging.info(f'is_pace_good: len={len(size_history)} conf=0..{round(conf_r,1)} mean={round(ME,1)} desired={round(desired,1)}')
     return desired <= conf_r
 
 class TestManager:
@@ -540,7 +544,8 @@ class TestManager:
                     self.terminate_all(pool)
                     return success
 
-                if self.current_pass.min_transforms is not None and self.success_count >= self.current_pass.min_transforms and random.random() < 0.01 and not is_pace_good(self.current_pass, desired_pace):
+                # if self.current_pass.min_transforms is not None and self.success_count >= self.current_pass.min_transforms and random.random() < 0.01 and not is_pace_good(self.current_pass, desired_pace):
+                if desired_pace is not None and random.random() < 1/self.parallel_tests and not is_pace_good(self.current_pass, desired_pace):
                     logging.info(f'run_parallel_tests: BAILING OUT')
                     self.terminate_all(pool)
                     return None
@@ -576,7 +581,9 @@ class TestManager:
         desired_pace = pace
 
     def get_estimated_pace(self):
-        return get_conf_interval(self.current_pass)
+        conf_r = get_conf_interval(self.current_pass)
+        logging.info(f'get_estimated_pace: conf_r={conf_r} mean={ME}')
+        return ME
 
     def run_pass(self, pass_):
         if self.start_with_pass:

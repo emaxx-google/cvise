@@ -19,6 +19,16 @@
     {"pass": "lines", "arg": "10"}
  ],
  "main": [
+    {"pass": "clangbinarysearch", "arg": "replace-function-def-with-decl", "c": true },
+    {"pass": "clangbinarysearch", "arg": "remove-unused-function", "c": true },
+    {"pass": "lines", "arg": "0"},
+    {"pass": "lines", "arg": "1"},
+    {"pass": "lines", "arg": "2"},
+    {"pass": "lines", "arg": "3"},
+    {"pass": "lines", "arg": "4"},
+    {"pass": "lines", "arg": "6"},
+    {"pass": "lines", "arg": "8"},
+    {"pass": "lines", "arg": "10"},
     {"pass": "includeincludes", "c": true },
     {"pass": "ternary", "arg": "b", "c": true },
     {"pass": "ternary", "arg": "c", "c": true },

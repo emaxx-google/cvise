@@ -165,7 +165,7 @@ class CVise:
             self._run_additional_passes(pass_group['first'])
 
         logging.info('PACED PASSES')
-        self._run_main_passes(pass_group['paced'])
+        self._run_main_passes(pass_group['paced'], True)
 
         self.test_manager.set_desired_pace(None)
         logging.info('MAIN PASSES')
@@ -191,12 +191,12 @@ class CVise:
             else:
                 self.test_manager.run_pass(p)
 
-    def _run_main_passes(self, passes):
+    def _run_main_passes(self, passes, paced=False):
         # STARTING_PACE = 1000 if 'paced' in pass_group else 0
         # self.test_manager.set_initial_pace(STARTING_PACE)
         desired_pace = None
-        max_transforms = 5
-        MIN_TRANSFORMS = 5
+        max_transforms = 5 if paced else None
+        # MIN_TRANSFORMS = 5 if paced else None
         while True:
             total_file_size = self.test_manager.total_file_size
 
@@ -219,33 +219,38 @@ class CVise:
                     old_mx = p.max_transforms
                     if max_transforms is not None:
                         p.max_transforms = max_transforms
-                    p.min_transforms = MIN_TRANSFORMS
+                    # p.min_transforms = MIN_TRANSFORMS
+
+                    if paced and max_transforms is not None and estimated_paces:
+                        best_pace = max(estimated_paces)
+                        self.test_manager.set_desired_pace(best_pace)
+                        logging.info(f'_run_main_passes: new pace={best_pace} empirical pace={best_pace}')
 
                     self.test_manager.run_pass(p)
 
                     pace = self.test_manager.get_estimated_pace()
-                    logging.info(f'_run_main_passes: estimated pace={pace}')
                     if pace is not None:
                         estimated_paces.append(pace)
-                    p.min_transforms = None
+                    # p.min_transforms = None
                     p.max_transforms = old_mx
 
             logging.info(f'Termination check: size was {total_file_size}; now {self.test_manager.total_file_size}')
 
-            if (self.test_manager.total_file_size >= total_file_size and desired_pace is None) or met_stopping_threshold:
+            if (self.test_manager.total_file_size >= total_file_size and not paced) or met_stopping_threshold:
                 break
 
-            if not estimated_paces:
-                break
-            best_pace = max(estimated_paces)
-            old_desired_pace = desired_pace
-            if desired_pace is None:
-                desired_pace = best_pace
-            else:
-                desired_pace = min(best_pace, desired_pace // 10)
-            logging.info(f'_run_main_passes: new pace={desired_pace} old pace={old_desired_pace} empirical pace={best_pace}')
-            if desired_pace == 1:
-                break
+            if paced:
+                if not estimated_paces:
+                    break
+                best_pace = max(estimated_paces)
+                old_desired_pace = desired_pace
+                if desired_pace is None:
+                    desired_pace = best_pace
+                else:
+                    desired_pace = min(best_pace, desired_pace // 2)
+                logging.info(f'_run_main_passes: new pace={desired_pace} old pace={old_desired_pace} empirical pace={best_pace}')
+                if desired_pace < 10:
+                    break
 
-            self.test_manager.set_desired_pace(desired_pace)
-            max_transforms = None
+                self.test_manager.set_desired_pace(desired_pace)
+                max_transforms = None
