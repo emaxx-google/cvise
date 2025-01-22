@@ -243,12 +243,10 @@ class CVise:
                 if not estimated_paces:
                     break
                 best_pace = max(estimated_paces)
-                old_desired_pace = desired_pace
                 if desired_pace is None:
                     desired_pace = best_pace
-                else:
-                    desired_pace = min(best_pace, desired_pace // 2)
-                logging.info(f'_run_main_passes: new pace={desired_pace} old pace={old_desired_pace} empirical pace={best_pace}')
+                desired_pace //= 2
+                logging.info(f'_run_main_passes: new pace={desired_pace} empirical pace={best_pace}')
                 if desired_pace < 10:
                     break
 
