@@ -86,6 +86,10 @@ int threshold = 0;
   (.|\n)      { emit(); }                                   /* ordinary char */
 }
 
+[0-9a-f][0-9a-f']*[0-9a-f] {
+                emit(); /* possibly integer literal */
+              }
+
 .             { emit(); }
 
 %%
