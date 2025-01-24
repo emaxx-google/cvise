@@ -593,6 +593,8 @@ class TestManager:
                 self.pass_statistic.add_executed(self.current_pass)
                 on_scheduled(self.current_pass, self.total_file_size)
                 order += 1
+                if order % 1000 == 0:
+                    logging.info(f'pulse: order={order}')
                 state = self.current_pass.advance(self.current_test_case, self.state)
                 # we are at the end of enumeration
                 if state is None:

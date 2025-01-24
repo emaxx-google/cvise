@@ -9,6 +9,10 @@ from cvise.passes.abstract import AbstractPass, BinaryState, PassResult
 from cvise.utils.misc import CloseableTemporaryFile
 
 
+previous_clang_delta_std = None
+previous_state = {}
+
+
 class ClangBinarySearchPass(AbstractPass):
     QUERY_TIMEOUT = 10
 
@@ -34,20 +38,32 @@ class ClangBinarySearchPass(AbstractPass):
         self.clang_delta_std = best
 
     def new(self, test_case, _=None):
-        if not self.user_clang_delta_std:
-            self.detect_best_standard(test_case)
-        else:
+        global previous_clang_delta_std
+        if self.user_clang_delta_std:
             self.clang_delta_std = self.user_clang_delta_std
-        return BinaryState.create(self.count_instances(test_case))
+        elif previous_clang_delta_std is not None:
+            self.clang_delta_std = previous_clang_delta_std
+        else:
+            self.detect_best_standard(test_case)
+            previous_clang_delta_std = self.clang_delta_std
+        instances = self.count_instances(test_case)
+        state = BinaryState.create(instances)
+        if self.arg in previous_state and previous_state[self.arg].chunk <= instances:
+            logging.info(f'ClangBinarySearchPass.new: hint to start from chunk={previous_state[self.arg].chunk} instead of {state.chunk}')
+            state.chunk = previous_state[self.arg].chunk
+        return state
 
     def advance(self, test_case, state):
-        return state.advance()
+        state = state.advance()
+        previous_state[self.arg] = state
+        return state
 
     def advance_on_success(self, test_case, state):
         instances = state.real_num_instances - state.real_chunk()
         state = state.advance_on_success(instances)
         if state:
             state.real_num_instances = None
+        previous_state[self.arg] = state
         return state
 
     def count_instances(self, test_case):
