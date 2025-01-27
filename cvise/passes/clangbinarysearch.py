@@ -16,6 +16,10 @@ previous_state = {}
 class ClangBinarySearchPass(AbstractPass):
     QUERY_TIMEOUT = 10
 
+    def reset_hint(self):
+        global previous_state
+        previous_state = {}
+
     def check_prerequisites(self):
         return self.check_external_program('clang_delta')
 

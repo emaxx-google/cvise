@@ -63,6 +63,10 @@ class LineState(BinaryState):
     def __repr__(self):
         return f'LineState(chunk={self.chunk} index={self.index} instances={self.instances}, tp={self.tp})'
 
+    def reset_hint(self):
+        global previous_state
+        previous_state = {}
+
     @staticmethod
     def create(instances):
         global success_history

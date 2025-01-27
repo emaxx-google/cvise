@@ -224,12 +224,12 @@ class CVise:
                     if paced and max_transforms is not None and estimated_paces:
                         best_pace = max(estimated_paces)
                         self.test_manager.set_desired_pace(best_pace)
-                        logging.info(f'_run_main_passes: new pace={best_pace} empirical pace={best_pace}')
+                        logging.info(f'_run_main_passes: new_pace={best_pace} empirical_pace={best_pace}')
 
                     self.test_manager.run_pass(p)
 
                     if hasattr(self.test_manager, 'current_pass') and self.test_manager.current_pass == p:
-                        pace = self.test_manager.get_estimated_pace()
+                        pace = self.test_manager.get_estimated_pace(p)
                         if pace is not None:
                             estimated_paces.append(pace)
                     # p.min_transforms = None

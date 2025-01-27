@@ -182,11 +182,12 @@ ME = None
 
 def get_conf_interval(current_pass):
     check_pass(current_pass)
+    global ME
+    ME = None
     if len(size_history) < 30:
         return None
     szdiff = [size_history[i] - size_history[i+1] for i in range(len(size_history)-1)]
     mean = statistics.mean(szdiff)
-    global ME
     ME = mean
     sigma = statistics.stdev(szdiff)
     K = 4.47
@@ -608,8 +609,8 @@ class TestManager:
         global desired_pace
         desired_pace = pace
 
-    def get_estimated_pace(self):
-        conf_r = get_conf_interval(self.current_pass)
+    def get_estimated_pace(self, p):
+        conf_r = get_conf_interval(p)
         logging.info(f'get_estimated_pace: conf_r={conf_r} mean={ME}')
         return ME
 
@@ -658,6 +659,8 @@ class TestManager:
                             continue
 
                 # create initial state
+                if desired_pace is None and hasattr(self.current_pass, 'reset_hint'):
+                    self.current_pass.reset_hint()
                 self.state = self.current_pass.new(self.current_test_case, self.check_sanity)
                 self.skip = False
 
