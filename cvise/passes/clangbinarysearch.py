@@ -48,7 +48,7 @@ class ClangBinarySearchPass(AbstractPass):
             previous_clang_delta_std = self.clang_delta_std
         instances = self.count_instances(test_case)
         state = BinaryState.create(instances)
-        if self.arg in previous_state and previous_state[self.arg].chunk <= instances:
+        if self.arg in previous_state and previous_state[self.arg] is not None and previous_state[self.arg].chunk <= instances:
             logging.info(f'ClangBinarySearchPass.new: hint to start from chunk={previous_state[self.arg].chunk} instead of {state.chunk}')
             state.chunk = previous_state[self.arg].chunk
         return state

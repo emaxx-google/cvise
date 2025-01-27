@@ -97,6 +97,7 @@ class LineState(BinaryState):
         success_history.append(self.instances - instances)
         state = copy.copy(self)
         state.instances = instances
+        state.tp = 0
         if state.index >= state.instances:
             return state.advance()
         else:
@@ -107,9 +108,11 @@ class LineState(BinaryState):
         peak = choose_rnd_peak()
         if peak is None:
             peak = 1
-        peak = max(peak, self.chunk)
-        peak = min(peak, self.instances)
-        while self.rnd_chunk is None or self.rnd_chunk < self.chunk or self.rnd_chunk > self.instances:
+        le = min(self.chunk, self.instances)
+        ri = self.instances
+        peak = max(peak, le)
+        peak = min(peak, ri)
+        while self.rnd_chunk is None or self.rnd_chunk < le or self.rnd_chunk > ri:
             self.rnd_chunk = round(random.gauss(peak, peak))
 
 class LinesPass(AbstractPass):
@@ -176,7 +179,7 @@ class LinesPass(AbstractPass):
                 return None
         instances = self.__count_instances(test_case)
         state = LineState.create(instances)
-        if self.arg in previous_state and previous_state[self.arg].chunk <= instances:
+        if self.arg in previous_state and previous_state[self.arg] is not None and previous_state[self.arg].chunk <= instances:
             logging.info(f'LinesPass.new: hint to start from chunk={previous_state[self.arg].chunk} instead of {state.chunk}')
             state.chunk = previous_state[self.arg].chunk
         return state
@@ -207,6 +210,9 @@ class LinesPass(AbstractPass):
                 assert False
             data = data[0 : state.index] + data[state.end() :]
         else:
+            if state.rnd_chunk > state.instances:
+                logging.info(f'state={state}')
+                assert False
             start = random.randint(0, state.instances - state.rnd_chunk)
             assert state.rnd_chunk > 0
             # logging.info(f'state={state} start={start} rnd_chunk={state.rnd_chunk}')
