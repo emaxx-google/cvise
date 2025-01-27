@@ -228,9 +228,10 @@ class CVise:
 
                     self.test_manager.run_pass(p)
 
-                    pace = self.test_manager.get_estimated_pace()
-                    if pace is not None:
-                        estimated_paces.append(pace)
+                    if hasattr(self.test_manager, 'current_pass') and self.test_manager.current_pass == p:
+                        pace = self.test_manager.get_estimated_pace()
+                        if pace is not None:
+                            estimated_paces.append(pace)
                     # p.min_transforms = None
                     p.max_transforms = old_mx
 
