@@ -247,7 +247,7 @@ class CVise:
                 if desired_pace is None:
                     desired_pace = best_pace
                 desired_pace //= 2
-                logging.info(f'_run_main_passes: new pace={desired_pace} empirical pace={best_pace}')
+                logging.info(f'_run_main_passes: new_pace={desired_pace} empirical_pace={best_pace}')
                 if desired_pace < 10:
                     break
 

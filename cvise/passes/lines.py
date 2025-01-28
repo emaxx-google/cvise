@@ -8,120 +8,23 @@ import shutil
 import subprocess
 import tempfile
 
-from cvise.passes.abstract import AbstractPass, BinaryState, PassResult
+from cvise.passes.abstract import AbstractPass, FuzzyBinaryState, PassResult
 from cvise.utils.error import InsaneTestCaseError
 from cvise.utils.misc import CloseableTemporaryFile
 
 
 previous_state = {}
-
-
-def get_available_cores():
-    try:
-        # try to detect only physical cores, ignore HyperThreading
-        # in order to speed up parallel execution
-        core_count = psutil.cpu_count(logical=False)
-        if not core_count:
-            core_count = psutil.cpu_count(logical=True)
-        # respect affinity
-        try:
-            affinity = len(psutil.Process().cpu_affinity())
-            assert affinity >= 1
-        except AttributeError:
-            return core_count
-
-        if core_count:
-            core_count = min(core_count, affinity)
-        else:
-            core_count = affinity
-        return core_count
-    except NotImplementedError:
-        return 1
-
-CORES = get_available_cores()
-
-def choose_success_history_size():
-    # Chosen heuristically to make the algorithm sufficiently adaptive: to keep
-    # trying around the recently observed big successful leaps, but without
-    # being stuck too long if no more such successes occur.
-    #
-    # The formula can be treated as mostly empirical. However, some grounding
-    # for it can be loosely derived from Chebyshev's inequality in a similar way
-    # as the statistics' "rule of three", if we aim for the "one of the parallel
-    # processes successfully improves the window's maximum" event's probability
-    # to be bounded at 50% with 99% confidence. The analytical solution in this
-    # model would be "10 / (1 - 0.5 ** (1 / CORES))", but we roughly
-    # approximated it with this very simple formula.
-    return 15 * CORES
-
-def choose_rnd_peak():
-    if not success_history:
-        return None
-    return max(success_history)
-
-class LineState(BinaryState):
-    def __repr__(self):
-        return f'LineState(chunk={self.chunk} index={self.index} instances={self.instances}, tp={self.tp})'
-
-    def reset_hint(self):
-        global previous_state
-        previous_state = {}
-
-    @staticmethod
-    def create(instances):
-        global success_history
-        success_history = collections.deque(maxlen=choose_success_history_size())
-
-        if not instances:
-            return None
-        self = LineState()
-        self.instances = instances
-        self.chunk = instances
-        self.index = 0
-        self.tp = 0
-        self.rnd_chunk = None
-        return self
-    
-    def advance(self):
-        success_history.append(0)
-        state = copy.copy(self)
-        if state.tp == 0:
-            state.tp += 1
-            state.prepare_rnd_step()
-            return state
-        bi = super().advance()
-        if not bi:
-            return None
-        state.index = bi.index
-        state.chunk = bi.chunk
-        state.tp = 0
-        return state
-    
-    def advance_on_success(self, instances):
-        success_history.append(self.instances - instances)
-        state = copy.copy(self)
-        state.instances = instances
-        state.tp = 0
-        if state.index >= state.instances:
-            return state.advance()
-        else:
-            return state
-
-    def prepare_rnd_step(self):
-        self.rnd_chunk = None
-        peak = choose_rnd_peak()
-        if peak is None:
-            peak = 1
-        le = min(self.chunk, self.instances)
-        ri = self.instances
-        peak = max(peak, le)
-        peak = min(peak, ri)
-        while self.rnd_chunk is None or self.rnd_chunk < le or self.rnd_chunk > ri:
-            self.rnd_chunk = round(random.gauss(peak, peak))
+previous_success = {}
 
 class LinesPass(AbstractPass):
     def check_prerequisites(self):
         return self.check_external_program('topformflat')
+
+    def reset_hint(self):
+        global previous_state
+        global previous_success
+        previous_state = {}
+        previous_success = {}
 
     def __format(self, test_case, check_sanity):
         tmp = os.path.dirname(test_case)
@@ -182,10 +85,13 @@ class LinesPass(AbstractPass):
                 logging.warning('Skipping pass as sanity check fails for topformflat output')
                 return None
         instances = self.__count_instances(test_case)
-        state = LineState.create(instances)
-        if self.arg in previous_state and previous_state[self.arg] is not None and previous_state[self.arg].chunk <= instances:
-            logging.info(f'LinesPass.new: hint to start from chunk={previous_state[self.arg].chunk} instead of {state.chunk}')
-            state.chunk = previous_state[self.arg].chunk
+        state = FuzzyBinaryState.create(instances)
+        hint_state = previous_success.get(self.arg) or previous_state.get(self.arg)
+        if state and hint_state and hint_state.chunk <= state.instances:
+            logging.info(f'LinesPass.new: hint to start from chunk={hint_state.chunk} instead of {state.chunk}')
+            state.chunk = hint_state.chunk
+        previous_success.pop(self.arg, None)
+        previous_state[self.arg] = state
         return state
 
     def advance(self, test_case, state):
@@ -194,14 +100,16 @@ class LinesPass(AbstractPass):
         return state
 
     def advance_on_success(self, test_case, state):
+        if not previous_success.get(self.arg):
+            logging.info(f'advance_on_success: storing hint on {state}')
+            previous_success[self.arg] = state
         old = copy.copy(state)
         state = state.advance_on_success(self.__count_instances(test_case))
         logging.info(f'advance_on_success: delta={old.instances-state.instances} chunk={old.chunk if old.tp==0 else old.rnd_chunk} tp={old.tp}')
-        previous_state[self.arg] = state
         return state
 
     def transform(self, test_case, state, process_event_notifier):
-        # logging.info(f'[{os.getpid()}] LinesPass.transform: BEGIN{{')
+        # logging.info(f'[{os.getpid()}] LinesPass.transform: BEGIN{{: state={state}')
         with open(test_case) as in_file:
             data = in_file.readlines()
         # logging.info(f'[{os.getpid()}] LinesPass.transform: read')

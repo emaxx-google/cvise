@@ -1,6 +1,9 @@
 import copy
+import collections
 from enum import auto, Enum, unique
 import logging
+import psutil
+import random
 import shutil
 import subprocess
 
@@ -106,6 +109,111 @@ class AbstractPass:
 
     def transform(self, test_case, state, process_event_notifier):
         raise NotImplementedError(f"Class {type(self).__name__} has not implemented 'transform'!")
+
+def get_available_cores():
+    try:
+        # try to detect only physical cores, ignore HyperThreading
+        # in order to speed up parallel execution
+        core_count = psutil.cpu_count(logical=False)
+        if not core_count:
+            core_count = psutil.cpu_count(logical=True)
+        # respect affinity
+        try:
+            affinity = len(psutil.Process().cpu_affinity())
+            assert affinity >= 1
+        except AttributeError:
+            return core_count
+
+        if core_count:
+            core_count = min(core_count, affinity)
+        else:
+            core_count = affinity
+        return core_count
+    except NotImplementedError:
+        return 1
+
+CORES = get_available_cores()
+
+class FuzzyBinaryState(BinaryState):
+    def __repr__(self):
+        return f'FuzzyBinaryState(chunk={self.chunk} index={self.index} instances={self.instances} tp={self.tp} rnd_chunk={self.rnd_chunk})'
+
+    @staticmethod
+    def choose_success_history_size():
+        # Chosen heuristically to make the algorithm sufficiently adaptive: to keep
+        # trying around the recently observed big successful leaps, but without
+        # being stuck too long if no more such successes occur.
+        #
+        # The formula can be treated as mostly empirical. However, some grounding
+        # for it can be loosely derived from Chebyshev's inequality in a similar way
+        # as the statistics' "rule of three", if we aim for the "one of the parallel
+        # processes successfully improves the window's maximum" event's probability
+        # to be bounded at 50% with 99% confidence. The analytical solution in this
+        # model would be "10 / (1 - 0.5 ** (1 / CORES))", but we roughly
+        # approximated it with this very simple formula.
+        #
+        # TODO: doubling because half of runs are non-random.
+        return 15 * CORES * 2
+
+    @staticmethod
+    def create(instances):
+        global success_history
+        success_history = collections.deque(maxlen=FuzzyBinaryState.choose_success_history_size())
+
+        if not instances:
+            return None
+        self = FuzzyBinaryState()
+        self.instances = instances
+        self.chunk = instances
+        self.index = 0
+        self.tp = 0
+        self.rnd_chunk = None
+        return self
+    
+    def advance(self):
+        success_history.append(0)
+        state = copy.copy(self)
+        if state.tp == 0:
+            state.tp += 1
+            state.prepare_rnd_step()
+            return state
+        bi = super().advance()
+        if not bi:
+            return None
+        state.index = bi.index
+        state.chunk = bi.chunk
+        state.tp = 0
+        state.rnd_chunk = None
+        return state
+    
+    def advance_on_success(self, instances):
+        success_history.append(self.instances - instances)
+        state = copy.copy(self)
+        state.instances = instances
+        state.tp = 0
+        state.rnd_chunk = None
+        if state.index >= state.instances:
+            return state.advance()
+        else:
+            return state
+
+    @staticmethod
+    def choose_rnd_peak():
+        if not success_history:
+            return None
+        return max(success_history)
+
+    def prepare_rnd_step(self):
+        self.rnd_chunk = None
+        peak = self.choose_rnd_peak()
+        if peak is None:
+            peak = 1
+        le = min(self.chunk, self.instances)
+        ri = self.instances
+        peak = max(peak, le)
+        peak = min(peak, ri)
+        while self.rnd_chunk is None or self.rnd_chunk < le or self.rnd_chunk > ri:
+            self.rnd_chunk = round(random.gauss(peak, peak))
 
 
 @unique

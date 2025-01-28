@@ -1,3 +1,4 @@
+import copy
 import logging
 import os
 import re
@@ -5,12 +6,13 @@ import shutil
 import subprocess
 import time
 
-from cvise.passes.abstract import AbstractPass, BinaryState, PassResult
+from cvise.passes.abstract import AbstractPass, FuzzyBinaryState, PassResult
 from cvise.utils.misc import CloseableTemporaryFile
 
 
 previous_clang_delta_std = None
 previous_state = {}
+previous_success = {}
 
 
 class ClangBinarySearchPass(AbstractPass):
@@ -18,7 +20,9 @@ class ClangBinarySearchPass(AbstractPass):
 
     def reset_hint(self):
         global previous_state
+        global previous_success
         previous_state = {}
+        previous_success = {}
 
     def check_prerequisites(self):
         return self.check_external_program('clang_delta')
@@ -51,10 +55,13 @@ class ClangBinarySearchPass(AbstractPass):
             self.detect_best_standard(test_case)
             previous_clang_delta_std = self.clang_delta_std
         instances = self.count_instances(test_case)
-        state = BinaryState.create(instances)
-        if self.arg in previous_state and previous_state[self.arg] is not None and previous_state[self.arg].chunk <= instances:
-            logging.info(f'ClangBinarySearchPass.new: hint to start from chunk={previous_state[self.arg].chunk} instead of {state.chunk}')
-            state.chunk = previous_state[self.arg].chunk
+        state = FuzzyBinaryState.create(instances)
+        hint_state = previous_success.get(self.arg) or previous_state.get(self.arg)
+        if state and hint_state and hint_state.chunk <= state.instances:
+            logging.info(f'ClangBinarySearchPass.new: hint to start from chunk={hint_state.chunk} instead of {state.chunk}')
+            state.chunk = hint_state.chunk
+        previous_success.pop(self.arg, None)
+        previous_state[self.arg] = state
         return state
 
     def advance(self, test_case, state):
@@ -63,11 +70,15 @@ class ClangBinarySearchPass(AbstractPass):
         return state
 
     def advance_on_success(self, test_case, state):
+        if not previous_success.get(self.arg):
+            logging.info(f'advance_on_success: storing hint on {state}')
+            previous_success[self.arg] = state
+        old = copy.copy(state)
         instances = state.real_num_instances - state.real_chunk()
         state = state.advance_on_success(instances)
         if state:
             state.real_num_instances = None
-        previous_state[self.arg] = state
+        logging.info(f'advance_on_success: delta={old.instances-state.instances} chunk={old.chunk if old.tp==0 else old.rnd_chunk} tp={old.tp}')
         return state
 
     def count_instances(self, test_case):
