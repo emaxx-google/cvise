@@ -254,6 +254,7 @@ class TestManager:
         self.start_with_pass = start_with_pass
         self.skip_after_n_transforms = skip_after_n_transforms
         self.stopping_threshold = stopping_threshold
+        self.tmp_for_best = None
 
         for test_case in test_cases:
             test_case = Path(test_case)
@@ -265,7 +266,6 @@ class TestManager:
 
         self.orig_total_file_size = self.total_file_size
         self.cache = {}
-        self.root = None
         self.roots = []
         self.states = []
         if not self.is_valid_test(self.test_script):
@@ -285,17 +285,11 @@ class TestManager:
     def create_root(self, p=None):
         pass_name = str(p or self.current_pass).replace('::', '-')
         root = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}{pass_name}-')
-        if p is None:
-            self.root = root
-        else:
-            self.roots.append(root)
+        self.roots.append(root)
         logging.debug(f'Creating pass root folder: {root}')
 
     def remove_root(self):
         if not self.save_temps:
-            if self.root:
-                rmfolder(self.root)
-            self.root = None
             for r in self.roots:
                 rmfolder(r)
             self.roots = []
@@ -611,7 +605,8 @@ class TestManager:
                             shutil.copy2(future.result().test_case_path, pa)
                             best_success_env.test_case = pa
                         self.release_future(future)
-                        if success_cnt >= 10 or success_cnt > 0 and order > 30 * self.parallel_tests:
+                        if len(self.states) > 1 and (success_cnt >= 10 or success_cnt > 0 and order > 30 * self.parallel_tests) or \
+                           len(self.states) == 1 and success_cnt > 0:
                             self.current_pass = best_success_pass
                             logging.info(f'run_parallel_tests: proceeding: best size={best_success_env.test_case_path.stat().st_size} improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state}')
                             self.terminate_all(pool)
@@ -673,7 +668,12 @@ class TestManager:
         m = Manager()
         self.pid_queue = m.Queue()
         self.create_root()
+        self.create_root()
         pass_key = repr(self.current_pass)
+        self.last_state_hint = [None]
+        self.successes_hint = [[]]
+        if not self.tmp_for_best:
+            self.tmp_for_best = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}best-')
 
         logging.info(f'===< {self.current_pass} >===')
 
@@ -705,12 +705,12 @@ class TestManager:
                             continue
 
                 # create initial state
-                if desired_pace is None and hasattr(self.current_pass, 'reset_hint'):
-                    self.current_pass.reset_hint()
-                self.state = self.current_pass.new(self.current_test_case, self.check_sanity)
+                new_path = os.path.join(self.roots[1], os.path.basename(self.current_test_case))
+                shutil.copy2(self.current_test_case, new_path)
+                self.states = [self.current_pass.new(new_path, self.check_sanity)]
                 self.skip = False
 
-                while self.state is not None and not self.skip:
+                while self.states[0] is not None and not self.skip:
                     # Ignore more key presses after skip has been detected
                     if not self.skip_key_off and not self.skip:
                         key = logger.pressed_key()
@@ -721,7 +721,8 @@ class TestManager:
                             self.log_key_event('toggle print diff')
                             self.print_diff = not self.print_diff
 
-                    success_env = self.run_parallel_tests()
+                    self.run_test_case_size = self.current_test_case.stat().st_size
+                    success_env = self.run_parallel_tests(passes=[self.current_pass])
                     self.kill_pid_queue()
 
                     if success_env:
@@ -771,11 +772,11 @@ class TestManager:
         self.temporary_folders = {}
         m = Manager()
         self.pid_queue = m.Queue()
-        self.tmp_for_best = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}best-')
-        for p in passes:
-            self.create_root(p)
-        for p in passes:
-            self.create_root(p)
+        if not self.tmp_for_best:
+            self.tmp_for_best = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}best-')
+        for _ in range(2):
+            for p in passes:
+                self.create_root(p)
         # pass_key = repr(self.current_pass)
 
         # logging.info(f'===< {self.current_pass} >===')
@@ -903,7 +904,13 @@ class TestManager:
                 f"Can't find {self.current_test_case} -- did your interestingness test move it?"
             ) from None
 
-        self.state = self.current_pass.advance_on_success(test_env.test_case_path, test_env.state)
+        if len(self.states) == 1:
+            self.states = [self.current_pass.advance_on_success(test_env.test_case_path, test_env.state)]
+            with open(test_env.test_case_path) as f:
+                li = f.readlines()
+            new_path = os.path.join(self.roots[1], os.path.basename(self.current_test_case))
+            logging.info(f'process_result: after advance_on_success: len={len(li)} copy_from={test_env.test_case_path} copy_to={new_path}')
+            shutil.copy2(test_env.test_case_path, new_path)
         # self.pass_statistic.add_success(self.current_pass)
         on_succeeded(self.current_pass, self.total_file_size)
 
