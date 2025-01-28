@@ -157,8 +157,8 @@ class FuzzyBinaryState(BinaryState):
 
     @staticmethod
     def create(instances):
-        global success_history
-        success_history = collections.deque(maxlen=FuzzyBinaryState.choose_success_history_size())
+        # global success_history
+        # success_history = collections.deque(maxlen=FuzzyBinaryState.choose_success_history_size())
 
         if not instances:
             return None
@@ -168,10 +168,17 @@ class FuzzyBinaryState(BinaryState):
         self.index = 0
         self.tp = 0
         self.rnd_chunk = None
+        self.success_history = collections.deque(maxlen=FuzzyBinaryState.choose_success_history_size())
         return self
-    
+
+    def real_chunk(self):
+        if self.tp == 0:
+            return super().real_chunk()
+        else:
+            return self.rnd_chunk
+
     def advance(self):
-        success_history.append(0)
+        self.success_history.append(0)
         state = copy.copy(self)
         if state.tp == 0:
             state.tp += 1
@@ -187,7 +194,7 @@ class FuzzyBinaryState(BinaryState):
         return state
     
     def advance_on_success(self, instances):
-        success_history.append(self.instances - instances)
+        self.success_history.append(self.instances - instances)
         state = copy.copy(self)
         state.instances = instances
         state.tp = 0
@@ -197,11 +204,10 @@ class FuzzyBinaryState(BinaryState):
         else:
             return state
 
-    @staticmethod
-    def choose_rnd_peak():
-        if not success_history:
+    def choose_rnd_peak(self):
+        if not self.success_history:
             return None
-        return max(success_history)
+        return max(self.success_history)
 
     def prepare_rnd_step(self):
         self.rnd_chunk = None

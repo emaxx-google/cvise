@@ -1,5 +1,6 @@
 import collections
 from concurrent.futures import FIRST_COMPLETED, wait
+import copy
 import difflib
 from enum import auto, Enum, unique
 import filecmp
@@ -83,6 +84,8 @@ class TestEnvironment:
         for test_case in all_test_cases:
             (self.folder / test_case.parent).mkdir(parents=True, exist_ok=True)
             shutil.copy2(test_case, self.folder / test_case.parent)
+        shutil.copy2(self.test_case, self.folder / test_case.parent)
+        self.test_case = os.path.basename(self.test_case)
 
     @property
     def size_improvement(self):
@@ -263,6 +266,8 @@ class TestManager:
         self.orig_total_file_size = self.total_file_size
         self.cache = {}
         self.root = None
+        self.roots = []
+        self.states = []
         if not self.is_valid_test(self.test_script):
             raise InvalidInterestingnessTestError(self.test_script)
 
@@ -277,14 +282,23 @@ class TestManager:
             == 0
         )
 
-    def create_root(self):
-        pass_name = str(self.current_pass).replace('::', '-')
-        self.root = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}{pass_name}-')
-        logging.debug(f'Creating pass root folder: {self.root}')
+    def create_root(self, p=None):
+        pass_name = str(p or self.current_pass).replace('::', '-')
+        root = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}{pass_name}-')
+        if p is None:
+            self.root = root
+        else:
+            self.roots.append(root)
+        logging.debug(f'Creating pass root folder: {root}')
 
     def remove_root(self):
         if not self.save_temps:
-            rmfolder(self.root)
+            if self.root:
+                rmfolder(self.root)
+            self.root = None
+            for r in self.roots:
+                rmfolder(r)
+            self.roots = []
 
     def restore_mode(self):
         for test_case in self.test_cases:
@@ -454,6 +468,7 @@ class TestManager:
 
     def release_future(self, future):
         self.futures.remove(future)
+        self.future_to_pass.pop(future, None)
         self.release_folder(future)
 
     def save_extra_dir(self, test_case_path):
@@ -489,7 +504,6 @@ class TestManager:
                 test_env = future.result()
                 outcome = self.check_pass_result(test_env)
                 if outcome == PassCheckingOutcome.ACCEPT:
-                    quit_loop = True
                     new_futures.add(future)
                 elif outcome == PassCheckingOutcome.IGNORE:
                     pass
@@ -505,15 +519,18 @@ class TestManager:
         return quit_loop
 
     def wait_for_first_success(self):
+        logging.info(f'wait_for_first_success: BEGIN{{')
         for future in self.futures:
             try:
                 test_env = future.result()
                 outcome = self.check_pass_result(test_env)
                 if outcome == PassCheckingOutcome.ACCEPT:
+                    logging.info(f'wait_for_first_success: }}END: success')
                     return test_env
             # starting with Python 3.11: concurrent.futures.TimeoutError == TimeoutError
             except (TimeoutError, concurrent.futures.TimeoutError):
                 pass
+        logging.info(f'wait_for_first_success: }}END: none')
         return None
 
     def check_pass_result(self, test_env):
@@ -529,7 +546,7 @@ class TestManager:
                 return PassCheckingOutcome.IGNORE
             return PassCheckingOutcome.ACCEPT
 
-        self.pass_statistic.add_failure(self.current_pass)
+        # self.pass_statistic.add_failure(self.current_pass)
         if test_env.result == PassResult.OK:
             assert test_env.exitcode
             if self.also_interesting is not None and test_env.exitcode == self.also_interesting:
@@ -553,14 +570,20 @@ class TestManager:
         pool.stop()
         pool.join()
 
-    def run_parallel_tests(self):
+    def run_parallel_tests(self, passes=None):
         assert not self.futures
         assert not self.temporary_folders
+        self.future_to_pass = {}
         with pebble.ProcessPool(max_workers=self.parallel_tests) as pool:
             order = 1
             self.timeout_count = 0
             self.giveup_reported = False
-            while self.state is not None:
+            success_cnt = 0
+            best_success_env = None
+            best_success_pass = None
+            best_success_improv = None
+            while any(self.states):
+                # logging.info(f'run_parallel_tests: true states cnt {len(list(filter(None, self.states)))} success_cnt={success_cnt}')
                 # do not create too many states
                 if len(self.futures) >= self.parallel_tests:
                     wait(self.futures, return_when=FIRST_COMPLETED)
@@ -571,39 +594,62 @@ class TestManager:
                     self.terminate_all(pool)
                     return success
 
-                # if self.current_pass.min_transforms is not None and self.success_count >= self.current_pass.min_transforms and random.random() < 0.01 and not is_pace_good(self.current_pass, desired_pace):
-                if desired_pace is not None and random.random() < 1/self.parallel_tests and not is_pace_good(self.current_pass, desired_pace):
-                    logging.info(f'run_parallel_tests: BAILING OUT')
-                    self.terminate_all(pool)
-                    return None
+                tmp_futures = copy.copy(self.futures)
+                for future in tmp_futures:
+                    if future.done() and not future.exception() and self.check_pass_result(future.result()) == PassCheckingOutcome.ACCEPT:
+                        success_cnt += 1
+                        improv = self.run_test_case_size - future.result().test_case_path.stat().st_size
+                        pass_ = self.future_to_pass[future]
+                        pass_id = passes.index(pass_)
+                        logging.info(f'observed success success_cnt={success_cnt} size={future.result().test_case_path.stat().st_size} improv={improv} pass={pass_} state={future.result().state} order={order}')
+                        self.successes_hint[pass_id].append(future.result().state)
+                        if best_success_improv is None or improv > best_success_improv:
+                            best_success_env = future.result()
+                            best_success_pass = pass_
+                            best_success_improv = improv
+                            pa = os.path.join(self.tmp_for_best, os.path.basename(future.result().test_case_path))
+                            shutil.copy2(future.result().test_case_path, pa)
+                            best_success_env.test_case = pa
+                        self.release_future(future)
+                        if success_cnt >= 10 or success_cnt > 0 and order > 30 * self.parallel_tests:
+                            self.current_pass = best_success_pass
+                            logging.info(f'run_parallel_tests: proceeding: best size={best_success_env.test_case_path.stat().st_size} improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state}')
+                            self.terminate_all(pool)
+                            return best_success_env
 
-                folder = Path(tempfile.mkdtemp(prefix=self.TEMP_PREFIX, dir=self.root))
+                pass_id = (order - 1) % len(passes)
+                if not self.states[pass_id]:
+                    order += 1
+                    continue
+                folder = Path(tempfile.mkdtemp(prefix=self.TEMP_PREFIX, dir=self.roots[pass_id]))
                 test_env = TestEnvironment(
-                    self.state,
+                    self.states[pass_id],
                     order,
                     self.test_script,
                     folder,
-                    self.current_test_case,
+                    Path(os.path.join(self.roots[pass_id+len(passes)], os.path.basename(self.current_test_case))),
                     self.test_cases,
-                    self.current_pass.transform,
+                    passes[pass_id].transform,
                     self.pid_queue,
                 )
                 future = pool.schedule(test_env.run, timeout=self.timeout)
+                self.future_to_pass[future] = passes[pass_id]
+                assert future not in self.temporary_folders
                 self.temporary_folders[future] = folder
                 self.futures.append(future)
-                self.pass_statistic.add_executed(self.current_pass)
-                on_scheduled(self.current_pass, self.total_file_size)
+                # self.pass_statistic.add_executed(self.current_pass)
+                # on_scheduled(self.current_pass, self.total_file_size)
                 order += 1
                 if order % 1000 == 0:
                     logging.info(f'pulse: order={order}')
-                state = self.current_pass.advance(self.current_test_case, self.state)
-                # we are at the end of enumeration
-                if state is None:
-                    success = self.wait_for_first_success()
-                    self.terminate_all(pool)
-                    return success
-                else:
-                    self.state = state
+                state = passes[pass_id].advance(self.current_test_case, self.states[pass_id])
+                self.states[pass_id] = state
+                self.last_state_hint[pass_id] = state
+
+            # we are at the end of enumeration
+            self.current_pass = best_success_pass
+            self.terminate_all(pool)
+            return best_success_env
 
     def set_desired_pace(self, pace):
         global desired_pace
@@ -634,7 +680,7 @@ class TestManager:
         if self.total_file_size == 0:
             raise ZeroSizeError(self.test_cases)
 
-        self.pass_statistic.start(self.current_pass)
+        # self.pass_statistic.start(self.current_pass)
         if not self.skip_key_off:
             logger = KeyLogger()
 
@@ -712,12 +758,135 @@ class TestManager:
                         self.cache[pass_key][test_case_before_pass] = tmp_file.read()
 
             self.restore_mode()
-            self.pass_statistic.stop(self.current_pass)
+            # self.pass_statistic.stop(self.current_pass)
             self.remove_root()
         except KeyboardInterrupt:
             logging.info('Exiting now ...')
             self.remove_root()
             sys.exit(1)
+
+    def run_concurrent_passes(self, passes):
+        # self.current_pass = pass_
+        self.futures = []
+        self.temporary_folders = {}
+        m = Manager()
+        self.pid_queue = m.Queue()
+        self.tmp_for_best = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}best-')
+        for p in passes:
+            self.create_root(p)
+        for p in passes:
+            self.create_root(p)
+        # pass_key = repr(self.current_pass)
+
+        # logging.info(f'===< {self.current_pass} >===')
+
+        if self.total_file_size == 0:
+            raise ZeroSizeError(self.test_cases)
+
+        # self.pass_statistic.start(self.current_pass)
+        if not self.skip_key_off:
+            logger = KeyLogger()
+
+        self.last_state_hint = [None] * len(passes)
+        self.successes_hint = [[] for _ in range(len(passes))]
+
+        try:
+            for test_case in self.sorted_test_cases:
+                self.current_test_case = test_case
+                starting_test_case_size = test_case.stat().st_size
+                self.success_count = 0
+
+                if self.get_file_size([test_case]) == 0:
+                    continue
+
+                # if not self.no_cache:
+                #     with open(test_case, mode='rb+') as tmp_file:
+                #         test_case_before_pass = tmp_file.read()
+
+                #         if pass_key in self.cache and test_case_before_pass in self.cache[pass_key]:
+                #             tmp_file.seek(0)
+                #             tmp_file.truncate(0)
+                #             tmp_file.write(self.cache[pass_key][test_case_before_pass])
+                #             logging.info(f'cache hit for {test_case}')
+                #             continue
+
+                # create initial state
+                self.init_all_passes(passes)
+                self.skip = False
+
+                while any(self.states) and not self.skip:
+                    # Ignore more key presses after skip has been detected
+                    if not self.skip_key_off and not self.skip:
+                        key = logger.pressed_key()
+                        if key == 's':
+                            self.skip = True
+                            self.log_key_event('skipping the rest of this pass')
+                        elif key == 'd':
+                            self.log_key_event('toggle print diff')
+                            self.print_diff = not self.print_diff
+
+                    self.run_test_case_size = self.current_test_case.stat().st_size
+                    success_env = self.run_parallel_tests(passes)
+                    self.kill_pid_queue()
+
+                    if success_env:
+                        self.process_result(success_env)
+                        self.success_count += 1
+
+                    # if the file increases significantly, bail out the current pass
+                    test_case_size = self.current_test_case.stat().st_size
+                    if test_case_size >= MAX_PASS_INCREASEMENT_THRESHOLD * starting_test_case_size:
+                        logging.info(
+                            f'skipping the rest of the pass (huge file increasement '
+                            f'{MAX_PASS_INCREASEMENT_THRESHOLD * 100}%)'
+                        )
+                        break
+
+                    self.release_folders()
+                    self.futures.clear()
+                    if not success_env:
+                        break
+
+                    # skip after N transformations if requested
+                    # if (self.skip_after_n_transforms and self.success_count >= self.skip_after_n_transforms) or (
+                    #     self.current_pass.max_transforms and self.success_count >= self.current_pass.max_transforms
+                    # ):
+                    #     logging.info(f'skipping after {self.success_count} successful transformations')
+                    #     break
+
+                    self.init_all_passes(passes)
+
+                # Cache result of this pass
+                # if not self.no_cache:
+                #     with open(test_case, mode='rb') as tmp_file:
+                #         if pass_key not in self.cache:
+                #             self.cache[pass_key] = {}
+
+                #         self.cache[pass_key][test_case_before_pass] = tmp_file.read()
+
+            self.restore_mode()
+            # self.pass_statistic.stop(self.current_pass)
+            self.remove_root()
+        except KeyboardInterrupt:
+            logging.info('Exiting now ...')
+            self.remove_root()
+            sys.exit(1)
+
+    def init_all_passes(self, passes):
+        self.states = []
+        with pebble.ProcessPool(max_workers=len(passes)) as pool:
+            futures = []
+            for i, p in enumerate(passes):
+                new_path = os.path.join(self.roots[i+len(passes)], os.path.basename(self.current_test_case))
+                shutil.copy2(self.current_test_case, new_path)
+                env = SetupEnvironment(p, self.test_script, new_path, self.test_cases, self.save_temps,
+                                       self.last_state_hint[i], self.successes_hint[i])
+                self.successes_hint[i] = []
+                futures.append(pool.schedule(env.execute))
+            for fu in futures:
+                state = fu.result()
+                self.states.append(state)
+                self.last_state_hint[i] = state
 
     def process_result(self, test_env):
         if self.print_diff:
@@ -727,6 +896,7 @@ class TestManager:
             logging.info(diff_str)
 
         try:
+            logging.info(f'copying {test_env.test_case_path} to {self.current_test_case}')
             shutil.copy(test_env.test_case_path, self.current_test_case)
         except FileNotFoundError:
             raise RuntimeError(
@@ -734,7 +904,7 @@ class TestManager:
             ) from None
 
         self.state = self.current_pass.advance_on_success(test_env.test_case_path, test_env.state)
-        self.pass_statistic.add_success(self.current_pass)
+        # self.pass_statistic.add_success(self.current_pass)
         on_succeeded(self.current_pass, self.total_file_size)
 
         pct = 100 - (self.total_file_size * 100.0 / self.orig_total_file_size)
@@ -747,3 +917,34 @@ class TestManager:
             notes.append(str(test_env.test_case))
 
         logging.info('(' + ', '.join(notes) + ')')
+
+
+class SetupEnvironment:
+    def __init__(self, pass_, test_script, test_case, test_cases, save_temps, last_state_hint, successes_hint):
+        self.pass_ = pass_
+        self.test_script = test_script
+        self.test_case = test_case
+        self.test_cases = test_cases
+        self.save_temps = save_temps
+        self.last_state_hint = last_state_hint
+        self.successes_hint = successes_hint
+    
+    def execute(self):
+        return self.pass_.new(self.test_case, self.check_sanity, last_state_hint=self.last_state_hint,
+                              successes_hint=self.successes_hint)
+
+    def check_sanity(self, verbose=False):
+        logging.debug('perform sanity check... ')
+
+        folder = Path(tempfile.mkdtemp(prefix=f'{TestManager.TEMP_PREFIX}sanity-'))
+        test_env = TestEnvironment(None, 0, self.test_script, folder, list(self.test_cases)[0], self.test_cases, None)
+        logging.debug(f'sanity check tmpdir = {test_env.folder}')
+
+        returncode = test_env.run_test(verbose)
+        if returncode == 0:
+            rmfolder(folder)
+            logging.debug('sanity check successful')
+        else:
+            if not self.save_temps:
+                rmfolder(folder)
+            raise InsaneTestCaseError(self.test_cases, self.test_script)

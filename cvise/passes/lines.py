@@ -13,18 +13,9 @@ from cvise.utils.error import InsaneTestCaseError
 from cvise.utils.misc import CloseableTemporaryFile
 
 
-previous_state = {}
-previous_success = {}
-
 class LinesPass(AbstractPass):
     def check_prerequisites(self):
         return self.check_external_program('topformflat')
-
-    def reset_hint(self):
-        global previous_state
-        global previous_success
-        previous_state = {}
-        previous_success = {}
 
     def __format(self, test_case, check_sanity):
         tmp = os.path.dirname(test_case)
@@ -59,7 +50,7 @@ class LinesPass(AbstractPass):
                     try:
                         check_sanity()
                     except InsaneTestCaseError:
-                        # logging.info('InsaneTestCaseError')
+                        logging.info('LinesPass.__format: InsaneTestCaseError')
                         pass
                     else:
                         # logging.info(f'taking {candidate} out of {candidates}')
@@ -69,14 +60,14 @@ class LinesPass(AbstractPass):
                 if self.arg != '0':
                     self.bailout = True
             else:
-                shutil.copy(tmp_file.name, test_case)
+                shutil.copy(stripped_tmp_file.name, test_case)
 
     def __count_instances(self, test_case):
         with open(test_case) as in_file:
             lines = in_file.readlines()
             return len(lines)
 
-    def new(self, test_case, check_sanity=None):
+    def new(self, test_case, check_sanity=None, last_state_hint=None, successes_hint=None):
         self.bailout = False
         # None means no topformflat
         if self.arg != 'None':
@@ -85,33 +76,29 @@ class LinesPass(AbstractPass):
                 logging.warning('Skipping pass as sanity check fails for topformflat output')
                 return None
         instances = self.__count_instances(test_case)
+        # logging.info(f'[{os.getpid()}] LinesPass.new: test_case={test_case} arg={self.arg} formatted_len={instances}')
         state = FuzzyBinaryState.create(instances)
-        hint_state = previous_success.get(self.arg) or previous_state.get(self.arg)
-        if state and hint_state and hint_state.chunk <= state.instances:
-            logging.info(f'LinesPass.new: hint to start from chunk={hint_state.chunk} instead of {state.chunk}')
-            state.chunk = hint_state.chunk
-        previous_success.pop(self.arg, None)
-        previous_state[self.arg] = state
+        hint_from_last = last_state_hint.chunk if last_state_hint else None
+        hint_from_successes = max([s.real_chunk() for s in successes_hint], default=None) if successes_hint else None
+        hint = max(list(filter(None, [hint_from_last, hint_from_successes])), default=None)
+        if state and hint and hint < state.instances:
+            logging.info(f'LinesPass.new: arg={self.arg} hint to start from chunk={hint} instead of {state.chunk} hint_from_last={hint_from_last} hint_from_successes={hint_from_successes}')
+            state.chunk = hint
         return state
 
     def advance(self, test_case, state):
-        state = state.advance()
-        previous_state[self.arg] = state
-        return state
+        return state.advance()
 
     def advance_on_success(self, test_case, state):
-        if not previous_success.get(self.arg):
-            logging.info(f'advance_on_success: storing hint on {state}')
-            previous_success[self.arg] = state
         old = copy.copy(state)
         state = state.advance_on_success(self.__count_instances(test_case))
-        logging.info(f'advance_on_success: delta={old.instances-state.instances} chunk={old.chunk if old.tp==0 else old.rnd_chunk} tp={old.tp}')
+        logging.info(f'LinesPass.advance_on_success: delta={old.instances-state.instances} chunk={old.chunk if old.tp==0 else old.rnd_chunk} tp={old.tp}')
         return state
 
     def transform(self, test_case, state, process_event_notifier):
-        # logging.info(f'[{os.getpid()}] LinesPass.transform: BEGIN{{: state={state}')
         with open(test_case) as in_file:
             data = in_file.readlines()
+        # logging.info(f'[{os.getpid()}] LinesPass.transform: test_case={test_case} arg={self.arg} state={state} len={len(data)}')
         # logging.info(f'[{os.getpid()}] LinesPass.transform: read')
 
         old_len = len(data)
@@ -129,7 +116,9 @@ class LinesPass(AbstractPass):
             assert state.rnd_chunk > 0
             # logging.info(f'state={state} start={start} rnd_chunk={state.rnd_chunk}')
             data = data[0 : start] + data[start + state.rnd_chunk :]
-        assert len(data) < old_len
+        if len(data) >= old_len:
+            logging.info(f'state={state}')
+            assert False
         # logging.info(f'[{os.getpid()}] LinesPass.transform: copied')
 
         tmp = os.path.dirname(test_case)
