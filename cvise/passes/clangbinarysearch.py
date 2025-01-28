@@ -14,7 +14,7 @@ previous_state = {}
 
 
 class ClangBinarySearchPass(AbstractPass):
-    QUERY_TIMEOUT = 10
+    QUERY_TIMEOUT = 100
 
     def reset_hint(self):
         global previous_state
