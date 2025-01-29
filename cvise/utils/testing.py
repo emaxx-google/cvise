@@ -255,6 +255,8 @@ class TestManager:
         self.skip_after_n_transforms = skip_after_n_transforms
         self.stopping_threshold = stopping_threshold
         self.tmp_for_best = None
+        self.current_pass = None
+        self.current_passes = None
 
         for test_case in test_cases:
             test_case = Path(test_case)
@@ -780,12 +782,14 @@ class TestManager:
             self.restore_mode()
             # self.pass_statistic.stop(self.current_pass)
             self.remove_root()
+            self.current_passes = None
         except KeyboardInterrupt:
             logging.info('Exiting now ...')
             self.remove_root()
             sys.exit(1)
 
     def run_concurrent_passes(self, passes):
+        self.current_pass = None
         self.current_passes = passes
         self.futures = []
         self.temporary_folders = {}
@@ -887,6 +891,8 @@ class TestManager:
             self.restore_mode()
             # self.pass_statistic.stop(self.current_pass)
             self.remove_root()
+            self.current_pass = None
+            self.current_passes = None
         except KeyboardInterrupt:
             logging.info('Exiting now ...')
             self.remove_root()
