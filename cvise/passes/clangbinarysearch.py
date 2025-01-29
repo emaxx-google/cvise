@@ -64,6 +64,8 @@ class ClangBinarySearchPass(AbstractPass):
         hint_from_last = last_state_hint.chunk if last_state_hint else None
         hint_from_successes = max([s.real_chunk() for s in successes_hint], default=None) if successes_hint else None
         hint = max(list(filter(None, [hint_from_last, hint_from_successes])), default=None)
+        if last_state_hint:
+            state.success_history = last_state_hint.success_history
         if state and hint and hint < state.instances:
             logging.info(f'ClangBinarySearchPass.new: arg={self.arg} hint to start from chunk={hint} instead of {state.chunk} hint_from_last={hint_from_last} hint_from_successes={hint_from_successes}')
             state.chunk = hint

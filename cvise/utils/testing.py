@@ -369,6 +369,7 @@ class TestManager:
         """Create pass report bug and return True if the directory is created."""
 
         if not self.die_on_pass_bug:
+            assert self.current_pass
             logging.warning(f'{self.current_pass} has encountered a non fatal bug: {problem}')
 
         crash_dir = self.get_extra_dir(self.BUG_DIR_PREFIX, self.MAX_CRASH_DIRS)
@@ -491,18 +492,25 @@ class TestManager:
                         if self.timeout_count >= self.MAX_TIMEOUTS:
                             logging.warning('Maximum number of timeout were reached: %d' % self.MAX_TIMEOUTS)
                             quit_loop = True
+                            p = self.future_to_pass[future]
+                            self.states[self.current_passes.index(p)] = None
                         continue
                     else:
                         raise future.exception()
 
                 test_env = future.result()
+                opass = self.current_pass
+                self.current_pass = self.future_to_pass[future]
                 outcome = self.check_pass_result(test_env)
+                self.current_pass = opass
                 if outcome == PassCheckingOutcome.ACCEPT:
                     new_futures.add(future)
                 elif outcome == PassCheckingOutcome.IGNORE:
                     pass
                 elif outcome == PassCheckingOutcome.QUIT_LOOP:
                     quit_loop = True
+                    p = self.future_to_pass[future]
+                    self.states[self.current_passes.index(p)] = None
             else:
                 new_futures.add(future)
 
@@ -583,34 +591,44 @@ class TestManager:
                     wait(self.futures, return_when=FIRST_COMPLETED)
 
                 quit_loop = self.process_done_futures()
-                if quit_loop:
-                    success = self.wait_for_first_success()
-                    self.terminate_all(pool)
-                    return success
+                if quit_loop and len(self.current_passes) == 1:
+                    if success_cnt > 0:
+                        self.current_pass = best_success_pass
+                        logging.info(f'run_parallel_tests: proceeding on quit_loop: best size={best_success_env.test_case_path.stat().st_size} improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state}')
+                        self.terminate_all(pool)
+                        return best_success_env
+                    else:
+                        success = self.wait_for_first_success()
+                        self.terminate_all(pool)
+                        return success
 
                 tmp_futures = copy.copy(self.futures)
                 for future in tmp_futures:
-                    if future.done() and not future.exception() and self.check_pass_result(future.result()) == PassCheckingOutcome.ACCEPT:
-                        success_cnt += 1
-                        improv = self.run_test_case_size - future.result().test_case_path.stat().st_size
+                    if future.done() and not future.exception():
                         pass_ = self.future_to_pass[future]
-                        pass_id = passes.index(pass_)
-                        logging.info(f'observed success success_cnt={success_cnt} size={future.result().test_case_path.stat().st_size} improv={improv} pass={pass_} state={future.result().state} order={order}')
-                        self.successes_hint[pass_id].append(future.result().state)
-                        if best_success_improv is None or improv > best_success_improv:
-                            best_success_env = future.result()
-                            best_success_pass = pass_
-                            best_success_improv = improv
-                            pa = os.path.join(self.tmp_for_best, os.path.basename(future.result().test_case_path))
-                            shutil.copy2(future.result().test_case_path, pa)
-                            best_success_env.test_case = pa
-                        self.release_future(future)
-                        if len(self.states) > 1 and (success_cnt >= 10 or success_cnt > 0 and order > 30 * self.parallel_tests) or \
-                           len(self.states) == 1 and success_cnt > 0:
-                            self.current_pass = best_success_pass
-                            logging.info(f'run_parallel_tests: proceeding: best size={best_success_env.test_case_path.stat().st_size} improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state}')
-                            self.terminate_all(pool)
-                            return best_success_env
+                        self.current_pass = pass_
+                        if self.check_pass_result(future.result()) == PassCheckingOutcome.ACCEPT:
+                            success_cnt += 1
+                            improv = self.run_test_case_size - future.result().test_case_path.stat().st_size
+                            pass_id = passes.index(pass_)
+                            logging.info(f'observed success success_cnt={success_cnt} size={future.result().test_case_path.stat().st_size} improv={improv} pass={pass_} state={future.result().state} order={order}')
+                            self.successes_hint[pass_id].append(future.result().state)
+                            if best_success_improv is None or improv > best_success_improv:
+                                best_success_env = future.result()
+                                best_success_pass = pass_
+                                best_success_improv = improv
+                                pa = os.path.join(self.tmp_for_best, os.path.basename(future.result().test_case_path))
+                                shutil.copy2(future.result().test_case_path, pa)
+                                best_success_env.test_case = pa
+                            self.release_future(future)
+                        self.current_pass = None
+
+                if success_cnt >= 10 and order >= self.parallel_tests or \
+                    success_cnt > 0 and order > 30 * self.parallel_tests:
+                    self.current_pass = best_success_pass
+                    logging.info(f'run_parallel_tests: proceeding: best size={best_success_env.test_case_path.stat().st_size} improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state}')
+                    self.terminate_all(pool)
+                    return best_success_env
 
                 pass_id = (order - 1) % len(passes)
                 if not self.states[pass_id]:
@@ -663,6 +681,7 @@ class TestManager:
                 return
 
         self.current_pass = pass_
+        self.current_passes = [pass_]
         self.futures = []
         self.temporary_folders = {}
         m = Manager()
@@ -767,7 +786,7 @@ class TestManager:
             sys.exit(1)
 
     def run_concurrent_passes(self, passes):
-        # self.current_pass = pass_
+        self.current_passes = passes
         self.futures = []
         self.temporary_folders = {}
         m = Manager()
