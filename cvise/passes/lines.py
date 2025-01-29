@@ -1,9 +1,6 @@
-import collections
 import copy
 import logging
 import os
-import psutil
-import random
 import shutil
 import subprocess
 import tempfile
@@ -101,34 +98,15 @@ class LinesPass(AbstractPass):
         with open(test_case) as in_file:
             data = in_file.readlines()
         # logging.info(f'[{os.getpid()}] LinesPass.transform: test_case={test_case} arg={self.arg} state={state} len={len(data)}')
-        # logging.info(f'[{os.getpid()}] LinesPass.transform: read')
 
         old_len = len(data)
-        if state.tp == 0:
-            # logging.info(f'state={state} index={state.index} end={state.end()}')
-            if state.end() <= state.index:
-                logging.info(f'state={state}')
-                assert False
-            data = data[0 : state.index] + data[state.end() :]
-        else:
-            if state.rnd_chunk > state.instances:
-                logging.info(f'state={state}')
-                assert False
-            start = random.randint(0, state.instances - state.rnd_chunk)
-            assert state.rnd_chunk > 0
-            # logging.info(f'state={state} start={start} rnd_chunk={state.rnd_chunk}')
-            data = data[0 : start] + data[start + state.rnd_chunk :]
-        if len(data) >= old_len:
-            logging.info(f'state={state}')
-            assert False
-        # logging.info(f'[{os.getpid()}] LinesPass.transform: copied')
+        data = data[0 : state.begin()] + data[state.end() :]
+        assert len(data) < old_len
 
         tmp = os.path.dirname(test_case)
         with tempfile.NamedTemporaryFile(mode='w+', delete=False, dir=tmp) as tmp_file:
             tmp_file.writelines(data)
-        # logging.info(f'[{os.getpid()}] LinesPass.transform: wrote')
 
         shutil.move(tmp_file.name, test_case)
 
-        # logging.info(f'[{os.getpid()}] LinesPass.transform: }}END')
         return (PassResult.OK, state)

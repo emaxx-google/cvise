@@ -1,7 +1,6 @@
 import copy
 import logging
 import os
-import random
 import re
 import shutil
 import subprocess
@@ -140,22 +139,12 @@ class ClangBinarySearchPass(AbstractPass):
         if not self.clang_delta_std:
             self.clang_delta_std = state.clang_delta_std
 
-        if state.tp == 0:
-            start = state.index
-            end = state.end()
-        else:
-            start = random.randint(0, state.instances - state.rnd_chunk)
-            end = start + state.rnd_chunk
-        assert 0 <= start
-        assert start < end
-        assert end <= state.instances
-
         tmp = os.path.dirname(test_case)
         with CloseableTemporaryFile(mode='w', dir=tmp) as tmp_file:
             args = [
                 f'--transformation={self.arg}',
-                f'--counter={start + 1}',
-                f'--to-counter={end}',
+                f'--counter={state.begin() + 1}',
+                f'--to-counter={state.end()}',
                 '--warn-on-counter-out-of-bounds',
                 '--report-instances-count',
             ]

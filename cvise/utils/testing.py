@@ -586,6 +586,7 @@ class TestManager:
             best_success_env = None
             best_success_pass = None
             best_success_improv = None
+            choose_better_by_end = random.random() < 0.1
             while any(self.states):
                 # logging.info(f'run_parallel_tests: true states cnt {len(list(filter(None, self.states)))} success_cnt={success_cnt}')
                 # do not create too many states
@@ -615,7 +616,11 @@ class TestManager:
                             pass_id = passes.index(pass_)
                             logging.info(f'observed success success_cnt={success_cnt} size={future.result().test_case_path.stat().st_size} improv={improv} pass={pass_} state={future.result().state} order={order}')
                             self.successes_hint[pass_id].append(future.result().state)
-                            if best_success_improv is None or improv > best_success_improv:
+                            if choose_better_by_end:
+                                better = best_success_improv is None or future.result().state.end() > best_success_env.state.end()
+                            else:
+                                better = best_success_improv is None or improv > best_success_improv
+                            if better:
                                 best_success_env = future.result()
                                 best_success_pass = pass_
                                 best_success_improv = improv
@@ -628,7 +633,7 @@ class TestManager:
                 if success_cnt >= 10 and order >= self.parallel_tests or \
                     success_cnt > 0 and order > 30 * self.parallel_tests:
                     self.current_pass = best_success_pass
-                    logging.info(f'run_parallel_tests: proceeding: best size={best_success_env.test_case_path.stat().st_size} improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state}')
+                    logging.info(f'run_parallel_tests: proceeding: best size={best_success_env.test_case_path.stat().st_size} improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state} choose_better_by_end={choose_better_by_end}')
                     self.terminate_all(pool)
                     return best_success_env
 

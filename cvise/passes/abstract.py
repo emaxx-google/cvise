@@ -35,6 +35,9 @@ class BinaryState:
 
     def copy(self):
         return copy.copy(self)
+    
+    def begin(self):
+        return self.index
 
     def end(self):
         return min(self.index + self.chunk, self.instances)
@@ -136,7 +139,7 @@ CORES = get_available_cores()
 
 class FuzzyBinaryState(BinaryState):
     def __repr__(self):
-        return f'FuzzyBinaryState(chunk={self.chunk} index={self.index} instances={self.instances} tp={self.tp} rnd_chunk={self.rnd_chunk})'
+        return f'FuzzyBinaryState(chunk={self.chunk} index={self.index} instances={self.instances} tp={self.tp} rnd_index={self.rnd_index} rnd_chunk={self.rnd_chunk})'
 
     @staticmethod
     def choose_success_history_size():
@@ -167,9 +170,22 @@ class FuzzyBinaryState(BinaryState):
         self.chunk = instances
         self.index = 0
         self.tp = 0
+        self.rnd_index = None
         self.rnd_chunk = None
         self.success_history = collections.deque(maxlen=FuzzyBinaryState.choose_success_history_size())
         return self
+    
+    def begin(self):
+        if self.tp == 0:
+            return super().begin()
+        else:
+            return self.rnd_index
+
+    def end(self):
+        if self.tp == 0:
+            return super().end()
+        else:
+            return self.rnd_index + self.rnd_chunk
 
     def real_chunk(self):
         if self.tp == 0:
@@ -190,6 +206,7 @@ class FuzzyBinaryState(BinaryState):
         state.index = bi.index
         state.chunk = bi.chunk
         state.tp = 0
+        state.rnd_index = None
         state.rnd_chunk = None
         return state
     
@@ -198,6 +215,7 @@ class FuzzyBinaryState(BinaryState):
         state = copy.copy(self)
         state.instances = instances
         state.tp = 0
+        state.rnd_index = None
         state.rnd_chunk = None
         if state.index >= state.instances:
             return state.advance()
@@ -220,6 +238,7 @@ class FuzzyBinaryState(BinaryState):
         peak = min(peak, ri)
         while self.rnd_chunk is None or self.rnd_chunk < le or self.rnd_chunk > ri:
             self.rnd_chunk = round(random.gauss(peak, peak))
+        self.rnd_index = random.randint(0, self.instances - self.rnd_chunk)
 
 
 @unique
