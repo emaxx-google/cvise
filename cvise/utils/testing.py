@@ -608,20 +608,21 @@ class TestManager:
                 tmp_futures = copy.copy(self.futures)
                 for future in tmp_futures:
                     if future.done() and not future.exception():
+                        env = future.result()
                         pass_ = self.future_to_pass[future]
                         self.current_pass = pass_
-                        if self.check_pass_result(future.result()) == PassCheckingOutcome.ACCEPT:
+                        if self.check_pass_result(env) == PassCheckingOutcome.ACCEPT:
                             success_cnt += 1
-                            improv = self.run_test_case_size - future.result().test_case_path.stat().st_size
+                            improv = self.run_test_case_size - env.test_case_path.stat().st_size
                             pass_id = passes.index(pass_)
-                            logging.info(f'observed success success_cnt={success_cnt} size={future.result().test_case_path.stat().st_size} improv={improv} pass={pass_} state={future.result().state} order={order}')
-                            self.successes_hint[pass_id].append(future.result().state)
+                            logging.info(f'observed success success_cnt={success_cnt} size={env.test_case_path.stat().st_size} improv={improv} pass={pass_} state={env.state} order={order}')
+                            self.successes_hint[pass_id].append(env.state)
                             if choose_better_by_end:
-                                better = best_success_improv is None or future.result().state.end() > best_success_env.state.end()
+                                better = best_success_improv is None or env.state.end() / env.state.instances > best_success_env.state.end() / best_success_env.state.instances
                             else:
                                 better = best_success_improv is None or improv > best_success_improv
                             if better:
-                                best_success_env = future.result()
+                                best_success_env = env
                                 best_success_pass = pass_
                                 best_success_improv = improv
                                 pa = os.path.join(self.tmp_for_best, os.path.basename(future.result().test_case_path))
