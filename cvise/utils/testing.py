@@ -480,7 +480,7 @@ class TestManager:
         new_futures = set()
         for future in self.futures:
             # all items after first successfull (or STOP) should be cancelled
-            if quit_loop:
+            if quit_loop and len(self.current_passes) == 1:
                 future.cancel()
                 continue
 
@@ -580,6 +580,7 @@ class TestManager:
         self.future_to_pass = {}
         with pebble.ProcessPool(max_workers=self.parallel_tests) as pool:
             order = 1
+            finished_jobs = 0
             self.timeout_count = 0
             self.giveup_reported = False
             success_cnt = 0
@@ -593,7 +594,10 @@ class TestManager:
                 if len(self.futures) >= self.parallel_tests:
                     wait(self.futures, return_when=FIRST_COMPLETED)
 
+                cnt_before = len(self.futures)
                 quit_loop = self.process_done_futures()
+                cnt_after = len(self.futures)
+                finished_jobs += cnt_before - cnt_after
                 if quit_loop and len(self.current_passes) == 1:
                     if success_cnt > 0:
                         self.current_pass = best_success_pass
@@ -615,7 +619,7 @@ class TestManager:
                             success_cnt += 1
                             improv = self.run_test_case_size - env.test_case_path.stat().st_size
                             pass_id = passes.index(pass_)
-                            logging.info(f'observed success success_cnt={success_cnt} size={env.test_case_path.stat().st_size} improv={improv} pass={pass_} state={env.state} order={order}')
+                            logging.info(f'observed success success_cnt={success_cnt} size={env.test_case_path.stat().st_size} improv={improv} pass={pass_} state={env.state} order={order} finished_jobs={finished_jobs}')
                             self.successes_hint[pass_id].append(env.state)
                             if choose_better_by_end:
                                 better = best_success_improv is None or env.state.end() / env.state.instances > best_success_env.state.end() / best_success_env.state.instances
@@ -630,11 +634,12 @@ class TestManager:
                                 best_success_env.test_case = pa
                             self.release_future(future)
                         self.current_pass = None
+                        finished_jobs += 1
 
-                if success_cnt >= 10 and order >= self.parallel_tests or \
-                    success_cnt > 0 and order > 30 * self.parallel_tests:
+                if success_cnt >= 5 and finished_jobs >= self.parallel_tests or \
+                    success_cnt > 0 and finished_jobs > 5 * self.parallel_tests:
                     self.current_pass = best_success_pass
-                    logging.info(f'run_parallel_tests: proceeding: best size={best_success_env.test_case_path.stat().st_size} improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state} choose_better_by_end={choose_better_by_end}')
+                    logging.info(f'run_parallel_tests: proceeding: order={order} finished_jobs={finished_jobs} best_size={best_success_env.test_case_path.stat().st_size} improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state} choose_better_by_end={choose_better_by_end}')
                     self.terminate_all(pool)
                     return best_success_env
 
