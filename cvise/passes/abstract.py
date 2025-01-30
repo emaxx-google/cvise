@@ -177,14 +177,10 @@ class FuzzyBinaryState(BinaryState):
         return self
     
     @staticmethod
-    def create_from_hint(instances, last_state_hint, successes_hint):
-        if successes_hint:
-            chosen = min(successes_hint, key=lambda s: (-s.chunk, s.index))
-        else:
-            chosen = last_state_hint
-        if chosen.chunk > instances:
+    def create_from_hint(instances, last_state_hint):
+        if last_state_hint.chunk > instances:
             return None
-        self = copy.copy(chosen)
+        self = copy.copy(last_state_hint)
         self.instances = instances
         if self.index >= instances:
             self.index = 0

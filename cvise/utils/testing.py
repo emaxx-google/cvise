@@ -527,18 +527,15 @@ class TestManager:
         return quit_loop
 
     def wait_for_first_success(self):
-        logging.info(f'wait_for_first_success: BEGIN{{')
         for future in self.futures:
             try:
                 test_env = future.result()
                 outcome = self.check_pass_result(test_env)
                 if outcome == PassCheckingOutcome.ACCEPT:
-                    logging.info(f'wait_for_first_success: }}END: success')
                     return test_env
             # starting with Python 3.11: concurrent.futures.TimeoutError == TimeoutError
             except (TimeoutError, concurrent.futures.TimeoutError):
                 pass
-        logging.info(f'wait_for_first_success: }}END: none')
         return None
 
     def check_pass_result(self, test_env):
@@ -596,6 +593,12 @@ class TestManager:
             choose_better_by_end = random.random() < 0.1
             finished_job_improves = []
             start_time = time.monotonic()
+
+            successes = self.next_successes_hint + self.successes_hint
+            successes.sort(key=lambda i: -i[2])
+            self.successes_hint = successes[:10]
+            self.next_successes_hint = []
+
             while any(self.states):
                 # logging.info(f'run_parallel_tests: true states cnt {len(list(filter(None, self.states)))} success_cnt={success_cnt}')
                 # do not create too many states
@@ -612,12 +615,12 @@ class TestManager:
                 if quit_loop and len(self.current_passes) == 1:
                     if success_cnt > 0:
                         self.current_pass = best_success_pass
-                        logging.info(f'run_parallel_tests: proceeding on quit_loop: best size={best_success_env.test_case_path.stat().st_size} improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state}')
+                        logging.info(f'run_parallel_tests: proceeding on quit_loop: best improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state}')
                         self.terminate_all(pool)
                         return best_success_env
                     else:
                         success = self.wait_for_first_success()
-                        logging.info(f'run_parallel_tests: wait_for_first_success gave returned {success.state if success else None}')
+                        logging.info(f'run_parallel_tests: wait_for_first_success returned {success.state if success else None}')
                         self.terminate_all(pool)
                         return success
 
@@ -637,8 +640,8 @@ class TestManager:
                             finished_job_improves.append(improv)
                             assert len(finished_job_improves) == finished_jobs
                             pass_id = passes.index(pass_)
-                            logging.info(f'observed success success_cnt={success_cnt} size={env.test_case_path.stat().st_size} improv={improv} pass={pass_} state={env.state} order={order} finished_jobs={finished_jobs}')
-                            self.successes_hint[pass_id].append(env.state)
+                            logging.info(f'observed success success_cnt={success_cnt} improv={improv} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={order} finished_jobs={finished_jobs}')
+                            self.next_successes_hint.append((env.state, pass_, improv))
                             if choose_better_by_end and False:  # DISABLED
                                 better = best_success_improv is None or env.state.end() / env.state.instances > best_success_env.state.end() / best_success_env.state.instances
                             else:
@@ -664,57 +667,66 @@ class TestManager:
                     prob = math.floor(((finished_jobs - 1) / k**2 + 1) * (finished_jobs + 1) / finished_jobs) / (finished_jobs + 1) if sigma and k > 1 else None
                     # logging.info(f'run_parallel_tests: prob={prob} finished_jobs={finished_jobs} max={best_success_improv} mean={mean} sigma={sigma} duration_till_now={duration_till_now} duration_till_best={duration_till_best} k={k}')
                     if prob is None or k > 1 and prob < 0.01:
-                        logging.info(f'run_parallel_tests: proceeding: order={order} finished_jobs={finished_jobs} prob={prob} best_size={best_success_env.test_case_path.stat().st_size} improv={best_success_improv} from pass={best_success_pass} state={best_success_env.state} choose_better_by_end={choose_better_by_end}')
+                        logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} prob={prob} improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} choose_better_by_end={choose_better_by_end}')
                         self.terminate_all(pool)
                         return best_success_env
 
-                # if success_cnt >= 5 and finished_jobs >= self.parallel_tests or \
-                #     success_cnt > 0 and finished_jobs > 5 * self.parallel_tests:
-                #     self.current_pass = best_success_pass
-                #     logging.info(f'run_parallel_tests: proceeding: order={order} finished_jobs={finished_jobs} best_size={best_success_env.test_case_path.stat().st_size} improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state} choose_better_by_end={choose_better_by_end}')
-                #     self.terminate_all(pool)
-                #     return best_success_env
+                if (order - 1) % (len(passes) + 1) == len(passes):
+                    if not self.successes_hint:
+                        order += 1
+                        continue
+                    state, pass_, _ = self.successes_hint.pop(0)
+                    pass_id = passes.index(pass_)
+                    assert passes.count(pass_) == 1
+                    if not self.states[pass_id] or state.begin() >= self.states[pass_id].instances:
+                        order += 1
+                        continue
+                    should_advance = False
+                else:
+                    pass_id = (order - 1) % (len(passes) + 1)
+                    if not self.states[pass_id]:
+                        order += 1
+                        continue
+                    state = self.states[pass_id]
+                    should_advance = True
+                pass_ = passes[pass_id]
 
-                pass_id = (order - 1) % len(passes)
-                if not self.states[pass_id]:
-                    order += 1
-                    continue
                 folder = Path(tempfile.mkdtemp(prefix=self.TEMP_PREFIX, dir=self.roots[pass_id]))
                 test_env = TestEnvironment(
-                    self.states[pass_id],
+                    state,
                     order,
                     self.test_script,
                     folder,
                     Path(os.path.join(self.roots[pass_id+len(passes)], os.path.basename(self.current_test_case))),
                     self.test_cases,
-                    passes[pass_id].transform,
+                    pass_.transform,
                     self.pid_queue,
                 )
+                test_env.is_regular_iteration = should_advance
                 future = pool.schedule(test_env.run, timeout=self.timeout)
-                future.dbg_state = self.states[pass_id]
-                self.future_to_pass[future] = passes[pass_id]
+                future.dbg_state = state
+                self.future_to_pass[future] = pass_
                 assert future not in self.temporary_folders
                 self.temporary_folders[future] = folder
                 self.futures.append(future)
                 # self.pass_statistic.add_executed(self.current_pass)
                 # on_scheduled(self.current_pass, self.total_file_size)
                 order += 1
-                if order % 1000 == 0:
-                    logging.info(f'pulse: order={order}')
-                state = passes[pass_id].advance(self.current_test_case, self.states[pass_id])
-                self.states[pass_id] = state
-                self.last_state_hint[pass_id] = state
-                if state is None and len(passes) == 1:
-                    if success_cnt > 0:
-                        self.current_pass = best_success_pass
-                        logging.info(f'run_parallel_tests: proceeding on end state with best: best size={best_success_env.test_case_path.stat().st_size} improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state}')
-                        self.terminate_all(pool)
-                        return best_success_env
-                    else:
-                        success = self.wait_for_first_success()
-                        logging.info(f'run_parallel_tests: proceeding on end after wait_for_first_success: state={success.state if success else None}')
-                        self.terminate_all(pool)
-                        return success
+                if should_advance:
+                    state = pass_.advance(self.current_test_case, state)
+                    self.states[pass_id] = state
+                    self.last_state_hint[pass_id] = state
+                    if state is None and len(passes) == 1:
+                        if success_cnt > 0:
+                            self.current_pass = best_success_pass
+                            logging.info(f'run_parallel_tests: proceeding on end state with best: improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={self.current_pass} state={best_success_env.state}')
+                            self.terminate_all(pool)
+                            return best_success_env
+                        else:
+                            success = self.wait_for_first_success()
+                            logging.info(f'run_parallel_tests: proceeding on end after wait_for_first_success: state={success.state if success else None}')
+                            self.terminate_all(pool)
+                            return success
 
             # we are at the end of enumeration
             self.current_pass = best_success_pass
@@ -747,7 +759,8 @@ class TestManager:
         self.create_root()
         pass_key = repr(self.current_pass)
         self.last_state_hint = [None]
-        self.successes_hint = [[]]
+        self.successes_hint = []
+        self.next_successes_hint = []
         if not self.tmp_for_best:
             self.tmp_for_best = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}best-')
 
@@ -869,7 +882,8 @@ class TestManager:
             logger = KeyLogger()
 
         self.last_state_hint = [None] * len(passes)
-        self.successes_hint = [[] for _ in range(len(passes))]
+        self.successes_hint = []
+        self.next_successes_hint = []
 
         try:
             for test_case in self.sorted_test_cases:
@@ -963,8 +977,7 @@ class TestManager:
                 new_path = os.path.join(self.roots[i+len(passes)], os.path.basename(self.current_test_case))
                 shutil.copy2(self.current_test_case, new_path)
                 env = SetupEnvironment(p, self.test_script, new_path, self.test_cases, self.save_temps,
-                                       self.last_state_hint[i], self.successes_hint[i])
-                self.successes_hint[i] = []
+                                       self.last_state_hint[i])
                 futures.append(pool.schedule(env.execute))
             for fu in futures:
                 state = fu.result()
@@ -1009,18 +1022,16 @@ class TestManager:
 
 
 class SetupEnvironment:
-    def __init__(self, pass_, test_script, test_case, test_cases, save_temps, last_state_hint, successes_hint):
+    def __init__(self, pass_, test_script, test_case, test_cases, save_temps, last_state_hint):
         self.pass_ = pass_
         self.test_script = test_script
         self.test_case = test_case
         self.test_cases = test_cases
         self.save_temps = save_temps
         self.last_state_hint = last_state_hint
-        self.successes_hint = successes_hint
     
     def execute(self):
-        return self.pass_.new(self.test_case, self.check_sanity, last_state_hint=self.last_state_hint,
-                              successes_hint=self.successes_hint)
+        return self.pass_.new(self.test_case, self.check_sanity, last_state_hint=self.last_state_hint)
 
     def check_sanity(self, verbose=False):
         logging.debug('perform sanity check... ')

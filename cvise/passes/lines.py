@@ -64,7 +64,7 @@ class LinesPass(AbstractPass):
             lines = in_file.readlines()
             return len(lines)
 
-    def new(self, test_case, check_sanity=None, last_state_hint=None, successes_hint=None):
+    def new(self, test_case, check_sanity=None, last_state_hint=None):
         self.bailout = False
         # None means no topformflat
         if self.arg != 'None':
@@ -74,8 +74,8 @@ class LinesPass(AbstractPass):
                 return None
         instances = self.__count_instances(test_case)
         state = None
-        if last_state_hint or successes_hint:
-            state = FuzzyBinaryState.create_from_hint(instances, last_state_hint, successes_hint)
+        if last_state_hint:
+            state = FuzzyBinaryState.create_from_hint(instances, last_state_hint)
             if state:
                 logging.info(f'LinesPass.new: arg={self.arg} hint to start from chunk={state.chunk} index={state.index} instead of {instances}')
         if not state:
@@ -95,6 +95,7 @@ class LinesPass(AbstractPass):
         return state
 
     def transform(self, test_case, state, process_event_notifier):
+        assert state.begin() < state.instances
         with open(test_case) as in_file:
             data = in_file.readlines()
         # logging.info(f'[{os.getpid()}] LinesPass.transform: test_case={test_case} arg={self.arg} state={state} len={len(data)}')

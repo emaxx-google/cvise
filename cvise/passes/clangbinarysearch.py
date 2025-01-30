@@ -42,7 +42,7 @@ class ClangBinarySearchPass(AbstractPass):
         # Use the best standard option
         self.clang_delta_std = best
 
-    def new(self, test_case, _=None, last_state_hint=None, successes_hint=None):
+    def new(self, test_case, _=None, last_state_hint=None):
         global previous_clang_delta_std
         if self.user_clang_delta_std:
             self.clang_delta_std = self.user_clang_delta_std
@@ -57,8 +57,8 @@ class ClangBinarySearchPass(AbstractPass):
 
         instances = self.count_instances(test_case)
         state = None
-        if last_state_hint or successes_hint:
-            state = FuzzyBinaryState.create_from_hint(instances, last_state_hint, successes_hint)
+        if last_state_hint:
+            state = FuzzyBinaryState.create_from_hint(instances, last_state_hint)
             if state:
                 logging.info(f'ClangBinarySearchPass.new: arg={self.arg} hint to start from chunk={state.chunk} index={state.index} instead of {instances}')
         if not state:
