@@ -662,8 +662,8 @@ class TestManager:
                     duration_till_best = best_success_when - start_time
                     k = (duration_till_now / duration_till_best * best_success_improv - mean) / sigma
                     prob = math.floor(((finished_jobs - 1) / k**2 + 1) * (finished_jobs + 1) / finished_jobs) / (finished_jobs + 1) if k > 1 else None
-                    logging.info(f'run_parallel_tests: prob={prob} finished_jobs={finished_jobs} max={best_success_improv} mean={mean} sigma={sigma} duration_till_now={duration_till_now} duration_till_best={duration_till_best} k={k}')
-                    if k > 1 and prob < 0.05:
+                    # logging.info(f'run_parallel_tests: prob={prob} finished_jobs={finished_jobs} max={best_success_improv} mean={mean} sigma={sigma} duration_till_now={duration_till_now} duration_till_best={duration_till_best} k={k}')
+                    if k > 1 and prob < 0.01:
                         logging.info(f'run_parallel_tests: proceeding: order={order} finished_jobs={finished_jobs} prob={prob} best_size={best_success_env.test_case_path.stat().st_size} improv={best_success_improv} from pass={best_success_pass} state={best_success_env.state} choose_better_by_end={choose_better_by_end}')
                         self.terminate_all(pool)
                         return best_success_env
