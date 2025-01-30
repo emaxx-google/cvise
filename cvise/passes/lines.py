@@ -73,7 +73,6 @@ class LinesPass(AbstractPass):
                 logging.warning('Skipping pass as sanity check fails for topformflat output')
                 return None
         instances = self.__count_instances(test_case)
-        # logging.info(f'[{os.getpid()}] LinesPass.new: test_case={test_case} arg={self.arg} formatted_len={instances}')
         state = FuzzyBinaryState.create(instances)
         hint_from_last = last_state_hint.chunk if last_state_hint else None
         hint_from_successes = max([s.real_chunk() for s in successes_hint], default=None) if successes_hint else None
@@ -83,6 +82,7 @@ class LinesPass(AbstractPass):
         if state and hint and hint < state.instances:
             logging.info(f'LinesPass.new: arg={self.arg} hint to start from chunk={hint} instead of {state.chunk} hint_from_last={hint_from_last} hint_from_successes={hint_from_successes}')
             state.chunk = hint
+        # logging.info(f'[{os.getpid()}] LinesPass.new: test_case={test_case} arg={self.arg} formatted_len={instances} state={state}')
         return state
 
     def advance(self, test_case, state):

@@ -18,6 +18,7 @@ import tempfile
 import traceback
 import concurrent.futures
 import statistics
+import time
 
 from cvise.cvise import CVise
 from cvise.passes.abstract import PassResult, ProcessEventNotifier, ProcessEventType
@@ -489,13 +490,15 @@ class TestManager:
                     # starting with Python 3.11: concurrent.futures.TimeoutError == TimeoutError
                     if type(future.exception()) in (TimeoutError, concurrent.futures.TimeoutError):
                         self.timeout_count += 1
-                        logging.warning('Test timed out.')
-                        self.save_extra_dir(self.temporary_folders[future])
-                        if self.timeout_count >= self.MAX_TIMEOUTS:
-                            logging.warning('Maximum number of timeout were reached: %d' % self.MAX_TIMEOUTS)
+                        logging.warning(f'Test timed out: pass={self.future_to_pass[future]} state={future.dbg_state}')
+                        if self.timeout_count < self.MAX_TIMEOUTS:
+                            self.save_extra_dir(self.temporary_folders[future])
                             quit_loop = True
                             p = self.future_to_pass[future]
+                            assert p
                             self.states[self.current_passes.index(p)] = None
+                        elif self.timeout_count == self.MAX_TIMEOUTS:
+                            logging.warning('Maximum number of timeout were reached: %d' % self.MAX_TIMEOUTS)
                         continue
                     else:
                         raise future.exception()
@@ -503,6 +506,7 @@ class TestManager:
                 test_env = future.result()
                 opass = self.current_pass
                 self.current_pass = self.future_to_pass[future]
+                assert self.current_pass
                 outcome = self.check_pass_result(test_env)
                 self.current_pass = opass
                 if outcome == PassCheckingOutcome.ACCEPT:
@@ -574,20 +578,24 @@ class TestManager:
         pool.stop()
         pool.join()
 
-    def run_parallel_tests(self, passes=None):
+    def run_parallel_tests(self, passes):
         assert not self.futures
         assert not self.temporary_folders
         self.future_to_pass = {}
         with pebble.ProcessPool(max_workers=self.parallel_tests) as pool:
             order = 1
             finished_jobs = 0
-            self.timeout_count = 0
+            if len(passes) == 1:
+                self.timeout_count = 0
             self.giveup_reported = False
             success_cnt = 0
             best_success_env = None
             best_success_pass = None
             best_success_improv = None
+            best_success_when = None
             choose_better_by_end = random.random() < 0.1
+            finished_job_improves = []
+            start_time = time.monotonic()
             while any(self.states):
                 # logging.info(f'run_parallel_tests: true states cnt {len(list(filter(None, self.states)))} success_cnt={success_cnt}')
                 # do not create too many states
@@ -598,6 +606,9 @@ class TestManager:
                 quit_loop = self.process_done_futures()
                 cnt_after = len(self.futures)
                 finished_jobs += cnt_before - cnt_after
+                assert finished_jobs <= order
+                finished_job_improves += [0] * (cnt_before - cnt_after)
+                assert len(finished_job_improves) == finished_jobs
                 if quit_loop and len(self.current_passes) == 1:
                     if success_cnt > 0:
                         self.current_pass = best_success_pass
@@ -606,6 +617,7 @@ class TestManager:
                         return best_success_env
                     else:
                         success = self.wait_for_first_success()
+                        logging.info(f'run_parallel_tests: wait_for_first_success gave returned {success.state if success else None}')
                         self.terminate_all(pool)
                         return success
 
@@ -613,15 +625,21 @@ class TestManager:
                 for future in tmp_futures:
                     if future.done() and not future.exception():
                         env = future.result()
+                        assert env
                         pass_ = self.future_to_pass[future]
+                        assert pass_
                         self.current_pass = pass_
                         if self.check_pass_result(env) == PassCheckingOutcome.ACCEPT:
                             success_cnt += 1
+                            finished_jobs += 1
+                            assert finished_jobs <= order
                             improv = self.run_test_case_size - env.test_case_path.stat().st_size
+                            finished_job_improves.append(improv)
+                            assert len(finished_job_improves) == finished_jobs
                             pass_id = passes.index(pass_)
                             logging.info(f'observed success success_cnt={success_cnt} size={env.test_case_path.stat().st_size} improv={improv} pass={pass_} state={env.state} order={order} finished_jobs={finished_jobs}')
                             self.successes_hint[pass_id].append(env.state)
-                            if choose_better_by_end:
+                            if choose_better_by_end and False:  # DISABLED
                                 better = best_success_improv is None or env.state.end() / env.state.instances > best_success_env.state.end() / best_success_env.state.instances
                             else:
                                 better = best_success_improv is None or improv > best_success_improv
@@ -629,19 +647,33 @@ class TestManager:
                                 best_success_env = env
                                 best_success_pass = pass_
                                 best_success_improv = improv
+                                best_success_when = time.monotonic()
                                 pa = os.path.join(self.tmp_for_best, os.path.basename(future.result().test_case_path))
                                 shutil.copy2(future.result().test_case_path, pa)
                                 best_success_env.test_case = pa
                             self.release_future(future)
                         self.current_pass = None
-                        finished_jobs += 1
 
-                if success_cnt >= 5 and finished_jobs >= self.parallel_tests or \
-                    success_cnt > 0 and finished_jobs > 5 * self.parallel_tests:
-                    self.current_pass = best_success_pass
-                    logging.info(f'run_parallel_tests: proceeding: order={order} finished_jobs={finished_jobs} best_size={best_success_env.test_case_path.stat().st_size} improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state} choose_better_by_end={choose_better_by_end}')
-                    self.terminate_all(pool)
-                    return best_success_env
+                if finished_jobs >= self.parallel_tests and success_cnt > 0:
+                    mean = statistics.mean(finished_job_improves)
+                    sigma = statistics.stdev(finished_job_improves)
+                    time_now = time.monotonic()
+                    duration_till_now = time_now - start_time
+                    duration_till_best = best_success_when - start_time
+                    k = (duration_till_now / duration_till_best * best_success_improv - mean) / sigma
+                    prob = math.floor(((finished_jobs - 1) / k**2 + 1) * (finished_jobs + 1) / finished_jobs) / (finished_jobs + 1) if k > 1 else None
+                    logging.info(f'run_parallel_tests: prob={prob} finished_jobs={finished_jobs} max={best_success_improv} mean={mean} sigma={sigma} duration_till_now={duration_till_now} duration_till_best={duration_till_best} k={k}')
+                    if k > 1 and  prob < 0.05:
+                        logging.info(f'run_parallel_tests: proceeding: order={order} finished_jobs={finished_jobs} prob={prob} best_size={best_success_env.test_case_path.stat().st_size} improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state} choose_better_by_end={choose_better_by_end}')
+                        self.terminate_all(pool)
+                        return best_success_env
+
+                # if success_cnt >= 5 and finished_jobs >= self.parallel_tests or \
+                #     success_cnt > 0 and finished_jobs > 5 * self.parallel_tests:
+                #     self.current_pass = best_success_pass
+                #     logging.info(f'run_parallel_tests: proceeding: order={order} finished_jobs={finished_jobs} best_size={best_success_env.test_case_path.stat().st_size} improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state} choose_better_by_end={choose_better_by_end}')
+                #     self.terminate_all(pool)
+                #     return best_success_env
 
                 pass_id = (order - 1) % len(passes)
                 if not self.states[pass_id]:
@@ -659,6 +691,7 @@ class TestManager:
                     self.pid_queue,
                 )
                 future = pool.schedule(test_env.run, timeout=self.timeout)
+                future.dbg_state = self.states[pass_id]
                 self.future_to_pass[future] = passes[pass_id]
                 assert future not in self.temporary_folders
                 self.temporary_folders[future] = folder
@@ -671,6 +704,17 @@ class TestManager:
                 state = passes[pass_id].advance(self.current_test_case, self.states[pass_id])
                 self.states[pass_id] = state
                 self.last_state_hint[pass_id] = state
+                if state is None and len(passes) == 1:
+                    if success_cnt > 0:
+                        self.current_pass = best_success_pass
+                        logging.info(f'run_parallel_tests: proceeding on end state with best: best size={best_success_env.test_case_path.stat().st_size} improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state}')
+                        self.terminate_all(pool)
+                        return best_success_env
+                    else:
+                        success = self.wait_for_first_success()
+                        logging.info(f'run_parallel_tests: proceeding on end after wait_for_first_success: state={success.state if success else None}')
+                        self.terminate_all(pool)
+                        return success
 
             # we are at the end of enumeration
             self.current_pass = best_success_pass
@@ -742,6 +786,7 @@ class TestManager:
                 self.states = [self.current_pass.new(new_path, self.check_sanity)]
                 self.skip = False
 
+                self.timeout_count = 0
                 while self.states[0] is not None and not self.skip:
                     # Ignore more key presses after skip has been detected
                     if not self.skip_key_off and not self.skip:
@@ -755,6 +800,7 @@ class TestManager:
 
                     self.run_test_case_size = self.current_test_case.stat().st_size
                     success_env = self.run_parallel_tests(passes=[self.current_pass])
+                    self.current_pass = pass_
                     self.kill_pid_queue()
 
                     if success_env:

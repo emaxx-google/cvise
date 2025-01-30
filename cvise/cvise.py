@@ -164,8 +164,9 @@ class CVise:
             logging.info('INITIAL PASSES')
             self._run_additional_passes(pass_group['first'])
 
-        logging.info('PACED PASSES')
-        self._run_main_passes(pass_group['paced'], True)
+        if pass_group.get('paced'):
+            logging.info('PACED PASSES')
+            self._run_main_passes(pass_group['paced'], True)
 
         self.test_manager.set_desired_pace(None)
         logging.info('MAIN PASSES')
