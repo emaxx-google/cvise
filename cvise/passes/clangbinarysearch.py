@@ -56,18 +56,17 @@ class ClangBinarySearchPass(AbstractPass):
             self.previous_clang_delta_std = self.clang_delta_std
 
         instances = self.count_instances(test_case)
-        state = FuzzyBinaryState.create(instances)
+        state = None
+        if last_state_hint or successes_hint:
+            state = FuzzyBinaryState.create_from_hint(instances, last_state_hint, successes_hint)
+            if state:
+                logging.info(f'ClangBinarySearchPass.new: arg={self.arg} hint to start from chunk={state.chunk} index={state.index} instead of {instances}')
         if not state:
-            return None
-        state.clang_delta_std = self.clang_delta_std
-        hint_from_last = last_state_hint.chunk if last_state_hint else None
-        hint_from_successes = max([s.real_chunk() for s in successes_hint], default=None) if successes_hint else None
-        hint = max(list(filter(None, [hint_from_last, hint_from_successes])), default=None)
-        if last_state_hint:
+            state = FuzzyBinaryState.create(instances)
+        if state and last_state_hint:
             state.success_history = last_state_hint.success_history
-        if state and hint and hint < state.instances:
-            logging.info(f'ClangBinarySearchPass.new: arg={self.arg} hint to start from chunk={hint} instead of {state.chunk} hint_from_last={hint_from_last} hint_from_successes={hint_from_successes}')
-            state.chunk = hint
+        if state:
+            state.clang_delta_std = self.clang_delta_std
         return state
 
     def advance(self, test_case, state):

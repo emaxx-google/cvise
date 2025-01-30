@@ -175,6 +175,23 @@ class FuzzyBinaryState(BinaryState):
         self.success_history = collections.deque(maxlen=FuzzyBinaryState.choose_success_history_size())
         return self
     
+    @staticmethod
+    def create_from_hint(instances, last_state_hint, successes_hint):
+        if successes_hint:
+            chosen = min(successes_hint, key=lambda s: (-s.chunk, s.index))
+        else:
+            chosen = last_state_hint
+        if chosen.chunk > instances:
+            return None
+        self = copy.copy(chosen)
+        self.instances = instances
+        if self.index >= instances:
+            self.index = 0
+        self.tp = 0
+        self.rnd_index = None
+        self.rnd_chunk = None
+        return self
+    
     def begin(self):
         if self.tp == 0:
             return super().begin()
