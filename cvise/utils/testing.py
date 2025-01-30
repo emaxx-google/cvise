@@ -656,14 +656,14 @@ class TestManager:
 
                 if finished_jobs >= self.parallel_tests and success_cnt > 0:
                     mean = statistics.mean(finished_job_improves)
-                    sigma = statistics.stdev(finished_job_improves)
+                    sigma = statistics.stdev(finished_job_improves) if min(finished_job_improves) != max(finished_job_improves) else None
                     time_now = time.monotonic()
                     duration_till_now = time_now - start_time
                     duration_till_best = best_success_when - start_time
-                    k = (duration_till_now / duration_till_best * best_success_improv - mean) / sigma
-                    prob = math.floor(((finished_jobs - 1) / k**2 + 1) * (finished_jobs + 1) / finished_jobs) / (finished_jobs + 1) if k > 1 else None
+                    k = (duration_till_now / duration_till_best * best_success_improv - mean) / sigma if sigma else None
+                    prob = math.floor(((finished_jobs - 1) / k**2 + 1) * (finished_jobs + 1) / finished_jobs) / (finished_jobs + 1) if sigma and k > 1 else None
                     # logging.info(f'run_parallel_tests: prob={prob} finished_jobs={finished_jobs} max={best_success_improv} mean={mean} sigma={sigma} duration_till_now={duration_till_now} duration_till_best={duration_till_best} k={k}')
-                    if k > 1 and prob < 0.01:
+                    if prob is None or k > 1 and prob < 0.01:
                         logging.info(f'run_parallel_tests: proceeding: order={order} finished_jobs={finished_jobs} prob={prob} best_size={best_success_env.test_case_path.stat().st_size} improv={best_success_improv} from pass={best_success_pass} state={best_success_env.state} choose_better_by_end={choose_better_by_end}')
                         self.terminate_all(pool)
                         return best_success_env

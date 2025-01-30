@@ -2,6 +2,7 @@ import copy
 import collections
 from enum import auto, Enum, unique
 import logging
+import math
 import psutil
 import random
 import shutil
@@ -245,16 +246,11 @@ class FuzzyBinaryState(BinaryState):
         return max(self.success_history)
 
     def prepare_rnd_step(self):
-        self.rnd_chunk = None
-        peak = self.choose_rnd_peak()
-        if peak is None:
-            peak = 1
-        le = min(self.chunk, self.instances)
-        ri = self.instances
-        peak = max(peak, le)
-        peak = min(peak, ri)
-        while self.rnd_chunk is None or self.rnd_chunk < le or self.rnd_chunk > ri:
-            self.rnd_chunk = round(random.gauss(peak, peak))
+        le = math.log(self.chunk)
+        ri = math.log(self.instances)
+        rndlog = random.uniform(le, ri)
+        self.rnd_chunk = round(math.exp(rndlog))
+        assert self.chunk <= self.rnd_chunk <= self.instances
         self.rnd_index = random.randint(0, self.instances - self.rnd_chunk)
 
 
