@@ -33,7 +33,7 @@ class LinesPass(AbstractPass):
                                 linebreak = '\n' if line.endswith('\n') else ''
                                 stripped_tmp_file.write(line.strip() + linebreak)
                 except subprocess.SubprocessError:
-                    return
+                    return False
             tmp_file.close()
             stripped_tmp_file.close()
 
@@ -51,13 +51,14 @@ class LinesPass(AbstractPass):
                         pass
                     else:
                         # logging.info(f'taking {candidate} out of {candidates}')
-                        return
+                        return stripped_tmp_file.name == candidate
                 shutil.copy(backup.name, test_case)
                 # if we are not the first lines pass, we should bail out
                 if self.arg != '0':
                     self.bailout = True
             else:
                 shutil.copy(stripped_tmp_file.name, test_case)
+                return True
 
     def __count_instances(self, test_case):
         with open(test_case) as in_file:
@@ -68,7 +69,7 @@ class LinesPass(AbstractPass):
         self.bailout = False
         # None means no topformflat
         if self.arg != 'None':
-            self.__format(test_case, check_sanity)
+            stripped_topformlat_ok = self.__format(test_case, check_sanity if not last_state_hint or not last_state_hint.stripped_topformlat_ok else None)
             if self.bailout:
                 logging.warning('Skipping pass as sanity check fails for topformflat output')
                 return None
@@ -84,15 +85,21 @@ class LinesPass(AbstractPass):
             state.success_history = last_state_hint.success_history
         if state:
             assert state.instances == instances
+            state.stripped_topformlat_ok = stripped_topformlat_ok
         # logging.info(f'[{os.getpid()}] LinesPass.new: test_case={test_case} arg={self.arg} formatted_len={instances} state={state}')
         return state
 
     def advance(self, test_case, state):
-        return state.advance()
+        new_state = state.advance()
+        if new_state:
+            new_state.stripped_topformlat_ok = state.stripped_topformlat_ok
+        return new_state
 
     def advance_on_success(self, test_case, state):
         old = copy.copy(state)
         state = state.advance_on_success(self.__count_instances(test_case))
+        if state:
+            state.stripped_topformlat_ok = old.stripped_topformlat_ok
         logging.info(f'LinesPass.advance_on_success: delta={old.instances-state.instances} chunk={old.chunk if old.tp==0 else old.rnd_chunk} tp={old.tp}')
         return state
 
