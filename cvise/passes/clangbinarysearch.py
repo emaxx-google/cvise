@@ -55,13 +55,13 @@ class ClangBinarySearchPass(AbstractPass):
             previous_clang_delta_std = self.clang_delta_std
             self.previous_clang_delta_std = self.clang_delta_std
 
-        instances = self.count_instances(test_case)
         state = None
         if last_state_hint:
-            state = FuzzyBinaryState.create_from_hint(instances, last_state_hint)
+            state = FuzzyBinaryState.create_from_hint(None, last_state_hint)
             if state:
-                logging.info(f'ClangBinarySearchPass.new: arg={self.arg} hint to start from chunk={state.chunk} index={state.index} instead of {instances}')
+                logging.info(f'ClangBinarySearchPass.new: arg={self.arg} hint to start from chunk={state.chunk} index={state.index}')
         if not state:
+            instances = self.count_instances(test_case)
             state = FuzzyBinaryState.create(instances)
         if state and last_state_hint:
             state.success_history = last_state_hint.success_history
@@ -133,7 +133,8 @@ class ClangBinarySearchPass(AbstractPass):
                 pass
 
     def transform(self, test_case, state, process_event_notifier):
-        logging.debug(f'TRANSFORM: {state}')
+        # logging.info(f'transform: arg={self.arg} state={state}')
+        old_state = copy.copy(state)
 
         if not self.clang_delta_std:
             self.clang_delta_std = state.clang_delta_std
@@ -160,7 +161,17 @@ class ClangBinarySearchPass(AbstractPass):
             tmp_file.close()
             if returncode == 0:
                 shutil.copy(tmp_file.name, test_case)
+                assert old_state.instances == state.instances
+                # logging.info(f'transform: arg={self.arg} returning OK: instances={state.instances} old_state.instances={old_state.instances}')
                 return (PassResult.OK, state)
+            elif returncode == -11:
+                instances = self.count_instances(test_case)
+                logging.info(f'transform: arg={self.arg} recalculated instance from {state.instances} to {instances}')
+                if instances == 0:
+                    return (PassResult.STOP, None)
+                else:
+                    state.instances = instances
+                    return (PassResult.INVALID, state)
             else:
                 return (
                     PassResult.STOP if returncode == 255 else PassResult.ERROR,

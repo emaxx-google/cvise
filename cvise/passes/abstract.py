@@ -178,11 +178,12 @@ class FuzzyBinaryState(BinaryState):
     
     @staticmethod
     def create_from_hint(instances, last_state_hint):
-        if last_state_hint.chunk > instances:
+        if instances is not None and last_state_hint.chunk > instances:
             return None
         self = copy.copy(last_state_hint)
-        self.instances = instances
-        if self.index >= instances:
+        if instances is not None:
+            self.instances = instances
+        if self.index >= self.instances:
             self.index = 0
         self.tp = 0
         self.rnd_index = None
@@ -242,6 +243,9 @@ class FuzzyBinaryState(BinaryState):
         return max(self.success_history)
 
     def prepare_rnd_step(self):
+        if self.chunk < 1:
+            logging.info(f'prepare_rnd_step: self={self}')
+        assert self.chunk >= 1
         le = math.log(self.chunk)
         ri = math.log(self.instances)
         rndlog = random.uniform(le, ri)

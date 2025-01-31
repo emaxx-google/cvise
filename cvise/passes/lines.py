@@ -82,6 +82,8 @@ class LinesPass(AbstractPass):
             state = FuzzyBinaryState.create(instances)
         if state and last_state_hint:
             state.success_history = last_state_hint.success_history
+        if state:
+            assert state.instances == instances
         # logging.info(f'[{os.getpid()}] LinesPass.new: test_case={test_case} arg={self.arg} formatted_len={instances} state={state}')
         return state
 
@@ -98,7 +100,8 @@ class LinesPass(AbstractPass):
         assert state.begin() < state.instances
         with open(test_case) as in_file:
             data = in_file.readlines()
-        # logging.info(f'[{os.getpid()}] LinesPass.transform: test_case={test_case} arg={self.arg} state={state} len={len(data)}')
+        # logging.info(f'[{os.getpid()}] LinesPass.transform: arg={self.arg} state={state} len={len(data)}')
+        assert len(data) == state.instances
 
         old_len = len(data)
         data = data[0 : state.begin()] + data[state.end() :]

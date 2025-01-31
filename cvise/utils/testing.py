@@ -466,7 +466,14 @@ class TestManager:
 
     def release_future(self, future):
         self.futures.remove(future)
-        self.future_to_pass.pop(future, None)
+
+        pass_ = self.future_to_pass[future]
+        assert pass_
+        pass_id = self.current_passes.index(pass_)
+        self.last_finished_order[pass_id] = future.order
+
+        self.future_to_pass.pop(future)
+
         self.release_folder(future)
 
     def save_extra_dir(self, test_case_path):
@@ -490,7 +497,7 @@ class TestManager:
                     # starting with Python 3.11: concurrent.futures.TimeoutError == TimeoutError
                     if type(future.exception()) in (TimeoutError, concurrent.futures.TimeoutError):
                         self.timeout_count += 1
-                        logging.warning(f'Test timed out: pass={self.future_to_pass[future]} state={future.dbg_state}')
+                        logging.warning(f'Test timed out: pass={self.future_to_pass[future]} state={future.state}')
                         if self.timeout_count < self.MAX_TIMEOUTS:
                             self.save_extra_dir(self.temporary_folders[future])
                             quit_loop = True
@@ -517,6 +524,17 @@ class TestManager:
                     quit_loop = True
                     p = self.future_to_pass[future]
                     self.states[self.current_passes.index(p)] = None
+                
+                pass_id = self.current_passes.index(self.future_to_pass[future])
+                if hasattr(test_env.state, 'instances') and self.states[pass_id] and test_env.state.instances != self.states[pass_id].instances:
+                    logging.info(f'Adjusting instances for {self.future_to_pass[future]} from {self.states[pass_id].instances} to {test_env.state.instances}')
+                    assert test_env.state.instances < self.states[pass_id].instances
+                    self.states[pass_id].instances = test_env.state.instances
+                    if self.states[pass_id].chunk > self.states[pass_id].instances:
+                        self.states[pass_id].chunk = self.states[pass_id].instances
+                    if self.states[pass_id].index >= self.states[pass_id].instances:
+                        self.states[pass_id].index = self.states[pass_id].instances - 1
+            
             else:
                 new_futures.add(future)
 
@@ -579,6 +597,7 @@ class TestManager:
         assert not self.futures
         assert not self.temporary_folders
         self.future_to_pass = {}
+        self.last_finished_order = [None] * len(passes)
         with pebble.ProcessPool(max_workers=self.parallel_tests) as pool:
             order = 1
             finished_jobs = 0
@@ -596,7 +615,7 @@ class TestManager:
 
             successes = self.next_successes_hint + self.successes_hint
             successes.sort(key=lambda i: -i[2])
-            self.successes_hint = successes[:10]
+            self.successes_hint = successes[:self.parallel_tests]
             self.next_successes_hint = []
 
             while any(self.states):
@@ -640,7 +659,7 @@ class TestManager:
                             finished_job_improves.append(improv)
                             assert len(finished_job_improves) == finished_jobs
                             pass_id = passes.index(pass_)
-                            logging.info(f'observed success success_cnt={success_cnt} improv={improv} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={order} finished_jobs={finished_jobs}')
+                            logging.info(f'observed success success_cnt={success_cnt} improv={improv} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={finished_jobs}')
                             self.next_successes_hint.append((env.state, pass_, improv))
                             if choose_better_by_end and False:  # DISABLED
                                 better = best_success_improv is None or env.state.end() / env.state.instances > best_success_env.state.end() / best_success_env.state.instances
@@ -668,6 +687,11 @@ class TestManager:
                     # logging.info(f'run_parallel_tests: prob={prob} finished_jobs={finished_jobs} max={best_success_improv} mean={mean} sigma={sigma} duration_till_now={duration_till_now} duration_till_best={duration_till_best} k={k}')
                     if prob is None or k > 1 and prob < 0.01:
                         logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} prob={prob} improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} choose_better_by_end={choose_better_by_end}')
+                        for pass_id, state in dict((fu.pass_id, fu.state)
+                                                   for fu in sorted(self.futures, key=lambda fu: -fu.order)
+                                                   if fu.order > (self.last_finished_order[fu.pass_id] or 0)).items():
+                            # logging.info(f'run_parallel_tests: rewinding {passes[pass_id]} from {self.states[pass_id]} to {state}')
+                            self.states[pass_id] = state
                         self.terminate_all(pool)
                         return best_success_env
 
@@ -681,6 +705,9 @@ class TestManager:
                     if not self.states[pass_id] or state.begin() >= self.states[pass_id].instances:
                         order += 1
                         continue
+                    if state.instances != self.states[pass_id].instances:
+                        logging.info(f'Fixup for success hint pass={pass_} state={state} self.states[]={self.states[pass_id]}')
+                        state.instances = self.states[pass_id].instances
                     should_advance = False
                 else:
                     pass_id = (order - 1) % (len(passes) + 1)
@@ -704,7 +731,9 @@ class TestManager:
                 )
                 test_env.is_regular_iteration = should_advance
                 future = pool.schedule(test_env.run, timeout=self.timeout)
-                future.dbg_state = state
+                future.order = order
+                future.pass_id = pass_id
+                future.state = state
                 self.future_to_pass[future] = pass_
                 assert future not in self.temporary_folders
                 self.temporary_folders[future] = folder
@@ -713,7 +742,9 @@ class TestManager:
                 # on_scheduled(self.current_pass, self.total_file_size)
                 order += 1
                 if should_advance:
+                    old_state = copy.copy(state)
                     state = pass_.advance(self.current_test_case, state)
+                    # logging.info(f'advance: from {old_state} to {state} pass={pass_}')
                     self.states[pass_id] = state
                     self.last_state_hint[pass_id] = state
                     if state is None and len(passes) == 1:
