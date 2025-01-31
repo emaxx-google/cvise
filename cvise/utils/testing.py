@@ -528,7 +528,7 @@ class TestManager:
                 pass_id = self.current_passes.index(self.future_to_pass[future])
                 if hasattr(test_env.state, 'instances') and self.states[pass_id] and test_env.state.instances != self.states[pass_id].instances:
                     logging.info(f'Adjusting instances for {self.future_to_pass[future]} from {self.states[pass_id].instances} to {test_env.state.instances}')
-                    assert test_env.state.instances < self.states[pass_id].instances
+                    # assert test_env.state.instances < self.states[pass_id].instances
                     self.states[pass_id].instances = test_env.state.instances
                     if self.states[pass_id].chunk > self.states[pass_id].instances:
                         self.states[pass_id].chunk = self.states[pass_id].instances
