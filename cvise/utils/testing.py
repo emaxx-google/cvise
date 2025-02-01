@@ -21,7 +21,7 @@ import statistics
 import time
 
 from cvise.cvise import CVise
-from cvise.passes.abstract import PassResult, ProcessEventNotifier, ProcessEventType
+from cvise.passes.abstract import PassResult, ProcessEventNotifier, ProcessEventType, FuzzyBinaryState
 from cvise.utils.error import AbsolutePathTestCaseError
 from cvise.utils.error import InsaneTestCaseError
 from cvise.utils.error import InvalidInterestingnessTestError
@@ -613,10 +613,11 @@ class TestManager:
             finished_job_improves = []
             start_time = time.monotonic()
 
-            successes = self.next_successes_hint + self.successes_hint
+            successes = [(s, p, i) for s, p, i in self.next_successes_hint if not isinstance(s, list)] + self.successes_hint
             successes.sort(key=lambda i: -i[2])
             self.successes_hint = successes[:self.parallel_tests]
             self.next_successes_hint = []
+            attempted_merges = set()
 
             while any(self.states):
                 # logging.info(f'run_parallel_tests: true states cnt {len(list(filter(None, self.states)))} success_cnt={success_cnt}')
@@ -685,8 +686,10 @@ class TestManager:
                     k = (duration_till_now / duration_till_best * best_success_improv - mean) / sigma if sigma else None
                     prob = math.floor(((finished_jobs - 1) / k**2 + 1) * (finished_jobs + 1) / finished_jobs) / (finished_jobs + 1) if sigma and k > 1 else None
                     # logging.info(f'run_parallel_tests: prob={prob} finished_jobs={finished_jobs} max={best_success_improv} mean={mean} sigma={sigma} duration_till_now={duration_till_now} duration_till_best={duration_till_best} k={k}')
-                    if prob is None or k > 1 and prob < 0.01:
+                    if prob is None or k > 1 and prob < 0.01 or order > self.parallel_tests * 10:
                         logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} prob={prob} improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} choose_better_by_end={choose_better_by_end}')
+                        if isinstance(best_success_env.state, list) and hasattr(best_success_pass, 'supports_merging') and best_success_pass.supports_merging():
+                            logging.info(f'YEAH!')
                         for pass_id, state in dict((fu.pass_id, fu.state)
                                                    for fu in sorted(self.futures, key=lambda fu: -fu.order)
                                                    if fu.order > (self.last_finished_order[fu.pass_id] or 0)).items():
@@ -695,22 +698,40 @@ class TestManager:
                         self.terminate_all(pool)
                         return best_success_env
 
-                if (order - 1) % (len(passes) + 1) == len(passes):
+                if (order - 1) % (len(passes) + 2) == len(passes):
                     if not self.successes_hint:
                         order += 1
                         continue
                     state, pass_, _ = self.successes_hint.pop(0)
                     pass_id = passes.index(pass_)
                     assert passes.count(pass_) == 1
-                    if not self.states[pass_id] or state.begin() >= self.states[pass_id].instances:
+                    if not self.states[pass_id] or (hasattr(state, 'begin') and state.begin() >= self.states[pass_id].instances):
                         order += 1
                         continue
-                    if state.instances != self.states[pass_id].instances:
+                    if hasattr(state, 'instances') and state.instances != self.states[pass_id].instances:
                         logging.info(f'Fixup for success hint pass={pass_} state={state} self.states[]={self.states[pass_id]}')
                         state.instances = self.states[pass_id].instances
                     should_advance = False
+                elif (order - 1) % (len(passes) + 2) == len(passes) + 1:
+                    bsum = None
+                    for candpass in passes:
+                        if hasattr(candpass, 'supports_merging') and candpass.supports_merging():
+                            candstates = [(s, i) for s, p, i in self.next_successes_hint if p == candpass and isinstance(s, FuzzyBinaryState)]
+                            if len(candstates) > 1:
+                                csum = sum(i for s, i in candstates)
+                                if csum not in attempted_merges and (bsum is None or csum > bsum):
+                                    attempted_merges.add(csum)
+                                    # logging.info(f'next_successes_hint={self.next_successes_hint}')
+                                    bsum = csum
+                                    pass_ = candpass
+                                    pass_id = passes.index(pass_)
+                                    state = [s for s, i in candstates]
+                    if bsum is None:
+                        order += 1
+                        continue
+                    should_advance = False
                 else:
-                    pass_id = (order - 1) % (len(passes) + 1)
+                    pass_id = (order - 1) % (len(passes) + 2)
                     if not self.states[pass_id]:
                         order += 1
                         continue

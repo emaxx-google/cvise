@@ -64,6 +64,9 @@ class LinesPass(AbstractPass):
         with open(test_case) as in_file:
             lines = in_file.readlines()
             return len(lines)
+        
+    def supports_merging(self):
+        return True
 
     def new(self, test_case, check_sanity=None, last_state_hint=None):
         self.bailout = False
@@ -96,6 +99,8 @@ class LinesPass(AbstractPass):
         return new_state
 
     def advance_on_success(self, test_case, state):
+        if not isinstance(state, FuzzyBinaryState):
+            state = state[-1]
         old = copy.copy(state)
         state = state.advance_on_success(self.__count_instances(test_case))
         if state:
@@ -104,14 +109,27 @@ class LinesPass(AbstractPass):
         return state
 
     def transform(self, test_case, state, process_event_notifier):
-        assert state.begin() < state.instances
         with open(test_case) as in_file:
             data = in_file.readlines()
         # logging.info(f'[{os.getpid()}] LinesPass.transform: arg={self.arg} state={state} len={len(data)}')
-        assert len(data) == state.instances
 
         old_len = len(data)
-        data = data[0 : state.begin()] + data[state.end() :]
+        if isinstance(state, FuzzyBinaryState):
+            assert state.begin() < state.instances
+            assert len(data) == state.instances
+            data = data[0 : state.begin()] + data[state.end() :]
+        else:
+            for s in state:
+                assert isinstance(s, FuzzyBinaryState)
+                assert len(data) == s.instances
+            segs = list(sorted([(s.begin(), s.end()) for s in state]))
+            segs.append((len(data), len(data)))
+            ndata = []
+            prevend = 0
+            for s in segs:
+                ndata += data[prevend: s[0]]
+                prevend = s[1]
+            data = ndata
         assert len(data) < old_len
 
         tmp = os.path.dirname(test_case)
