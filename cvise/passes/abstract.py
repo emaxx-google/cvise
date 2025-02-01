@@ -246,8 +246,10 @@ class FuzzyBinaryState(BinaryState):
         if self.chunk < 1:
             logging.info(f'prepare_rnd_step: self={self}')
         assert self.chunk >= 1
+        assert self.chunk <= self.instances
         le = math.log(self.chunk)
         ri = math.log(self.instances)
+        assert le <= ri
         rndlog = random.uniform(le, ri)
         self.rnd_chunk = round(math.exp(rndlog))
         assert self.chunk <= self.rnd_chunk <= self.instances
