@@ -86,7 +86,7 @@ class ClangBinarySearchPass(AbstractPass):
         state = state.advance_on_success(instances)
         if state:
             state.real_num_instances = None
-        logging.info(f'ClangBinarySearchPass.advance_on_success: delta_instances={old.instances-state.instances} chunk={old.chunk if old.tp==0 else old.rnd_chunk} tp={old.tp}')
+        logging.info(f'ClangBinarySearchPass.advance_on_success: delta_instances={old.instances-state.instances} chunk={old.rnd_chunk if old.tp==2 else old.chunk} tp={old.tp}')
         return state
 
     def count_instances(self, test_case):

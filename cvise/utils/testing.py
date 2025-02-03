@@ -686,7 +686,7 @@ class TestManager:
                     k = (duration_till_now / duration_till_best * best_success_improv - mean) / sigma if sigma else None
                     prob = math.floor(((finished_jobs - 1) / k**2 + 1) * (finished_jobs + 1) / finished_jobs) / (finished_jobs + 1) if sigma and k > 1 else None
                     # logging.info(f'run_parallel_tests: prob={prob} finished_jobs={finished_jobs} max={best_success_improv} mean={mean} sigma={sigma} duration_till_now={duration_till_now} duration_till_best={duration_till_best} k={k}')
-                    if prob is None or k > 1 and prob < 0.01 or order > self.parallel_tests * 10:
+                    if prob is None or k > 1 and prob < 0.01 or order > self.parallel_tests * 10 or finished_jobs >= 2 * self.parallel_tests:
                         logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} prob={prob} improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} choose_better_by_end={choose_better_by_end}')
                         if isinstance(best_success_env.state, list) and hasattr(best_success_pass, 'supports_merging') and best_success_pass.supports_merging():
                             logging.info(f'YEAH!')

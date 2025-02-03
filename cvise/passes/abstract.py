@@ -191,18 +191,20 @@ class FuzzyBinaryState(BinaryState):
     
     def begin(self):
         if self.tp == 0:
-            return super().begin()
-        else:
+            return self.index
+        elif self.tp == 1:
+            return max(0, self.instances - self.index - self.chunk)
+        elif self.tp == 2:
             return self.rnd_index
+        else:
+            assert False
 
     def end(self):
-        if self.tp == 0:
-            return super().end()
-        else:
-            return self.rnd_index + self.rnd_chunk
+        chunk = self.rnd_chunk if self.tp == 2 else self.chunk
+        return min(self.begin() + chunk, self.instances)
 
     def real_chunk(self):
-        if self.tp == 0:
+        if self.tp in (0, 1):
             return super().real_chunk()
         else:
             return self.rnd_chunk
@@ -211,6 +213,9 @@ class FuzzyBinaryState(BinaryState):
         self.success_history.append(0)
         state = copy.copy(self)
         if state.tp == 0:
+            state.tp += 1
+            return state
+        if state.tp == 1:
             state.tp += 1
             state.prepare_rnd_step()
             return state

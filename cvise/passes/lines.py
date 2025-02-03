@@ -105,7 +105,7 @@ class LinesPass(AbstractPass):
         state = state.advance_on_success(self.__count_instances(test_case))
         if state:
             state.stripped_topformlat_ok = old.stripped_topformlat_ok
-        logging.info(f'LinesPass.advance_on_success: delta={old.instances-state.instances} chunk={old.chunk if old.tp==0 else old.rnd_chunk} tp={old.tp}')
+        logging.info(f'LinesPass.advance_on_success: delta={old.instances-state.instances} chunk={old.rnd_chunk if old.tp==2 else old.chunk} tp={old.tp}')
         return state
 
     def transform(self, test_case, state, process_event_notifier):
