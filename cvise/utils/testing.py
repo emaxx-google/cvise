@@ -609,7 +609,7 @@ class TestManager:
             best_success_pass = None
             best_success_improv = None
             best_success_when = None
-            choose_better_by_end = random.random() < 0.1
+            choose_better_by_end = random.random() < 1/3
             finished_job_improves = []
             start_time = time.monotonic()
 
@@ -662,8 +662,13 @@ class TestManager:
                             pass_id = passes.index(pass_)
                             logging.info(f'observed success success_cnt={success_cnt} improv={improv} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={finished_jobs}')
                             self.next_successes_hint.append((env.state, pass_, improv))
-                            if choose_better_by_end and False:  # DISABLED
-                                better = best_success_improv is None or env.state.end() / env.state.instances > best_success_env.state.end() / best_success_env.state.instances
+                            if choose_better_by_end:
+                                def get_end(s):
+                                    if isinstance(s, list) and hasattr(s[0], 'instances'):
+                                        return max(get_end(i) for i in s)
+                                    else:
+                                        return s.end() / s.instances
+                                better = best_success_improv is None or get_end(env.state) > get_end(best_success_env.state)
                             else:
                                 better = best_success_improv is None or improv > best_success_improv
                             if better:
