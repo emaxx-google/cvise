@@ -496,16 +496,17 @@ class TestManager:
                 if future.exception():
                     # starting with Python 3.11: concurrent.futures.TimeoutError == TimeoutError
                     if type(future.exception()) in (TimeoutError, concurrent.futures.TimeoutError):
-                        self.timeout_count += 1
                         logging.warning(f'Test timed out: pass={self.future_to_pass[future]} state={future.state}')
-                        if self.timeout_count < self.MAX_TIMEOUTS:
-                            self.save_extra_dir(self.temporary_folders[future])
-                            quit_loop = True
-                            p = self.future_to_pass[future]
-                            assert p
-                            self.states[self.current_passes.index(p)] = None
-                        elif self.timeout_count == self.MAX_TIMEOUTS:
-                            logging.warning('Maximum number of timeout were reached: %d' % self.MAX_TIMEOUTS)
+                        if len(self.current_passes) == 1:
+                            self.timeout_count += 1
+                            if self.timeout_count < self.MAX_TIMEOUTS:
+                                self.save_extra_dir(self.temporary_folders[future])
+                                quit_loop = True
+                                p = self.future_to_pass[future]
+                                assert p
+                                self.states[self.current_passes.index(p)] = None
+                            elif self.timeout_count == self.MAX_TIMEOUTS:
+                                logging.warning('Maximum number of timeout were reached: %d' % self.MAX_TIMEOUTS)
                         continue
                     else:
                         raise future.exception()
