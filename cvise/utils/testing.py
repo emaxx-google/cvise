@@ -666,8 +666,10 @@ class TestManager:
                                 def get_end(s):
                                     if isinstance(s, list) and hasattr(s[0], 'instances'):
                                         return max(get_end(i) for i in s)
-                                    else:
+                                    elif hasattr(s, 'instances'):
                                         return s.end() / s.instances
+                                    else:
+                                        return 0
                                 better = best_success_improv is None or get_end(env.state) > get_end(best_success_env.state)
                             else:
                                 better = best_success_improv is None or improv > best_success_improv
