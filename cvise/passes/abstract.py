@@ -52,10 +52,11 @@ class BinaryState:
             self.chunk = int(self.chunk / 2)
             if self.chunk < 1:
                 return None
-            logging.debug(f'granularity reduced to {self.chunk}')
+            # logging.debug(f'granularity reduced to {self.chunk}')
             self.index = 0
         else:
-            logging.debug(f'***ADVANCE*** to {self}')
+            # logging.debug(f'***ADVANCE*** to {self}')
+            pass
         return self
 
     def advance_on_success(self, instances):
@@ -139,7 +140,7 @@ CORES = get_available_cores()
 
 class FuzzyBinaryState(BinaryState):
     def __repr__(self):
-        return f'FuzzyBinaryState(chunk={self.chunk} index={self.index} instances={self.instances} tp={self.tp} rnd_index={self.rnd_index} rnd_chunk={self.rnd_chunk})'
+        return f'FuzzyBinaryState(chunk={self.chunk} index={self.index} instances={self.instances} tp={self.tp} rnd_index={self.rnd_index} rnd_chunk={self.rnd_chunk} dbg_file={self.dbg_file} dbg_before={self.dbg_before} dbg_after={self.dbg_after})'
 
     @staticmethod
     def choose_success_history_size():
@@ -173,6 +174,9 @@ class FuzzyBinaryState(BinaryState):
         self.rnd_index = None
         self.rnd_chunk = None
         self.success_history = collections.deque(maxlen=FuzzyBinaryState.choose_success_history_size())
+        self.dbg_file = None
+        self.dbg_before = None
+        self.dbg_after = None
         return self
     
     @staticmethod
@@ -210,9 +214,13 @@ class FuzzyBinaryState(BinaryState):
     def advance(self):
         self.success_history.append(0)
         state = copy.copy(self)
+        state.dbg_file = None
+        state.dbg_before = None
+        state.dbg_after = None
         if state.tp == 0:
             state.tp += 1
             state.prepare_rnd_step()
+            # logging.debug(f'***ADVANCE*** to {state}')
             return state
         bi = super().advance()
         if not bi:
@@ -222,6 +230,7 @@ class FuzzyBinaryState(BinaryState):
         state.tp = 0
         state.rnd_index = None
         state.rnd_chunk = None
+        # logging.debug(f'***ADVANCE*** to {state}')
         return state
     
     def advance_on_success(self, instances):
@@ -253,6 +262,52 @@ class FuzzyBinaryState(BinaryState):
         while self.rnd_chunk is None or self.rnd_chunk < le or self.rnd_chunk > ri:
             self.rnd_chunk = round(random.gauss(peak, peak))
         self.rnd_index = random.randint(0, self.instances - self.rnd_chunk)
+
+
+class MultiFileFuzzyBinaryState(FuzzyBinaryState):
+    def __repr__(self):
+        return f'MultiFileFuzzyBinaryState(file_id={self.file_id} chunk={self.chunk} index={self.index} instances={self.instances} tp={self.tp} rnd_index={self.rnd_index} rnd_chunk={self.rnd_chunk} dbg_file={self.dbg_file} dbg_before={self.dbg_before} dbg_after={self.dbg_after})'
+
+    @staticmethod
+    def create(files, instances0):
+        if not files:
+            return None
+        zigote = FuzzyBinaryState.create(instances0)
+        self = MultiFileFuzzyBinaryState()
+        self.__dict__.update(zigote.__dict__)
+        self.file_id = 0
+        return self
+
+    def advance(self, all_files):
+        in_file = super().advance()
+        new = MultiFileFuzzyBinaryState()
+        new.file_id = self.file_id
+        while in_file is None:
+            new.file_id += 1
+            if new.file_id >= len(all_files):
+                return None
+            with open(all_files[new.file_id]) as f:
+                instances = len(f.readlines())
+            in_file = FuzzyBinaryState.create(instances)
+        new.__dict__.update(in_file.__dict__)
+        return new
+    
+    def advance_on_success(self, all_files):
+        with open(all_files[self.file_id]) as f:
+            instances = len(f.readlines())
+        in_file = super().advance_on_success(instances)
+        new = MultiFileFuzzyBinaryState()
+        new.file_id = self.file_id
+        if in_file is None:
+            new.file_id += 1
+            with open(all_files[new.file_id]) as f:
+                instances = len(f.readlines())
+            in_file = FuzzyBinaryState.create(instances)
+        new.__dict__.update(in_file.__dict__)
+        return new
+
+
+
 
 
 @unique

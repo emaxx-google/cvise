@@ -38,6 +38,11 @@ pebble.common.SLEEP_UNIT = 0.01
 MAX_PASS_INCREASEMENT_THRESHOLD = 3
 
 
+def get_file_size(path):
+    inner_paths = [f for f in Path(path).rglob('*') if not f.is_dir() and not f.is_symlink()] if os.path.isdir(path) else [path]
+    return sum(f.stat().st_size for f in inner_paths)
+
+
 @unique
 class PassCheckingOutcome(Enum):
     """Outcome of checking the result of an invocation of a pass."""
@@ -78,19 +83,21 @@ class TestEnvironment:
         self.pid_queue = pid_queue
         self.pwd = os.getcwd()
         self.test_case = test_case
-        self.base_size = test_case.stat().st_size
+        self.base_size = get_file_size(test_case)
         self.all_test_cases = all_test_cases
 
         # Copy files to the created folder
         for test_case in all_test_cases:
+            if os.path.basename(test_case) == os.path.basename(self.test_case):
+                continue
             (self.folder / test_case.parent).mkdir(parents=True, exist_ok=True)
-            shutil.copy2(test_case, self.folder / test_case.parent)
-        shutil.copy2(self.test_case, self.folder / test_case.parent)
+            shutil.copytree(test_case, self.folder / test_case.parent / os.path.basename(test_case), symlinks=True)
+        shutil.copytree(self.test_case, self.folder / test_case.parent / os.path.basename(test_case), symlinks=True)
         self.test_case = os.path.basename(self.test_case)
 
     @property
     def size_improvement(self):
-        return self.base_size - self.test_case_path.stat().st_size
+        return self.base_size - get_file_size(self.test_case_path)
 
     @property
     def test_case_path(self):
@@ -117,10 +124,11 @@ class TestEnvironment:
                 return self
 
             # run test script
-            self.exitcode = self.run_test(False)
+            self.exitcode = self.run_test(True)
             return self
-        except OSError:
+        except OSError as e:
             # this can happen when we clean up temporary files for cancelled processes
+            print('TestEnvironment::run OSError: ' + str(e))
             return self
         except Exception as e:
             print('Unexpected TestEnvironment::run failure: ' + str(e))
@@ -310,15 +318,11 @@ class TestManager:
 
     @property
     def total_file_size(self):
-        return self.get_file_size(self.test_cases)
+        return sum(get_file_size(t) for t in self.test_cases)
 
     @property
     def sorted_test_cases(self):
-        return sorted(self.test_cases, key=lambda x: x.stat().st_size, reverse=True)
-
-    @staticmethod
-    def get_file_size(files):
-        return sum(f.stat().st_size for f in files)
+        return sorted(self.test_cases, key=lambda x: get_file_size(x), reverse=True)
 
     @property
     def total_line_count(self):
@@ -327,10 +331,12 @@ class TestManager:
     @staticmethod
     def get_line_count(files):
         lines = 0
-        for file in files:
-            if is_readable_file(file):
-                with open(file) as f:
-                    lines += len([line for line in f.readlines() if line and not line.isspace()])
+        for outer_file in files:
+            inner_files = [f for f in Path(outer_file).rglob('*') if not f.is_dir() and not f.is_symlink()] if os.path.isdir(outer_file) else [outer_file]
+            for file in inner_files:
+                if is_readable_file(file):
+                    with open(file) as f:
+                        lines += len([line for line in f.readlines() if line and not line.isspace()])
         return lines
 
     def backup_test_cases(self):
@@ -527,14 +533,14 @@ class TestManager:
                     self.states[self.current_passes.index(p)] = None
                 
                 pass_id = self.current_passes.index(self.future_to_pass[future])
-                if hasattr(test_env.state, 'instances') and self.states[pass_id] and test_env.state.instances != self.states[pass_id].instances:
-                    logging.info(f'Adjusting instances for {self.future_to_pass[future]} from {self.states[pass_id].instances} to {test_env.state.instances}')
-                    # assert test_env.state.instances < self.states[pass_id].instances
-                    self.states[pass_id].instances = test_env.state.instances
-                    if self.states[pass_id].chunk > self.states[pass_id].instances:
-                        self.states[pass_id].chunk = self.states[pass_id].instances
-                    if self.states[pass_id].index >= self.states[pass_id].instances:
-                        self.states[pass_id].index = self.states[pass_id].instances - 1
+                # if hasattr(test_env.state, 'instances') and self.states[pass_id] and test_env.state.instances != self.states[pass_id].instances:
+                #     logging.info(f'Adjusting instances for {self.future_to_pass[future]} from {self.states[pass_id].instances} to {test_env.state.instances}')
+                #     # assert test_env.state.instances < self.states[pass_id].instances
+                #     self.states[pass_id].instances = test_env.state.instances
+                #     if self.states[pass_id].chunk > self.states[pass_id].instances:
+                #         self.states[pass_id].chunk = self.states[pass_id].instances
+                #     if self.states[pass_id].index >= self.states[pass_id].instances:
+                #         self.states[pass_id].index = self.states[pass_id].instances - 1
             
             else:
                 new_futures.add(future)
@@ -600,6 +606,8 @@ class TestManager:
         self.future_to_pass = {}
         self.last_finished_order = [None] * len(passes)
         with pebble.ProcessPool(max_workers=self.parallel_tests) as pool:
+            # print(f'TestManager.run_parallel_tests')
+
             order = 1
             finished_jobs = 0
             if len(passes) == 1:
@@ -621,6 +629,8 @@ class TestManager:
             attempted_merges = set()
 
             while any(self.states):
+                # print(f'TestManager.run_parallel_tests: while iteration')
+
                 # logging.info(f'run_parallel_tests: true states cnt {len(list(filter(None, self.states)))} success_cnt={success_cnt}')
                 # do not create too many states
                 if len(self.futures) >= self.parallel_tests:
@@ -657,7 +667,7 @@ class TestManager:
                             success_cnt += 1
                             finished_jobs += 1
                             assert finished_jobs <= order
-                            improv = self.run_test_case_size - env.test_case_path.stat().st_size
+                            improv = self.run_test_case_size - get_file_size(env.test_case_path)
                             finished_job_improves.append(improv)
                             assert len(finished_job_improves) == finished_jobs
                             pass_id = passes.index(pass_)
@@ -673,7 +683,9 @@ class TestManager:
                                 best_success_improv = improv
                                 best_success_when = time.monotonic()
                                 pa = os.path.join(self.tmp_for_best, os.path.basename(future.result().test_case_path))
-                                shutil.copy2(future.result().test_case_path, pa)
+                                logging.info(f'copied better res from {future.result().test_case_path} to {pa}')
+                                shutil.rmtree(pa, ignore_errors=True)
+                                shutil.copytree(future.result().test_case_path, pa, symlinks=True)
                                 best_success_env.test_case = pa
                             self.release_future(future)
                         self.current_pass = None
@@ -687,7 +699,7 @@ class TestManager:
                     k = (duration_till_now / duration_till_best * best_success_improv - mean) / sigma if sigma else None
                     prob = math.floor(((finished_jobs - 1) / k**2 + 1) * (finished_jobs + 1) / finished_jobs) / (finished_jobs + 1) if sigma and k > 1 else None
                     # logging.info(f'run_parallel_tests: prob={prob} finished_jobs={finished_jobs} max={best_success_improv} mean={mean} sigma={sigma} duration_till_now={duration_till_now} duration_till_best={duration_till_best} k={k}')
-                    if prob is None or k > 1 and prob < 0.01 or order > self.parallel_tests * 10:
+                    if prob is None or k > 1 and prob < 0.01 or order > self.parallel_tests * 1:
                         logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} prob={prob} improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} choose_better_by_end={choose_better_by_end}')
                         if isinstance(best_success_env.state, list) and hasattr(best_success_pass, 'supports_merging') and best_success_pass.supports_merging():
                             logging.info(f'YEAH!')
@@ -700,7 +712,7 @@ class TestManager:
                         return best_success_env
 
                 if (order - 1) % (len(passes) + 2) == len(passes):
-                    if not self.successes_hint:
+                    if not self.successes_hint or True:  # DISABLED
                         order += 1
                         continue
                     state, pass_, _ = self.successes_hint.pop(0)
@@ -709,9 +721,9 @@ class TestManager:
                     if not self.states[pass_id] or (hasattr(state, 'begin') and state.begin() >= self.states[pass_id].instances):
                         order += 1
                         continue
-                    if hasattr(state, 'instances') and state.instances != self.states[pass_id].instances:
-                        logging.info(f'Fixup for success hint pass={pass_} state={state} self.states[]={self.states[pass_id]}')
-                        state.instances = self.states[pass_id].instances
+                    # if hasattr(state, 'instances') and state.instances != self.states[pass_id].instances:
+                    #     logging.info(f'Fixup for success hint pass={pass_} state={state} self.states[]={self.states[pass_id]}')
+                    #     state.instances = self.states[pass_id].instances
                     should_advance = False
                 elif (order - 1) % (len(passes) + 2) == len(passes) + 1:
                     bsum = None
@@ -727,7 +739,7 @@ class TestManager:
                                     pass_ = candpass
                                     pass_id = passes.index(pass_)
                                     state = [s for s, i in candstates]
-                    if bsum is None:
+                    if bsum is None or True:  # DISABLED
                         order += 1
                         continue
                     should_advance = False
@@ -765,7 +777,8 @@ class TestManager:
                 order += 1
                 if should_advance:
                     old_state = copy.copy(state)
-                    state = pass_.advance(self.current_test_case, state)
+                    new_path = os.path.join(self.roots[pass_id+len(passes)], os.path.basename(self.current_test_case))
+                    state = pass_.advance(new_path, state)
                     # logging.info(f'advance: from {old_state} to {state} pass={pass_}')
                     self.states[pass_id] = state
                     self.last_state_hint[pass_id] = state
@@ -829,10 +842,10 @@ class TestManager:
         try:
             for test_case in self.sorted_test_cases:
                 self.current_test_case = test_case
-                starting_test_case_size = test_case.stat().st_size
+                starting_test_case_size = get_file_size(test_case)
                 self.success_count = 0
 
-                if self.get_file_size([test_case]) == 0:
+                if get_file_size(test_case) == 0:
                     continue
 
                 if not self.no_cache:
@@ -848,12 +861,13 @@ class TestManager:
 
                 # create initial state
                 new_path = os.path.join(self.roots[1], os.path.basename(self.current_test_case))
-                shutil.copy2(self.current_test_case, new_path)
+                shutil.copytree(self.current_test_case, new_path, symlinks=True)
                 self.states = [self.current_pass.new(new_path, self.check_sanity)]
                 self.skip = False
 
                 self.timeout_count = 0
                 while self.states[0] is not None and not self.skip:
+                    # print(f'TestManager.run_pass while iteration')
                     # Ignore more key presses after skip has been detected
                     if not self.skip_key_off and not self.skip:
                         key = logger.pressed_key()
@@ -864,7 +878,7 @@ class TestManager:
                             self.log_key_event('toggle print diff')
                             self.print_diff = not self.print_diff
 
-                    self.run_test_case_size = self.current_test_case.stat().st_size
+                    self.run_test_case_size = get_file_size(self.current_test_case)
                     success_env = self.run_parallel_tests(passes=[self.current_pass])
                     self.current_pass = pass_
                     self.kill_pid_queue()
@@ -874,7 +888,7 @@ class TestManager:
                         self.success_count += 1
 
                     # if the file increases significantly, bail out the current pass
-                    test_case_size = self.current_test_case.stat().st_size
+                    test_case_size = get_file_size(self.current_test_case)
                     if test_case_size >= MAX_PASS_INCREASEMENT_THRESHOLD * starting_test_case_size:
                         logging.info(
                             f'skipping the rest of the pass (huge file increasement '
@@ -941,10 +955,10 @@ class TestManager:
         try:
             for test_case in self.sorted_test_cases:
                 self.current_test_case = test_case
-                starting_test_case_size = test_case.stat().st_size
+                starting_test_case_size = get_file_size(test_case)
                 self.success_count = 0
 
-                if self.get_file_size([test_case]) == 0:
+                if get_file_size(test_case) == 0:
                     continue
 
                 # if not self.no_cache:
@@ -973,7 +987,7 @@ class TestManager:
                             self.log_key_event('toggle print diff')
                             self.print_diff = not self.print_diff
 
-                    self.run_test_case_size = self.current_test_case.stat().st_size
+                    self.run_test_case_size = get_file_size(self.current_test_case)
                     success_env = self.run_parallel_tests(passes)
                     self.kill_pid_queue()
 
@@ -982,7 +996,7 @@ class TestManager:
                         self.success_count += 1
 
                     # if the file increases significantly, bail out the current pass
-                    test_case_size = self.current_test_case.stat().st_size
+                    test_case_size = get_file_size(self.current_test_case)
                     if test_case_size >= MAX_PASS_INCREASEMENT_THRESHOLD * starting_test_case_size:
                         logging.info(
                             f'skipping the rest of the pass (huge file increasement '
@@ -1028,7 +1042,8 @@ class TestManager:
             futures = []
             for i, p in enumerate(passes):
                 new_path = os.path.join(self.roots[i+len(passes)], os.path.basename(self.current_test_case))
-                shutil.copy2(self.current_test_case, new_path)
+                shutil.rmtree(new_path, ignore_errors=True)
+                shutil.copytree(self.current_test_case, new_path, symlinks=True)
                 env = SetupEnvironment(p, self.test_script, new_path, self.test_cases, self.save_temps,
                                        self.last_state_hint[i])
                 futures.append(pool.schedule(env.execute))
@@ -1046,7 +1061,11 @@ class TestManager:
 
         try:
             logging.info(f'copying {test_env.test_case_path} to {self.current_test_case}')
-            shutil.copy(test_env.test_case_path, self.current_test_case)
+            with tempfile.TemporaryDirectory(dir=self.current_test_case.parent) as tmp_dest:
+                tmp_dest_subdir = Path(tmp_dest) / self.current_test_case.name
+                shutil.copytree(test_env.test_case_path, tmp_dest_subdir, symlinks=True)
+                os.replace(self.current_test_case, Path(tmp_dest) / 'tmp_old')
+                os.replace(tmp_dest_subdir, self.current_test_case)
         except FileNotFoundError:
             raise RuntimeError(
                 f"Can't find {self.current_test_case} -- did your interestingness test move it?"
@@ -1054,11 +1073,10 @@ class TestManager:
 
         if len(self.states) == 1:
             self.states = [self.current_pass.advance_on_success(test_env.test_case_path, test_env.state)]
-            with open(test_env.test_case_path) as f:
-                li = f.readlines()
             new_path = os.path.join(self.roots[1], os.path.basename(self.current_test_case))
-            logging.info(f'process_result: after advance_on_success: len={len(li)} copy_from={test_env.test_case_path} copy_to={new_path}')
-            shutil.copy2(test_env.test_case_path, new_path)
+            logging.info(f'process_result: after advance_on_success: copy_from={test_env.test_case_path} copy_to={new_path}')
+            shutil.rmtree(new_path, ignore_errors=True)
+            shutil.copytree(test_env.test_case_path, new_path, symlinks=True)
         # self.pass_statistic.add_success(self.current_pass)
         on_succeeded(self.current_pass, self.total_file_size)
 

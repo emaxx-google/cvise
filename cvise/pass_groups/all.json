@@ -1,13 +1,15 @@
 {"first": [
-    {"pass": "includes", "c": true },
-    {"pass": "unifdef", "exclude": ["windows"], "c": true },
-    {"pass": "comments", "c": true },
-    {"pass": "ifs", "c": true },
-    {"pass": "blank"}
- ],
+   {"pass": "lines", "arg": "0"},
+   {"pass": "lines", "arg": "1"},
+   {"pass": "lines", "arg": "2"},
+   {"pass": "lines", "arg": "3"},
+   {"pass": "lines", "arg": "4"},
+   {"pass": "lines", "arg": "6"},
+   {"pass": "lines", "arg": "8"},
+   {"pass": "lines", "arg": "10"}
+],
  "paced": [
-    {"pass": "clangbinarysearch", "arg": "replace-function-def-with-decl", "c": true },
-    {"pass": "clangbinarysearch", "arg": "remove-unused-function", "c": true },
+    {"pass": "delete-file"},
     {"pass": "lines", "arg": "0"},
     {"pass": "lines", "arg": "1"},
     {"pass": "lines", "arg": "2"},

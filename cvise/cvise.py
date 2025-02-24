@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import sys
 
 from cvise.passes.abstract import AbstractPass
 from cvise.passes.balanced import BalancedPass
@@ -9,6 +10,7 @@ from cvise.passes.clang import ClangPass
 from cvise.passes.clangbinarysearch import ClangBinarySearchPass
 from cvise.passes.clex import ClexPass
 from cvise.passes.comments import CommentsPass
+from cvise.passes.delete_file import DeleteFilePass
 from cvise.passes.gcdabinary import GCDABinaryPass
 from cvise.passes.ifs import IfPass
 from cvise.passes.includeincludes import IncludeIncludesPass
@@ -43,6 +45,7 @@ class CVise:
         'clangbinarysearch': ClangBinarySearchPass,
         'clex': ClexPass,
         'comments': CommentsPass,
+        'delete-file': DeleteFilePass,
         'gcda-binary': GCDABinaryPass,
         'ifs': IfPass,
         'includeincludes': IncludeIncludesPass,
@@ -163,6 +166,8 @@ class CVise:
         if not skip_initial:
             logging.info('INITIAL PASSES')
             self._run_additional_passes(pass_group['first'])
+        # logging.info('EXIT')
+        # sys.exit(-1)
 
         if pass_group.get('paced'):
             logging.info('PACED PASSES')

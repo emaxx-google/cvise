@@ -66,6 +66,8 @@ int threshold = 0;
                 emit();            /* preprocessor */
               }
 
+"\\\n"        { printf(" "); }
+
 "\n"          { printf(" "); }     /* not any above case, eat it*/
 
 "//".*"\n"    { emit(); }          /* C++ comment */
