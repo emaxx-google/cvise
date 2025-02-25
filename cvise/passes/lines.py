@@ -2,10 +2,12 @@ import copy
 import logging
 import os
 from pathlib import Path
+import random
 import re
 import shutil
 import subprocess
 import tempfile
+import types
 
 from cvise.passes.abstract import AbstractPass, FuzzyBinaryState, MultiFileFuzzyBinaryState, PassResult
 from cvise.utils.error import InsaneTestCaseError
@@ -67,7 +69,7 @@ class LinesPass(AbstractPass):
                 if self.arg != '0':
                     self.bailout = True
             else:
-                shutil.copy(stripped_tmp_file.name, test_case)
+                shutil.copytree(stripped_tmp_dir, test_case, symlinks=True, dirs_exist_ok=True)
                 return True
 
     def __count_instances(self, test_case):
@@ -81,14 +83,18 @@ class LinesPass(AbstractPass):
     def supports_merging(self):
         return True
 
-    def new(self, test_case, check_sanity=None, last_state_hint=None):
+    def new(self, test_case, check_sanity=None, last_state_hint=None, strategy=None):
         self.bailout = False
         # None means no topformflat
         if self.arg != 'None':
-            stripped_topformlat_ok = self.__format(test_case, check_sanity if not last_state_hint or not last_state_hint.stripped_topformlat_ok else None)
+            stripped_topformlat_ok = self.__format(test_case, None)
             if self.bailout:
                 logging.warning('Skipping pass as sanity check fails for topformflat output')
                 return None
+        state = types.SimpleNamespace()
+        state.id = 1
+        state.strategy = strategy
+        return state
         # instances = self.__count_instances(test_case)
         files = self.get_ordered_files_list(test_case)
         # logging.info(f'LinesPass.new: arg={self.arg} files={len(files)} test_case={test_case}')
@@ -118,6 +124,10 @@ class LinesPass(AbstractPass):
         return state
 
     def advance(self, test_case, state):
+        new = types.SimpleNamespace()
+        new.id = state.id + 1
+        new.strategy = state.strategy
+        return new
         old = copy.copy(state)
         all_files = self.get_ordered_files_list(test_case)
         new_state = state.advance(all_files)
@@ -141,6 +151,7 @@ class LinesPass(AbstractPass):
         return new_state
 
     def advance_on_success(self, test_case, state):
+        return state
         if not isinstance(state, FuzzyBinaryState):
             state = state[-1]
         all_files = self.get_ordered_files_list(test_case)
@@ -193,6 +204,26 @@ class LinesPass(AbstractPass):
         # logging.info(f'[{os.getpid()}] LinesPass.transform: arg={self.arg} state={state} test_case={test_case}')
 
         files = self.get_ordered_files_list(test_case)
+
+        while True:
+            FILE_ID_SKEW = 100
+            #  if state.strategy == "topo" else 1 if state.strategy == "size" else None
+            file_id = min(random.randrange(len(files)) for _ in range(FILE_ID_SKEW))
+            with open(files[file_id]) as f:
+                lines = f.readlines()
+            if not lines:
+                continue
+            chunk = min(random.randint(1, len(lines)) for _ in range(2))
+            begin = random.randrange(len(lines) - chunk + 1)
+            data = lines[:begin] + lines[begin+chunk:]
+            assert len(lines) > len(data)
+            with open(files[file_id], 'w') as f:
+                f.writelines(data)
+            state.dbg_file = files[file_id]
+            state.dbg_file_id = file_id
+            state.dbg_before = len(lines)
+            state.dbg_after = len(data)
+            return (PassResult.OK, state)
 
         states = [state] if isinstance(state, MultiFileFuzzyBinaryState) else state
         for state in states:

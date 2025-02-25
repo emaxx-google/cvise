@@ -42,6 +42,10 @@ def get_file_size(path):
     inner_paths = [f for f in Path(path).rglob('*') if not f.is_dir() and not f.is_symlink()] if os.path.isdir(path) else [path]
     return sum(f.stat().st_size for f in inner_paths)
 
+def get_file_count(path):
+    inner_paths = [f for f in Path(path).rglob('*') if not f.is_dir() and not f.is_symlink()] if os.path.isdir(path) else [path]
+    return len(inner_paths)
+
 
 @unique
 class PassCheckingOutcome(Enum):
@@ -266,6 +270,7 @@ class TestManager:
         self.tmp_for_best = None
         self.current_pass = None
         self.current_passes = None
+        self.choose_better_by_end = False
 
         for test_case in test_cases:
             test_case = Path(test_case)
@@ -319,6 +324,10 @@ class TestManager:
     @property
     def total_file_size(self):
         return sum(get_file_size(t) for t in self.test_cases)
+
+    @property
+    def total_file_count(self):
+        return sum(get_file_count(t) for t in self.test_cases)
 
     @property
     def sorted_test_cases(self):
@@ -618,7 +627,7 @@ class TestManager:
             best_success_pass = None
             best_success_improv = None
             best_success_when = None
-            choose_better_by_end = random.random() < 0.1
+            self.choose_better_by_end = random.random() < 0.5
             finished_job_improves = []
             start_time = time.monotonic()
 
@@ -673,8 +682,8 @@ class TestManager:
                             pass_id = passes.index(pass_)
                             logging.info(f'observed success success_cnt={success_cnt} improv={improv} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={finished_jobs}')
                             self.next_successes_hint.append((env.state, pass_, improv))
-                            if choose_better_by_end and False:  # DISABLED
-                                better = best_success_improv is None or env.state.end() / env.state.instances > best_success_env.state.end() / best_success_env.state.instances
+                            if self.choose_better_by_end and hasattr(env.state, 'dbg_file_id'):
+                                better = best_success_improv is None or not hasattr(best_success_env.state, 'dbg_file_id') or env.state.dbg_file_id < best_success_env.state.dbg_file_id
                             else:
                                 better = best_success_improv is None or improv > best_success_improv
                             if better:
@@ -700,7 +709,7 @@ class TestManager:
                     prob = math.floor(((finished_jobs - 1) / k**2 + 1) * (finished_jobs + 1) / finished_jobs) / (finished_jobs + 1) if sigma and k > 1 else None
                     # logging.info(f'run_parallel_tests: prob={prob} finished_jobs={finished_jobs} max={best_success_improv} mean={mean} sigma={sigma} duration_till_now={duration_till_now} duration_till_best={duration_till_best} k={k}')
                     if prob is None or k > 1 and prob < 0.01 or order > self.parallel_tests * 1:
-                        logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} prob={prob} improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} choose_better_by_end={choose_better_by_end}')
+                        logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} prob={prob} improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} choose_better_by_end={self.choose_better_by_end}')
                         if isinstance(best_success_env.state, list) and hasattr(best_success_pass, 'supports_merging') and best_success_pass.supports_merging():
                             logging.info(f'YEAH!')
                         for pass_id, state in dict((fu.pass_id, fu.state)
@@ -1045,7 +1054,7 @@ class TestManager:
                 shutil.rmtree(new_path, ignore_errors=True)
                 shutil.copytree(self.current_test_case, new_path, symlinks=True)
                 env = SetupEnvironment(p, self.test_script, new_path, self.test_cases, self.save_temps,
-                                       self.last_state_hint[i])
+                                       self.last_state_hint[i], strategy=("topo" if self.choose_better_by_end else "size"))
                 futures.append(pool.schedule(env.execute))
             for fu in futures:
                 state = fu.result()
@@ -1084,6 +1093,7 @@ class TestManager:
         notes = []
         notes.append(f'{round(pct, 1)}%')
         notes.append(f'{self.total_file_size} bytes')
+        notes.append(f'{self.total_file_count} files')
         if self.total_line_count:
             notes.append(f'{self.total_line_count} lines')
         if len(self.test_cases) > 1:
@@ -1093,16 +1103,17 @@ class TestManager:
 
 
 class SetupEnvironment:
-    def __init__(self, pass_, test_script, test_case, test_cases, save_temps, last_state_hint):
+    def __init__(self, pass_, test_script, test_case, test_cases, save_temps, last_state_hint, strategy):
         self.pass_ = pass_
         self.test_script = test_script
         self.test_case = test_case
         self.test_cases = test_cases
         self.save_temps = save_temps
         self.last_state_hint = last_state_hint
+        self.strategy = strategy
     
     def execute(self):
-        return self.pass_.new(self.test_case, self.check_sanity, last_state_hint=self.last_state_hint)
+        return self.pass_.new(self.test_case, self.check_sanity, last_state_hint=self.last_state_hint, strategy=self.strategy)
 
     def check_sanity(self, verbose=False):
         logging.debug('perform sanity check... ')
