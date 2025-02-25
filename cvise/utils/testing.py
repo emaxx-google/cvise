@@ -128,7 +128,7 @@ class TestEnvironment:
                 return self
 
             # run test script
-            self.exitcode = self.run_test(True)
+            self.exitcode = self.run_test(verbose=isinstance(self.state, list))
             return self
         except OSError as e:
             # this can happen when we clean up temporary files for cancelled processes
@@ -618,6 +618,7 @@ class TestManager:
             # print(f'TestManager.run_parallel_tests')
 
             order = 1
+            next_pass_to_schedule = 0
             finished_jobs = 0
             if len(passes) == 1:
                 self.timeout_count = 0
@@ -627,7 +628,6 @@ class TestManager:
             best_success_pass = None
             best_success_improv = None
             best_success_when = None
-            self.choose_better_by_end = random.random() < 0.5
             finished_job_improves = []
             start_time = time.monotonic()
 
@@ -681,18 +681,34 @@ class TestManager:
                             assert len(finished_job_improves) == finished_jobs
                             pass_id = passes.index(pass_)
                             logging.info(f'observed success success_cnt={success_cnt} improv={improv} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={finished_jobs}')
+                            if hasattr(pass_, 'on_success_observed'):
+                                pass_.on_success_observed(env.state)
                             self.next_successes_hint.append((env.state, pass_, improv))
-                            if self.choose_better_by_end and hasattr(env.state, 'dbg_file_id'):
-                                better = best_success_improv is None or not hasattr(best_success_env.state, 'dbg_file_id') or env.state.dbg_file_id < best_success_env.state.dbg_file_id
+                            if best_success_improv is None:
+                                better = True
                             else:
-                                better = best_success_improv is None or improv > best_success_improv
+                                if self.choose_better_by_end:
+
+                                    def get_score(state):
+                                        if isinstance(state, list):
+                                            return max(get_score(i) for i in state)
+                                        files_deleted = state.files_deleted if hasattr(state, 'files_deleted') else 0
+                                        improv_per_depth = state.improv_per_depth if hasattr(state, 'improv_per_depth') else []
+                                        assert files_deleted or improv_per_depth, f'{state}'
+                                        return files_deleted, improv_per_depth
+
+                                    new_s = get_score(env.state)
+                                    old_s = get_score(best_success_env.state)
+                                    better = new_s > old_s or (new_s == old_s and improv > best_success_improv)
+                                else:
+                                    better = improv > best_success_improv
                             if better:
                                 best_success_env = env
                                 best_success_pass = pass_
                                 best_success_improv = improv
                                 best_success_when = time.monotonic()
                                 pa = os.path.join(self.tmp_for_best, os.path.basename(future.result().test_case_path))
-                                logging.info(f'copied better res from {future.result().test_case_path} to {pa}')
+                                # logging.info(f'copied better res from {future.result().test_case_path} to {pa}')
                                 shutil.rmtree(pa, ignore_errors=True)
                                 shutil.copytree(future.result().test_case_path, pa, symlinks=True)
                                 best_success_env.test_case = pa
@@ -708,52 +724,34 @@ class TestManager:
                     k = (duration_till_now / duration_till_best * best_success_improv - mean) / sigma if sigma else None
                     prob = math.floor(((finished_jobs - 1) / k**2 + 1) * (finished_jobs + 1) / finished_jobs) / (finished_jobs + 1) if sigma and k > 1 else None
                     # logging.info(f'run_parallel_tests: prob={prob} finished_jobs={finished_jobs} max={best_success_improv} mean={mean} sigma={sigma} duration_till_now={duration_till_now} duration_till_best={duration_till_best} k={k}')
-                    if prob is None or k > 1 and prob < 0.01 or order > self.parallel_tests * 1:
+                    if prob is None or k > 1 and prob < 0.01 or order > self.parallel_tests * 5:
                         logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} prob={prob} improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} choose_better_by_end={self.choose_better_by_end}')
                         if isinstance(best_success_env.state, list) and hasattr(best_success_pass, 'supports_merging') and best_success_pass.supports_merging():
-                            logging.info(f'YEAH!')
+                            logging.info(f'used merged states!')
                         for pass_id, state in dict((fu.pass_id, fu.state)
-                                                   for fu in sorted(self.futures, key=lambda fu: -fu.order)
-                                                   if fu.order > (self.last_finished_order[fu.pass_id] or 0)).items():
+                                                for fu in sorted(self.futures, key=lambda fu: -fu.order)
+                                                if fu.order > (self.last_finished_order[fu.pass_id] or 0)).items():
                             # logging.info(f'run_parallel_tests: rewinding {passes[pass_id]} from {self.states[pass_id]} to {state}')
                             self.states[pass_id] = state
                         self.terminate_all(pool)
                         return best_success_env
-
-                if (order - 1) % (len(passes) + 2) == len(passes):
-                    if not self.successes_hint or True:  # DISABLED
-                        order += 1
-                        continue
-                    state, pass_, _ = self.successes_hint.pop(0)
-                    pass_id = passes.index(pass_)
-                    assert passes.count(pass_) == 1
-                    if not self.states[pass_id] or (hasattr(state, 'begin') and state.begin() >= self.states[pass_id].instances):
-                        order += 1
-                        continue
-                    # if hasattr(state, 'instances') and state.instances != self.states[pass_id].instances:
-                    #     logging.info(f'Fixup for success hint pass={pass_} state={state} self.states[]={self.states[pass_id]}')
-                    #     state.instances = self.states[pass_id].instances
-                    should_advance = False
-                elif (order - 1) % (len(passes) + 2) == len(passes) + 1:
-                    bsum = None
-                    for candpass in passes:
-                        if hasattr(candpass, 'supports_merging') and candpass.supports_merging():
-                            candstates = [(s, i) for s, p, i in self.next_successes_hint if p == candpass and isinstance(s, FuzzyBinaryState)]
-                            if len(candstates) > 1:
-                                csum = sum(i for s, i in candstates)
-                                if csum not in attempted_merges and (bsum is None or csum > bsum):
-                                    attempted_merges.add(csum)
-                                    # logging.info(f'next_successes_hint={self.next_successes_hint}')
-                                    bsum = csum
-                                    pass_ = candpass
-                                    pass_id = passes.index(pass_)
-                                    state = [s for s, i in candstates]
-                    if bsum is None or True:  # DISABLED
-                        order += 1
-                        continue
+                    
+                candstates = []
+                candimprov = 0
+                for s, p, i in self.next_successes_hint:
+                    if hasattr(p, 'supports_merging') and p.supports_merging() and not isinstance(s, list):
+                        candstates.append(s)
+                        pass_id = passes.index(p)
+                        candimprov += i
+                if len(candstates) > 1 and candimprov not in attempted_merges:
+                    attempted_merges.add(candimprov)
+                    state = candstates
                     should_advance = False
                 else:
-                    pass_id = (order - 1) % (len(passes) + 2)
+                    pass_id = next_pass_to_schedule
+                    next_pass_to_schedule += 1
+                    if next_pass_to_schedule == len(passes):
+                        next_pass_to_schedule = 0
                     if not self.states[pass_id]:
                         order += 1
                         continue
@@ -981,7 +979,9 @@ class TestManager:
                 #             logging.info(f'cache hit for {test_case}')
                 #             continue
 
+
                 # create initial state
+                self.choose_better_by_end = random.random() < 0.5
                 self.init_all_passes(passes)
                 self.skip = False
 
@@ -1025,6 +1025,7 @@ class TestManager:
                     #     logging.info(f'skipping after {self.success_count} successful transformations')
                     #     break
 
+                    self.choose_better_by_end = random.random() < 0.5
                     self.init_all_passes(passes)
 
                 # Cache result of this pass
@@ -1069,7 +1070,7 @@ class TestManager:
             logging.info(diff_str)
 
         try:
-            logging.info(f'copying {test_env.test_case_path} to {self.current_test_case}')
+            # logging.info(f'copying {test_env.test_case_path} to {self.current_test_case}')
             with tempfile.TemporaryDirectory(dir=self.current_test_case.parent) as tmp_dest:
                 tmp_dest_subdir = Path(tmp_dest) / self.current_test_case.name
                 shutil.copytree(test_env.test_case_path, tmp_dest_subdir, symlinks=True)

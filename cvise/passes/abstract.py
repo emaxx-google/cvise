@@ -263,7 +263,6 @@ class FuzzyBinaryState(BinaryState):
             self.rnd_chunk = round(random.gauss(peak, peak))
         self.rnd_index = random.randint(0, self.instances - self.rnd_chunk)
 
-
 class MultiFileFuzzyBinaryState(FuzzyBinaryState):
     def __repr__(self):
         return f'MultiFileFuzzyBinaryState(file_id={self.file_id} chunk={self.chunk} index={self.index} instances={self.instances} tp={self.tp} rnd_index={self.rnd_index} rnd_chunk={self.rnd_chunk} dbg_file={self.dbg_file} dbg_before={self.dbg_before} dbg_after={self.dbg_after})'
@@ -305,9 +304,6 @@ class MultiFileFuzzyBinaryState(FuzzyBinaryState):
             in_file = FuzzyBinaryState.create(instances)
         new.__dict__.update(in_file.__dict__)
         return new
-
-
-
 
 
 @unique

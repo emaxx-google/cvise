@@ -1,3 +1,4 @@
+import collections
 import copy
 import logging
 import os
@@ -14,157 +15,101 @@ from cvise.utils.error import InsaneTestCaseError
 from cvise.utils.misc import CloseableTemporaryFile
 
 
+success_histories = {}
+
+
 class LinesPass(AbstractPass):
     def check_prerequisites(self):
         return self.check_external_program('topformflat')
 
-    def __format(self, test_case, check_sanity):
-        with (
-            tempfile.TemporaryDirectory() as backup,
-            tempfile.TemporaryDirectory() as tmp_dir,
-            tempfile.TemporaryDirectory() as stripped_tmp_dir,
-        ):
-            files = self.get_ordered_files_list(test_case)
-            for in_file in files:
-                filerel = os.path.relpath(in_file, start=test_case)
-                with open(in_file) as file:
-                    tmp_file_path = Path(tmp_dir) / filerel
-                    tmp_file_path.parent.mkdir(parents=True, exist_ok=True)
-                    stripped_tmp_file_path = Path(stripped_tmp_dir) / filerel
-                    stripped_tmp_file_path.parent.mkdir(parents=True, exist_ok=True)
-                    if in_file.name == 'target.makefile' or in_file.suffix == '.txt' or in_file.suffix == '.cppmap':
-                        shutil.copy2(in_file, tmp_file_path)
-                        shutil.copy2(in_file, stripped_tmp_file_path)
-                        continue
-                    with open(tmp_file_path, 'w') as tmp_file:
-                        with open(stripped_tmp_file_path, 'w') as stripped_tmp_file:
-                            try:
-                                cmd = [self.external_programs['topformflat'], self.arg]
-                                with subprocess.Popen(cmd, stdin=file, stdout=subprocess.PIPE, text=True) as proc:
-                                    for line in proc.stdout:
-                                        if not line.isspace():
-                                            tmp_file.write(line)
-                                            linebreak = '\n' if line.endswith('\n') else ''
-                                            stripped_tmp_file.write(line.strip() + linebreak)
-                            except subprocess.SubprocessError:
-                                return False
-
-            # we need to check that sanity check is still fine
-            if check_sanity:
-                shutil.copytree(test_case, Path(backup), symlinks=True, dirs_exist_ok=True)
-                # try the stripped file first, fall back to the original stdout if needed
-                candidates = [stripped_tmp_dir, tmp_dir]
-                for candidate in candidates:
-                    shutil.copytree(candidate, test_case, symlinks=True, dirs_exist_ok=True)
-                    try:
-                        check_sanity()
-                    except InsaneTestCaseError:
-                        logging.info('LinesPass.__format: InsaneTestCaseError')
-                        pass
-                    else:
-                        # logging.info(f'taking {candidate} out of {candidates}')
-                        return stripped_tmp_file.name == candidate
-                shutil.copy(backup.name, test_case)
-                # if we are not the first lines pass, we should bail out
-                if self.arg != '0':
-                    self.bailout = True
-            else:
-                shutil.copytree(stripped_tmp_dir, test_case, symlinks=True, dirs_exist_ok=True)
-                return True
-
-    def __count_instances(self, test_case):
-        instances = 0
-        for file in self.get_ordered_files_list(test_case):
-            with open(file) as in_file:
-                lines = in_file.readlines()
-                instances += len(lines)
-        return instances
-        
     def supports_merging(self):
         return True
+    
+    def choose_rnd_file(self, files, path_to_depth, strategy):
+        RND_BIAS = 2
+        if strategy == "size":
+            order = copy.copy(files)
+            order.sort(key=lambda p: (-p.stat().st_size, p))
+            choice_idx = min(random.randrange(len(files)) for _ in range(RND_BIAS))
+            choice = order[choice_idx]
+        elif strategy == "topo":
+            depths = list(set(path_to_depth.values()))
+            depth_idx = min(random.randrange(len(depths)) for _ in range(RND_BIAS))
+            depth_choice = depths[depth_idx]
+            choice = random.choice([f for f, d in path_to_depth.items() if d == depth_choice])
+        else:
+            assert False, f'unknown strategy {strategy}'
+        return files.index(choice)
+    
+    def get_success_history(self, strategy):
+        key = f'{self} {strategy}'
+        return success_histories.setdefault(key, collections.deque(maxlen=300))
+
+    def choose_rnd_chunk(self, file, lines, success_history):
+        if success_history and max(success_history) > 0:
+            peak = max(success_history)
+        else:
+            peak = len(lines)
+        le = 1
+        ri = len(lines)
+        peak = max(peak, le)
+        peak = min(peak, ri)
+        chunk = None
+        while chunk is None or chunk < le or chunk > ri:
+            chunk = round(random.gauss(peak, peak))
+
+        begin = random.randrange(len(lines) - chunk + 1)
+        return begin, begin + chunk
 
     def new(self, test_case, check_sanity=None, last_state_hint=None, strategy=None):
-        self.bailout = False
-        # None means no topformflat
-        if self.arg != 'None':
-            stripped_topformlat_ok = self.__format(test_case, None)
-            if self.bailout:
-                logging.warning('Skipping pass as sanity check fails for topformflat output')
-                return None
-        state = types.SimpleNamespace()
-        state.id = 1
-        state.strategy = strategy
-        return state
-        # instances = self.__count_instances(test_case)
-        files = self.get_ordered_files_list(test_case)
-        # logging.info(f'LinesPass.new: arg={self.arg} files={len(files)} test_case={test_case}')
-        state = None
-        # if last_state_hint:
-        #     state = MultiFileFuzzyBinaryState.create_from_hint(instances, last_state_hint)
-        #     if state:
-        #         logging.info(f'LinesPass.new: arg={self.arg} hint to start from chunk={state.chunk} index={state.index} instead of {instances}')
-        if not state:
-            with open(files[0]) as f:
-                instances0 = len(f.readlines())
-            state = MultiFileFuzzyBinaryState.create(len(files), instances0)
-        if state and last_state_hint:
-            state.success_history = last_state_hint.success_history
-        if state:
-            # assert state.instances == instances
-            state.stripped_topformlat_ok = stripped_topformlat_ok
-        if state:
-            # logging.info(f'LinesPass: files={files[:10]}')
-            filesizes = []
-            for file in files:
-                with open(file) as f:
-                    lines = f.readlines()
-                    filesizes.append(len(lines))
-            state.chunk = min(state.chunk, max(filesizes))
-        # logging.info(f'[{os.getpid()}] LinesPass.new: test_case={test_case} arg={self.arg} state={state}')
-        return state
+        files, path_to_depth = self.get_ordered_files_list(test_case)
+        if not files:
+            return None
+        while True:
+            state = types.SimpleNamespace()
+            state.counter = 1
+            state.arg = self.arg
+            state.strategy = strategy
+            state.file_id = self.choose_rnd_file(files, path_to_depth, strategy)
+            file = files[state.file_id]
+            lines = self.reformat_file(file, self.arg)
+            if not lines:
+                continue
+            state.begin, state.end = self.choose_rnd_chunk(file, lines, self.get_success_history(strategy))
+            return state
+    
+    def reformat_file(self, file, arg):
+        assert arg is not None
+        with open(file) as f:
+            cmd = [self.external_programs['topformflat'], arg]
+            with subprocess.Popen(cmd, stdin=f, stdout=subprocess.PIPE, text=True) as proc:
+                lines = []
+                for line in proc.stdout:
+                    if not line.isspace():
+                        linebreak = '\n' if line.endswith('\n') else ''
+                        lines.append(line.strip() + linebreak)
+        return lines
 
     def advance(self, test_case, state):
-        new = types.SimpleNamespace()
-        new.id = state.id + 1
-        new.strategy = state.strategy
+        new = self.new(test_case, last_state_hint=state, strategy=state.strategy)
+        if new:
+            new.counter = state.counter + 1
+        self.get_success_history(state.strategy).append(0)
         return new
-        old = copy.copy(state)
-        all_files = self.get_ordered_files_list(test_case)
-        new_state = state.advance(all_files)
-        if new_state:
-            new_state.stripped_topformlat_ok = state.stripped_topformlat_ok
-        # if new_state and new_state.tp == 1:
-        #     filesizes = []
-        #     for file in all_files:
-        #         with open(file) as f:
-        #             lines = f.readlines()
-        #             filesizes.append(len(lines))
-        #     new_state.rnd_chunk = min(new_state.rnd_chunk, max(filesizes))
-        # logging.info(f'LinesPass.advance: old={old} new={new_state} test_case={test_case}')
-        if new_state and old.chunk != new_state.chunk:
-            # logging.info(f'LinesPass.advance: reducing granularity old={old} new={new_state}')
-            pass
-        if new_state:
-            new_state.dbg_file = None
-            new_state.dbg_before = None
-            new_state.dbg_after = None
-        return new_state
 
     def advance_on_success(self, test_case, state):
+        if not isinstance(state, list):
+            self.get_success_history(state.strategy).append(state.end - state.begin)
         return state
-        if not isinstance(state, FuzzyBinaryState):
-            state = state[-1]
-        all_files = self.get_ordered_files_list(test_case)
-        old = copy.copy(state)
-        state = state.advance_on_success(all_files)
-        if state:
-            state.stripped_topformlat_ok = old.stripped_topformlat_ok
-        logging.info(f'LinesPass.advance_on_success: delta={old.instances-state.instances} chunk={old.chunk if old.tp==0 else old.rnd_chunk} tp={old.tp}')
-        return state
+    
+    def on_success_observed(self, state):
+        if not isinstance(state, list):
+            self.get_success_history(state.strategy).append(state.end - state.begin)
 
     def get_ordered_files_list(self, test_case):
-        if not os.path.isdir(test_case):
-            return [Path(test_case)]
+        test_case = Path(test_case)
+        if not test_case.is_dir():
+            return [test_case], {test_case: 0}
         
         with open(Path(test_case) / 'target.makefile') as f:
             lines = f.readlines()
@@ -179,7 +124,8 @@ class LinesPass(AbstractPass):
         command = re.sub(r'\S*-fmodule\S*', '', command)
         command = f'~/clang-toys/calc-include-depth/calc-include-depth {root_file} -- {command} -resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk'
         path_and_depth = []
-        for line in subprocess.check_output(command, shell=True, cwd=test_case, stderr=subprocess.DEVNULL, encoding='utf-8').splitlines():
+        out = subprocess.check_output(command, shell=True, cwd=test_case, stderr=subprocess.DEVNULL, encoding='utf-8')
+        for line in out.splitlines():
             path, depth = line.split()
             path = Path(path)
             if not path.is_absolute():
@@ -187,57 +133,35 @@ class LinesPass(AbstractPass):
             assert path.exists(), f'doesnt exist: {path}'
             path_and_depth.append((path.resolve(), int(depth)))
         path_to_depth = dict(path_and_depth)
-
-        def find_depth(path):
-            return path_to_depth.get(path.resolve(), 1E9)
-            # for p, d in path_to_depth:
-            #     if Path(p) == path:
-            #         return d
-            # return 1E9
+        if not path_to_depth:
+            path_to_depth[root_file] = 0
 
         files = [f for f in Path(test_case).rglob('*')
                  if not f.is_dir() and not f.is_symlink() and f.name != 'target.makefile' and f.suffix != '.txt']
-        files.sort(key=lambda f: (find_depth(f), f.suffix != '.cc', -f.stat().st_size, f))
-        return files
+        files.sort(key=lambda f: (path_to_depth.get(f.resolve(), 1E9), f.suffix != '.cc', -f.stat().st_size, f))
+        return files, path_to_depth
 
     def transform(self, test_case, state, process_event_notifier):
-        # logging.info(f'[{os.getpid()}] LinesPass.transform: arg={self.arg} state={state} test_case={test_case}')
+        # if isinstance(state, list):
+        #     logging.info(f'[{os.getpid()}] LinesPass.transform: arg={self.arg} state={state} test_case={test_case}')
 
-        files = self.get_ordered_files_list(test_case)
+        files, path_to_depth = self.get_ordered_files_list(test_case)
+        max_depth = max(path_to_depth.values())
 
-        while True:
-            FILE_ID_SKEW = 100
-            #  if state.strategy == "topo" else 1 if state.strategy == "size" else None
-            file_id = min(random.randrange(len(files)) for _ in range(FILE_ID_SKEW))
-            with open(files[file_id]) as f:
-                lines = f.readlines()
-            if not lines:
-                continue
-            chunk = min(random.randint(1, len(lines)) for _ in range(2))
-            begin = random.randrange(len(lines) - chunk + 1)
-            data = lines[:begin] + lines[begin+chunk:]
-            assert len(lines) > len(data)
-            with open(files[file_id], 'w') as f:
-                f.writelines(data)
-            state.dbg_file = files[file_id]
-            state.dbg_file_id = file_id
-            state.dbg_before = len(lines)
-            state.dbg_after = len(data)
-            return (PassResult.OK, state)
-
-        states = [state] if isinstance(state, MultiFileFuzzyBinaryState) else state
-        for state in states:
-            path = files[state.file_id]
-            with open(path) as in_file:
-                data = in_file.readlines()
-            old_len = len(data)
-            assert old_len == state.instances, f'wrong line count: got {old_len} in {path}, expected from state {state}'
-            data = data[0 : state.begin()] + data[state.end():]
-            assert old_len > len(data)
-            with open(path, 'w') as out_file:
-                out_file.writelines(data)
-            state.dbg_file = path
-            state.dbg_before = old_len
-            state.dbg_after = len(data)
-
+        state_list = copy.copy(state) if isinstance(state, list) else [state]
+        state_list.sort(key=lambda s: (s.file_id, -s.begin))
+        improv_per_depth = [0] * (2 + max_depth)
+        for s in state_list:
+            file = files[s.file_id]
+            size_before = file.stat().st_size
+            s.dbg_file = str(file)
+            lines = self.reformat_file(file, s.arg)
+            lines = lines[:s.begin] + lines[s.end:]
+            with open(file, 'w') as f:
+                f.writelines(lines)
+            size_after = file.stat().st_size
+            depth = path_to_depth.get(file, max_depth + 1)
+            improv_per_depth[depth] += size_before - size_after
+            s.improv_per_depth = improv_per_depth
+        
         return (PassResult.OK, state)
