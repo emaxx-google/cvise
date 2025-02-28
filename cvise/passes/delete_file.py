@@ -33,7 +33,12 @@ class DeleteFilePass(AbstractPass):
 
     def transform(self, test_case, state, process_event_notifier):
         # logging.info(f'DeleteFilePass.transform: {state}')
-        out = subprocess.check_output(f'{TOOL} del {state.begin()+1} {state.end()+1}', shell=True, cwd=test_case, encoding='utf-8', stderr=subprocess.STDOUT)
+        proc = subprocess.Popen(
+            f'{TOOL} del {state.begin()+1} {state.end()+1}', shell=True, cwd=test_case,
+            encoding='utf-8', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        out, err = proc.communicate()
+        if proc.returncode:
+            raise RuntimeError(f'Failed: stdout:\n{out}\nstderr:\n{err}')
         s = [s.strip() for s in out.splitlines() if 'files for deletion:' in s]
         if s:
             state.dbg_file = s[0].split(':')[1].strip()

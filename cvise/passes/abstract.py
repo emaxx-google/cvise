@@ -217,7 +217,7 @@ class FuzzyBinaryState(BinaryState):
         state.dbg_file = None
         state.dbg_before = None
         state.dbg_after = None
-        if state.tp == 0:
+        if state.tp == 0 and state.chunk < state.instances:
             state.tp += 1
             state.prepare_rnd_step()
             # logging.debug(f'***ADVANCE*** to {state}')

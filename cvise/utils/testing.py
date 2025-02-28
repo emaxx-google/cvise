@@ -128,7 +128,7 @@ class TestEnvironment:
                 return self
 
             # run test script
-            self.exitcode = self.run_test(verbose=isinstance(self.state, list))
+            self.exitcode = self.run_test(verbose=True)
             return self
         except OSError as e:
             # this can happen when we clean up temporary files for cancelled processes
@@ -664,6 +664,24 @@ class TestManager:
                         self.terminate_all(pool)
                         return success
 
+                def better_than_best(state, improv):
+                    if best_success_improv is None:
+                        return True
+                    if not self.choose_better_by_end:
+                        return improv > best_success_improv
+
+                    def get_score(state):
+                        if isinstance(state, list):
+                            return max(get_score(i) for i in state)
+                        files_deleted = state.files_deleted if hasattr(state, 'files_deleted') else 0
+                        improv_per_depth = state.improv_per_depth if hasattr(state, 'improv_per_depth') else []
+                        assert files_deleted or improv_per_depth, f'{state}'
+                        return files_deleted, improv_per_depth
+
+                    new_s = get_score(state)
+                    old_s = get_score(best_success_env.state)
+                    return new_s > old_s or (new_s == old_s and improv > best_success_improv)
+
                 tmp_futures = copy.copy(self.futures)
                 for future in tmp_futures:
                     if future.done() and not future.exception():
@@ -684,25 +702,7 @@ class TestManager:
                             if hasattr(pass_, 'on_success_observed'):
                                 pass_.on_success_observed(env.state)
                             self.next_successes_hint.append((env.state, pass_, improv))
-                            if best_success_improv is None:
-                                better = True
-                            else:
-                                if self.choose_better_by_end:
-
-                                    def get_score(state):
-                                        if isinstance(state, list):
-                                            return max(get_score(i) for i in state)
-                                        files_deleted = state.files_deleted if hasattr(state, 'files_deleted') else 0
-                                        improv_per_depth = state.improv_per_depth if hasattr(state, 'improv_per_depth') else []
-                                        assert files_deleted or improv_per_depth, f'{state}'
-                                        return files_deleted, improv_per_depth
-
-                                    new_s = get_score(env.state)
-                                    old_s = get_score(best_success_env.state)
-                                    better = new_s > old_s or (new_s == old_s and improv > best_success_improv)
-                                else:
-                                    better = improv > best_success_improv
-                            if better:
+                            if better_than_best(env.state, improv):
                                 best_success_env = env
                                 best_success_pass = pass_
                                 best_success_improv = improv
@@ -726,8 +726,6 @@ class TestManager:
                     # logging.info(f'run_parallel_tests: prob={prob} finished_jobs={finished_jobs} max={best_success_improv} mean={mean} sigma={sigma} duration_till_now={duration_till_now} duration_till_best={duration_till_best} k={k}')
                     if prob is None or k > 1 and prob < 0.01 or order > self.parallel_tests * 5:
                         logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} prob={prob} improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} choose_better_by_end={self.choose_better_by_end}')
-                        if isinstance(best_success_env.state, list) and hasattr(best_success_pass, 'supports_merging') and best_success_pass.supports_merging():
-                            logging.info(f'used merged states!')
                         for pass_id, state in dict((fu.pass_id, fu.state)
                                                 for fu in sorted(self.futures, key=lambda fu: -fu.order)
                                                 if fu.order > (self.last_finished_order[fu.pass_id] or 0)).items():
@@ -736,17 +734,22 @@ class TestManager:
                         self.terminate_all(pool)
                         return best_success_env
                     
-                candstates = []
-                candimprov = 0
+                mergecands = {}
+                mergeimprov = {}
+                mergepass = {}
                 for s, p, i in self.next_successes_hint:
                     if hasattr(p, 'supports_merging') and p.supports_merging() and not isinstance(s, list):
-                        candstates.append(s)
-                        pass_id = passes.index(p)
-                        candimprov += i
-                if len(candstates) > 1 and candimprov not in attempted_merges:
-                    attempted_merges.add(candimprov)
-                    state = candstates
-                    should_advance = False
+                        mergekey = p.supports_merging()
+                        mergecands.setdefault(mergekey, []).append(s)
+                        mergepass[mergekey] = passes.index(p)
+                        mergeimprov[mergekey] = mergeimprov.get(mergekey, 0) + i
+                for mergekey, cands in mergecands.items():
+                    if len(cands) > 1 and better_than_best(cands, mergeimprov[mergekey]) and mergeimprov[mergekey] not in attempted_merges:
+                        attempted_merges.add(mergeimprov[mergekey])
+                        state = cands
+                        pass_id = mergepass[mergekey]
+                        should_advance = False
+                        break
                 else:
                     pass_id = next_pass_to_schedule
                     next_pass_to_schedule += 1
