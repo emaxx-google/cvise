@@ -93,6 +93,16 @@ class TreeSitterPass(AbstractPass):
                 fs.writelines([str(p)+'\n' for p in files])
                 fs.seek(0)
                 out = subprocess.check_output(cmd, encoding='utf-8', stdin=fs, stderr=subprocess.STDOUT)
+                best_dbg = None
+                for l in out.splitlines():
+                    m = re.match(r'editing .*: old size ([0-9]+) new size ([0-9]+)', l)
+                    if m:
+                        improv = int(m[1]) - int(m[2])
+                        if best_dbg is None or improv > best_dbg:
+                            best_dbg = improv
+                            for s in state_list:
+                                if le <= s.begin() and s.end() <= ri:
+                                    s.dbg_file = l.strip()
 
         max_depth = max(path_to_depth.values())
         improv_per_depth = [0] * (2 + max_depth)
