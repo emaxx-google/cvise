@@ -107,7 +107,7 @@ class TreeSitterPass(AbstractPass):
         max_depth = max(path_to_depth.values())
         improv_per_depth = [0] * (2 + max_depth)
         for p in files:
-            d = path_to_depth.get(p, max_depth + 1)
+            d = path_to_depth.get(p.resolve(), max_depth + 1)
             improv_per_depth[d] += path_to_size[p] - p.stat().st_size
         for s in state_list:
             s.improv_per_depth = improv_per_depth
@@ -150,7 +150,12 @@ class TreeSitterPass(AbstractPass):
         if not path_to_depth:
             path_to_depth[root_file] = 0
 
+        max_depth = max(path_to_depth.values())
+        depth_threshold = (max_depth + 1) // 2 if strategy == 'topo' else 1E10
+
         files = [f for f in Path(test_case).rglob('*')
-                 if not f.is_dir() and not f.is_symlink() and f.name != 'target.makefile' and f.suffix != '.txt' and f.suffix != '.cppmap']
+                 if not f.is_dir() and not f.is_symlink() and f.name != 'target.makefile' and f.suffix != '.txt' and f.suffix != '.cppmap'
+                    and path_to_depth.get(f.resolve(), 1E9) <= depth_threshold]
         files.sort(key=lambda f: (path_to_depth.get(f.resolve(), 1E9) if strategy == 'topo' else 0, f.suffix != '.cc', f))
+
         return files, path_to_depth
