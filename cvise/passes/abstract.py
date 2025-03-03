@@ -140,7 +140,7 @@ CORES = get_available_cores()
 
 class FuzzyBinaryState(BinaryState):
     def __repr__(self):
-        return f'FuzzyBinaryState(chunk={self.chunk} index={self.index} instances={self.instances} tp={self.tp} rnd_index={self.rnd_index} rnd_chunk={self.rnd_chunk} dbg_file={self.dbg_file} dbg_before={self.dbg_before} dbg_after={self.dbg_after})'
+        return f'FuzzyBinaryState(chunk={self.chunk} index={self.index} instances={self.instances} tp={self.tp} rnd_index={self.rnd_index} rnd_chunk={self.rnd_chunk} dbg_file={self.dbg_file} dbg_before={self.dbg_before} dbg_after={self.dbg_after} strategy={self.strategy if hasattr(self, "strategy") else None} improv_per_depth={self.improv_per_depth if hasattr(self, "improv_per_depth") else None})'
 
     @staticmethod
     def choose_success_history_size():
