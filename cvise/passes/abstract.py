@@ -49,9 +49,9 @@ class BinaryState:
         self = self.copy()
         self.index += self.chunk
         if self.index >= self.instances:
-            self.chunk = int(self.chunk / 2)
-            if self.chunk < 1:
+            if self.chunk <= 1:
                 return None
+            self.chunk = int((self.chunk + 1) / 2)
             # logging.debug(f'granularity reduced to {self.chunk}')
             self.index = 0
         else:
