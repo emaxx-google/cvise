@@ -23,7 +23,7 @@ class DeleteFilePass(AbstractPass):
         return state
 
     def advance(self, test_case, state):
-        new = state.advance()
+        new = state.advance(strategy='size')
         if new:
             new.files_deleted = new.end() - new.begin()
         return new

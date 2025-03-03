@@ -10,9 +10,8 @@
 ],
  "paced": [
     {"pass": "delete-file"},
-    {"pass": "tree_sitter", "arg": "replace-function-def-with-decl"},
-    {"pass": "tree_sitter", "arg": "replace-function-def-with-decl"},
-    {"pass": "tree_sitter", "arg": "replace-function-def-with-decl"},
+    {"pass": "tree_sitter", "arg": "replace-function-def-with-decl", "strategy": "topo", "jobs": 8},
+    {"pass": "tree_sitter", "arg": "replace-function-def-with-decl", "strategy": "size", "jobs": 8},
     {"pass": "lines", "arg": "0"},
     {"pass": "lines", "arg": "1"},
     {"pass": "lines", "arg": "2"},

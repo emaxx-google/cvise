@@ -12,12 +12,17 @@ from cvise.passes.abstract import AbstractPass, FuzzyBinaryState, PassResult
 
 
 TOOL = '/usr/local/google/home/emaxx/cvise/cvise/tree_sit/func_body_remover'
-TOPO_BIAS = 3
 
 success_histories = {}
 
 
 class TreeSitterPass(AbstractPass):
+    def __repr__(self):
+        s = super().__repr__()
+        if self.strategy is not None:
+            s += f' [strategy {self.strategy}]'
+        return s
+
     def check_prerequisites(self):
         return True
 
@@ -42,19 +47,18 @@ class TreeSitterPass(AbstractPass):
         if state:
             state.success_history = self.get_success_history(strategy)
             state.strategy = strategy
-        # logging.info(f'TreeSitterPass.new: state={state} instances={instances} stdout="{out}"')
+        while state and strategy == 'topo' and state.tp == 0:
+            state = state.advance(strategy)
+        logging.debug(f'TreeSitterPass.new: state={state} instances={instances} stdout="{out.strip()}"')
         return state
 
     def advance(self, test_case, state):
-        new = state.advance()
-        if new and new.tp == 1 and state.strategy == 'topo':
-            for _ in range(TOPO_BIAS-1):
-                another = state.advance()
-                if another and another.begin() < new.begin():
-                    new = another
-        # logging.info(f'TreeSitterPass.advance: old={state} new={new}')
+        new = state.advance(state.strategy)
+        logging.debug(f'TreeSitterPass.advance: old={state} new={new}')
         if new:
             new.strategy = state.strategy
+        while new and new.strategy == 'topo' and new.tp == 0:
+            new = new.advance(new.strategy)
         return new
     
     def advance_on_success(self, test_case, state):
@@ -66,22 +70,29 @@ class TreeSitterPass(AbstractPass):
         if not isinstance(state, list):
             self.get_success_history(state.strategy).append(state.end() - state.begin())
 
+    def merge_segments(self, segments):
+        result = []
+        for le, ri in sorted(segments):
+            if result and result[-1][1] >= le:
+                result[-1] = (result[-1][0], max(result[-1][1], ri))
+            else:
+                result.append((le, ri))
+        return result
+
     def transform(self, test_case, state, process_event_notifier):
-        # logging.info(f'TreeSitterPass.transform: state={state}')
+        logging.debug(f'TreeSitterPass.transform: state={state}')
         state_list = copy.copy(state) if isinstance(state, list) else [state]
 
         files, path_to_depth = self.get_ordered_files_list(test_case, state_list[0].strategy)
         path_to_size = dict((p, p.stat().st_size) for p in files)
 
-        state_list.sort(key=lambda s: -s.begin())
-
-        for s in state_list:
-            cmd = [TOOL, str(s.begin()+1), str(s.end())]
+        segments = [(s.begin(), s.end()) for s in state_list]
+        for le, ri in reversed(self.merge_segments(segments)):
+            cmd = [TOOL, str(le+1), str(ri)]
             with tempfile.NamedTemporaryFile('wt') as fs:
                 fs.writelines([str(p)+'\n' for p in files])
                 fs.seek(0)
                 out = subprocess.check_output(cmd, encoding='utf-8', stdin=fs, stderr=subprocess.STDOUT)
-            s.dbg_file = out.strip()[-100:]
 
         max_depth = max(path_to_depth.values())
         improv_per_depth = [0] * (2 + max_depth)
@@ -102,18 +113,24 @@ class TreeSitterPass(AbstractPass):
             lines = f.readlines()
             for i, l in enumerate(lines):
                 if '.o:' in l:
-                    command = lines[i+1].strip()
+                    orig_command = lines[i+1].strip()
                     break
             else:
                 raise RuntimeError("compile command not found in makefile")
             
         root_file = next(Path(test_case).rglob('*.cc'))
-        command = re.sub(r'\S*-fmodule\S*', '', command)
-        command = f'~/clang-toys/calc-include-depth/calc-include-depth {root_file} -- {command} -resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk'
+        orig_command = re.sub(r'\S*-fmodule\S*', '', orig_command).split()
+        command = [
+            '/usr/local/google/home/emaxx/clang-toys/calc-include-depth/calc-include-depth',
+            root_file,
+            '--',
+            '-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk'] + orig_command
         path_and_depth = []
-        out = subprocess.check_output(command, shell=True, cwd=test_case, stderr=subprocess.DEVNULL, encoding='utf-8')
+        out = subprocess.check_output(command, cwd=test_case, stderr=subprocess.DEVNULL, encoding='utf-8')
         for line in out.splitlines():
-            path, depth = line.split()
+            if not line.strip():
+                continue
+            path, depth = line.rsplit(maxsplit=1)
             path = Path(path)
             if not path.is_absolute():
                 path = Path(test_case) / path

@@ -128,7 +128,7 @@ class TestEnvironment:
                 return self
 
             # run test script
-            self.exitcode = self.run_test(verbose=True)
+            self.exitcode = self.run_test(verbose=False)
             return self
         except OSError as e:
             # this can happen when we clean up temporary files for cancelled processes
@@ -270,7 +270,7 @@ class TestManager:
         self.tmp_for_best = None
         self.current_pass = None
         self.current_passes = None
-        self.choose_better_by_end = False
+        self.strategy = 'size'
 
         for test_case in test_cases:
             test_case = Path(test_case)
@@ -298,9 +298,9 @@ class TestManager:
             == 0
         )
 
-    def create_root(self, p=None):
+    def create_root(self, p=None, suffix=''):
         pass_name = str(p or self.current_pass).replace('::', '-')
-        root = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}{pass_name}-')
+        root = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}{pass_name}{suffix}-')
         self.roots.append(root)
         logging.debug(f'Creating pass root folder: {root}')
 
@@ -619,6 +619,7 @@ class TestManager:
 
             order = 1
             next_pass_to_schedule = 0
+            pass_job_index = 0
             finished_jobs = 0
             if len(passes) == 1:
                 self.timeout_count = 0
@@ -667,7 +668,7 @@ class TestManager:
                 def better_than_best(state, improv):
                     if best_success_improv is None:
                         return True
-                    if not self.choose_better_by_end:
+                    if self.strategy == 'size':
                         return improv > best_success_improv
 
                     def get_score(state):
@@ -725,7 +726,7 @@ class TestManager:
                     prob = math.floor(((finished_jobs - 1) / k**2 + 1) * (finished_jobs + 1) / finished_jobs) / (finished_jobs + 1) if sigma and k > 1 else None
                     # logging.info(f'run_parallel_tests: prob={prob} finished_jobs={finished_jobs} max={best_success_improv} mean={mean} sigma={sigma} duration_till_now={duration_till_now} duration_till_best={duration_till_best} k={k}')
                     if prob is None or k > 1 and prob < 0.01 or order > self.parallel_tests * 5:
-                        logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} prob={prob} improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} choose_better_by_end={self.choose_better_by_end}')
+                        logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} prob={prob} improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} strategy={self.strategy}')
                         for pass_id, state in dict((fu.pass_id, fu.state)
                                                 for fu in sorted(self.futures, key=lambda fu: -fu.order)
                                                 if fu.order > (self.last_finished_order[fu.pass_id] or 0)).items():
@@ -751,13 +752,14 @@ class TestManager:
                         should_advance = False
                         break
                 else:
+                    pass_job_index += 1
+                    while pass_job_index >= passes[next_pass_to_schedule].jobs or not self.states[next_pass_to_schedule] or passes[next_pass_to_schedule].strategy and passes[next_pass_to_schedule].strategy != self.strategy:
+                        pass_job_index = 0
+                        if next_pass_to_schedule + 1 < len(passes):
+                            next_pass_to_schedule += 1
+                        else:
+                            next_pass_to_schedule = 0
                     pass_id = next_pass_to_schedule
-                    next_pass_to_schedule += 1
-                    if next_pass_to_schedule == len(passes):
-                        next_pass_to_schedule = 0
-                    if not self.states[pass_id]:
-                        order += 1
-                        continue
                     state = self.states[pass_id]
                     should_advance = True
                 pass_ = passes[pass_id]
@@ -832,7 +834,7 @@ class TestManager:
         m = Manager()
         self.pid_queue = m.Queue()
         self.create_root()
-        self.create_root()
+        self.create_root(suffix='init')
         pass_key = repr(self.current_pass)
         self.last_state_hint = [None]
         self.successes_hint = []
@@ -944,9 +946,9 @@ class TestManager:
         self.pid_queue = m.Queue()
         if not self.tmp_for_best:
             self.tmp_for_best = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}best-')
-        for _ in range(2):
+        for i in range(2):
             for p in passes:
-                self.create_root(p)
+                self.create_root(p, 'init' if i > 0 else '')
         # pass_key = repr(self.current_pass)
 
         # logging.info(f'===< {self.current_pass} >===')
@@ -984,7 +986,7 @@ class TestManager:
 
 
                 # create initial state
-                self.choose_better_by_end = random.random() < 0.5
+                self.strategy = "topo" if random.random() < 0.5 else "size"                
                 self.init_all_passes(passes)
                 self.skip = False
 
@@ -1028,7 +1030,7 @@ class TestManager:
                     #     logging.info(f'skipping after {self.success_count} successful transformations')
                     #     break
 
-                    self.choose_better_by_end = random.random() < 0.5
+                    self.strategy = "topo" if random.random() < 0.5 else "size"
                     self.init_all_passes(passes)
 
                 # Cache result of this pass
@@ -1054,16 +1056,22 @@ class TestManager:
         with pebble.ProcessPool(max_workers=len(passes)) as pool:
             futures = []
             for i, p in enumerate(passes):
-                new_path = os.path.join(self.roots[i+len(passes)], os.path.basename(self.current_test_case))
-                shutil.rmtree(new_path, ignore_errors=True)
-                shutil.copytree(self.current_test_case, new_path, symlinks=True)
-                env = SetupEnvironment(p, self.test_script, new_path, self.test_cases, self.save_temps,
-                                       self.last_state_hint[i], strategy=("topo" if self.choose_better_by_end else "size"))
-                futures.append(pool.schedule(env.execute))
-            for fu in futures:
-                state = fu.result()
-                self.states.append(state)
-                self.last_state_hint[i] = state
+                if not p.strategy or p.strategy == self.strategy:
+                    new_path = os.path.join(self.roots[i+len(passes)], os.path.basename(self.current_test_case))
+                    shutil.rmtree(new_path, ignore_errors=True)
+                    shutil.copytree(self.current_test_case, new_path, symlinks=True)
+                    env = SetupEnvironment(p, self.test_script, new_path, self.test_cases, self.save_temps,
+                                           self.last_state_hint[i], strategy=self.strategy)
+                    futures.append(pool.schedule(env.execute))
+                else:
+                    futures.append(None)
+            for i, fu in enumerate(futures):
+                if fu is None:
+                    self.states.append(None)
+                else:
+                    state = fu.result()
+                    self.states.append(state)
+                    self.last_state_hint[i] = state
 
     def process_result(self, test_env):
         if self.print_diff:

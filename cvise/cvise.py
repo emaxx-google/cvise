@@ -133,6 +133,10 @@ class CVise:
                 if str(pass_instance) in removed_passes:
                     continue
 
+                if 'strategy' in pass_dict:
+                    pass_instance.strategy = pass_dict['strategy']
+                pass_instance.jobs = pass_dict.get('jobs', 1)
+
                 if not_c and 'c' in pass_dict and pass_dict['c']:
                     continue
                 elif not renaming and 'renaming' in pass_dict and pass_dict['renaming']:

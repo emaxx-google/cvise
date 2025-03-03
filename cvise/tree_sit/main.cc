@@ -146,7 +146,7 @@ int main(int argc, char *argv[]) {
     }
   } else {
     std::cerr << "Usage: " << argv[0]
-              << " path/to/file/or/dir [to_remove_start] [to_remove_end]"
+              << " [path/to/file/or/dir] [to_remove_start] [to_remove_end]"
               << std::endl;
     return 1;
   }

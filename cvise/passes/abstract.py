@@ -79,6 +79,7 @@ class AbstractPass:
         self.external_programs = external_programs
         self.arg = arg
         self.min_transforms = None
+        self.strategy = None
 
     def __repr__(self):
         if self.arg is not None:
@@ -140,7 +141,7 @@ CORES = get_available_cores()
 
 class FuzzyBinaryState(BinaryState):
     def __repr__(self):
-        return f'FuzzyBinaryState(chunk={self.chunk} index={self.index} instances={self.instances} tp={self.tp} rnd_index={self.rnd_index} rnd_chunk={self.rnd_chunk} dbg_file={self.dbg_file} dbg_before={self.dbg_before} dbg_after={self.dbg_after} strategy={self.strategy if hasattr(self, "strategy") else None} improv_per_depth={self.improv_per_depth if hasattr(self, "improv_per_depth") else None})'
+        return f'FuzzyBinaryState(chunk={self.chunk} index={self.index} instances={self.instances} tp={self.tp} rnd_index={self.rnd_index} rnd_chunk={self.rnd_chunk} dbg_file={self.dbg_file} strategy={self.strategy if hasattr(self, "strategy") else None} improv_per_depth={self.improv_per_depth if hasattr(self, "improv_per_depth") else None})'
 
     @staticmethod
     def choose_success_history_size():
@@ -175,8 +176,6 @@ class FuzzyBinaryState(BinaryState):
         self.rnd_chunk = None
         self.success_history = collections.deque(maxlen=FuzzyBinaryState.choose_success_history_size())
         self.dbg_file = None
-        self.dbg_before = None
-        self.dbg_after = None
         return self
     
     @staticmethod
@@ -211,15 +210,13 @@ class FuzzyBinaryState(BinaryState):
         else:
             return self.rnd_chunk
 
-    def advance(self):
+    def advance(self, strategy):
         self.success_history.append(0)
         state = copy.copy(self)
         state.dbg_file = None
-        state.dbg_before = None
-        state.dbg_after = None
         if state.tp == 0 and state.chunk < state.instances:
             state.tp += 1
-            state.prepare_rnd_step()
+            state.prepare_rnd_step(strategy)
             # logging.debug(f'***ADVANCE*** to {state}')
             return state
         bi = super().advance()
@@ -250,7 +247,8 @@ class FuzzyBinaryState(BinaryState):
             return None
         return max(self.success_history)
 
-    def prepare_rnd_step(self):
+    def prepare_rnd_step(self, strategy):
+        TOPO_BIAS = 10
         self.rnd_chunk = None
         peak = self.choose_rnd_peak()
         if peak is None:
@@ -261,11 +259,15 @@ class FuzzyBinaryState(BinaryState):
         peak = min(peak, ri)
         while self.rnd_chunk is None or self.rnd_chunk < le or self.rnd_chunk > ri:
             self.rnd_chunk = round(random.gauss(peak, peak))
-        self.rnd_index = random.randint(0, self.instances - self.rnd_chunk)
+        if strategy == 'topo':
+            cands = [int(random.triangular(0, self.instances - self.rnd_chunk, 0)) for _ in range(TOPO_BIAS)]
+            self.rnd_index = min(cands)
+        else:
+            self.rnd_index = random.randint(0, self.instances - self.rnd_chunk)
 
 class MultiFileFuzzyBinaryState(FuzzyBinaryState):
     def __repr__(self):
-        return f'MultiFileFuzzyBinaryState(file_id={self.file_id} chunk={self.chunk} index={self.index} instances={self.instances} tp={self.tp} rnd_index={self.rnd_index} rnd_chunk={self.rnd_chunk} dbg_file={self.dbg_file} dbg_before={self.dbg_before} dbg_after={self.dbg_after})'
+        return f'MultiFileFuzzyBinaryState(file_id={self.file_id} chunk={self.chunk} index={self.index} instances={self.instances} tp={self.tp} rnd_index={self.rnd_index} rnd_chunk={self.rnd_chunk} dbg_file={self.dbg_file})'
 
     @staticmethod
     def create(files, instances0):
