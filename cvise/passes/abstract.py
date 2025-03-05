@@ -308,6 +308,13 @@ class MultiFileFuzzyBinaryState(FuzzyBinaryState):
         return new
 
 
+class MergedState:
+    def __init__(self, path_pass_state_tuples):
+        self.path_pass_state_tuples = path_pass_state_tuples
+    def __repr__(self):
+        return f'MergedState({self.path_pass_state_tuples})'
+
+
 @unique
 class ProcessEventType(Enum):
     STARTED = auto()

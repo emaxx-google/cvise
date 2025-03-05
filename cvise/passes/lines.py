@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import types
 
-from cvise.passes.abstract import AbstractPass, FuzzyBinaryState, MultiFileFuzzyBinaryState, PassResult
+from cvise.passes.abstract import AbstractPass, BinaryState, FuzzyBinaryState, MultiFileFuzzyBinaryState, PassResult
 from cvise.utils.error import InsaneTestCaseError
 from cvise.utils.misc import CloseableTemporaryFile
 
@@ -23,7 +23,7 @@ class LinesPass(AbstractPass):
         return self.check_external_program('topformflat')
 
     def supports_merging(self):
-        return "lines"
+        return True
     
     def choose_rnd_file(self, files, path_to_depth, strategy):
         RND_BIAS = 2
@@ -115,18 +115,24 @@ class LinesPass(AbstractPass):
             lines = f.readlines()
             for i, l in enumerate(lines):
                 if '.o:' in l:
-                    command = lines[i+1].strip()
+                    orig_command = lines[i+1].strip()
                     break
             else:
                 raise RuntimeError("compile command not found in makefile")
             
         root_file = next(Path(test_case).rglob('*.cc'))
-        command = re.sub(r'\S*-fmodule\S*', '', command)
-        command = f'~/clang-toys/calc-include-depth/calc-include-depth {root_file} -- {command} -resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk'
+        orig_command = re.sub(r'\S*-fmodule\S*', '', orig_command).split()
+        command = [
+            '/usr/local/google/home/emaxx/clang-toys/calc-include-depth/calc-include-depth',
+            root_file,
+            '--',
+            '-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk'] + orig_command
         path_and_depth = []
-        out = subprocess.check_output(command, shell=True, cwd=test_case, stderr=subprocess.DEVNULL, encoding='utf-8')
+        out = subprocess.check_output(command, cwd=test_case, stderr=subprocess.DEVNULL, encoding='utf-8')
         for line in out.splitlines():
-            path, depth = line.split()
+            if not line.strip():
+                continue
+            path, depth = line.rsplit(maxsplit=1)
             path = Path(path)
             if not path.is_absolute():
                 path = Path(test_case) / path
@@ -144,7 +150,6 @@ class LinesPass(AbstractPass):
     def transform(self, test_case, state, process_event_notifier):
         # if isinstance(state, list):
         #     logging.info(f'[{os.getpid()}] LinesPass.transform: arg={self.arg} state={state} test_case={test_case}')
-
         files, path_to_depth = self.get_ordered_files_list(test_case)
         max_depth = max(path_to_depth.values())
 
@@ -152,16 +157,22 @@ class LinesPass(AbstractPass):
         state_list.sort(key=lambda s: (s.file_id, -s.begin))
         improv_per_depth = [0] * (2 + max_depth)
         for s in state_list:
-            file = files[s.file_id]
+            file = files[s.file_id] if isinstance(s.file_id, int) else (test_case / s.file_id)
             size_before = file.stat().st_size
             s.dbg_file = str(file)
-            lines = self.reformat_file(file, s.arg)
-            lines = lines[:s.begin] + lines[s.end:]
+            lines_orig = self.reformat_file(file, s.arg)
+            lines = lines_orig[:s.begin] + lines_orig[s.end:]
             with open(file, 'w') as f:
                 f.writelines(lines)
             size_after = file.stat().st_size
             depth = path_to_depth.get(file, max_depth + 1)
             improv_per_depth[depth] += size_before - size_after
             s.improv_per_depth = improv_per_depth
-        
+
+        if not isinstance(state, list):
+            state_for_file = copy.copy(state)
+            state_for_file.file_id = files[s.file_id].relative_to(test_case)
+            path = files[state.file_id].relative_to(test_case)
+            state.split_per_file = {path: state_for_file}
+
         return (PassResult.OK, state)

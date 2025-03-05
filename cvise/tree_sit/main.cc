@@ -204,7 +204,11 @@ int main(int argc, char *argv[]) {
         RemoveInstance(instance, contents);
       }
       std::cerr << "editing " << path << ": old size " << old_size
-                << " new size " << contents.length() << std::endl;
+                << " new size " << contents.length()
+                << " instance shift "
+                << instance_count - instances.size()
+                << " instance count "
+                << instances.size() << std::endl;
       WriteFile(path, contents);
     }
   }

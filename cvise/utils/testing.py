@@ -21,7 +21,7 @@ import statistics
 import time
 
 from cvise.cvise import CVise
-from cvise.passes.abstract import PassResult, ProcessEventNotifier, ProcessEventType, FuzzyBinaryState
+from cvise.passes.abstract import PassResult, ProcessEventNotifier, ProcessEventType, MergedState
 from cvise.utils.error import AbsolutePathTestCaseError
 from cvise.utils.error import InsaneTestCaseError
 from cvise.utils.error import InvalidInterestingnessTestError
@@ -59,6 +59,7 @@ class PassCheckingOutcome(Enum):
 def rmfolder(name):
     assert 'cvise' in str(name)
     try:
+        logging.debug(f'rmfolder {name}')
         shutil.rmtree(name)
     except OSError:
         pass
@@ -120,9 +121,31 @@ class TestEnvironment:
     def run(self):
         try:
             # transform by state
-            (result, self.state) = self.transform(
-                str(self.test_case_path), self.state, ProcessEventNotifier(self.pid_queue)
-            )
+            if isinstance(self.state, MergedState):
+                path_to_pass_id = {}
+                path_to_states = {}
+                for path, pass_id, state in self.state.path_pass_state_tuples:
+                    path_to_pass_id[path] = pass_id
+                    path_to_states.setdefault(path, [])
+                    path_to_states[path].append(state)
+                files_dbg = list(Path(self.test_case_path).rglob('*'))
+                logging.debug(f'TestEnvironment.run: merged: BEGIN{{: files={files_dbg}')
+                new_path_pass_state_tuples = []
+                for path, pass_id in path_to_pass_id.items():
+                    transform = self.transform[pass_id]
+                    (result, upd_state) = transform(
+                        str(self.test_case_path), path_to_states[path], ProcessEventNotifier(self.pid_queue))
+                    self.result = result
+                    if self.result != PassResult.OK:
+                        logging.debug(f'TestEnvironment.run: merged: }}END: error')
+                        return self
+                    new_path_pass_state_tuples.append((path, pass_id, upd_state))
+                self.state.path_pass_state_tuples = new_path_pass_state_tuples
+                logging.debug(f'TestEnvironment.run: merged: }}END')
+            else:
+                (result, self.state) = self.transform(
+                    str(self.test_case_path), self.state, ProcessEventNotifier(self.pid_queue)
+                )
             self.result = result
             if self.result != PassResult.OK:
                 return self
@@ -132,10 +155,10 @@ class TestEnvironment:
             return self
         except OSError as e:
             # this can happen when we clean up temporary files for cancelled processes
-            print('TestEnvironment::run OSError: ' + str(e))
+            logging.debug(f'TestEnvironment::run OSError: ' + str(e))
             return self
         except Exception as e:
-            print('Unexpected TestEnvironment::run failure: ' + str(e))
+            logging.debug(f'Unexpected TestEnvironment::run failure: ' + str(e))
             traceback.print_exc()
             return self
 
@@ -299,7 +322,7 @@ class TestManager:
         )
 
     def create_root(self, p=None, suffix=''):
-        pass_name = str(p or self.current_pass).replace('::', '-')
+        pass_name = str(p or self.current_pass).replace('::', '-').replace(' ', '_')
         root = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}{pass_name}{suffix}-')
         self.roots.append(root)
         logging.debug(f'Creating pass root folder: {root}')
@@ -484,8 +507,9 @@ class TestManager:
 
         pass_ = self.future_to_pass[future]
         assert pass_
-        pass_id = self.current_passes.index(pass_)
-        self.last_finished_order[pass_id] = future.order
+        if not isinstance(pass_, list):
+            pass_id = self.current_passes.index(pass_)
+            self.last_finished_order[pass_id] = future.order
 
         self.future_to_pass.pop(future)
 
@@ -541,7 +565,7 @@ class TestManager:
                     p = self.future_to_pass[future]
                     self.states[self.current_passes.index(p)] = None
                 
-                pass_id = self.current_passes.index(self.future_to_pass[future])
+                # pass_id = self.current_passes.index(self.future_to_pass[future])
                 # if hasattr(test_env.state, 'instances') and self.states[pass_id] and test_env.state.instances != self.states[pass_id].instances:
                 #     logging.info(f'Adjusting instances for {self.future_to_pass[future]} from {self.states[pass_id].instances} to {test_env.state.instances}')
                 #     # assert test_env.state.instances < self.states[pass_id].instances
@@ -609,14 +633,28 @@ class TestManager:
         pool.stop()
         pool.join()
 
+    def get_state_comparison_key(self, state, improv):
+        if self.strategy == 'size':
+            return -improv
+        elif self.strategy == 'topo':
+            if isinstance(state, list) or isinstance(state, MergedState):
+                inner_states = state if isinstance(state, list) else [i for _, _, i in state.path_pass_state_tuples]
+                inner_keys = [self.get_state_comparison_key(i, improv=None) for i in inner_states]
+                total_improv_per_depth = [0] * max(len(i) for i in inner_keys)
+                for improv_per_depth in inner_keys:
+                    for i in range(len(improv_per_depth)):
+                        total_improv_per_depth[i] += improv_per_depth[i]
+                return total_improv_per_depth
+            else:
+                improv_per_depth = state.improv_per_depth if hasattr(state, 'improv_per_depth') else []
+                return [-i for i in improv_per_depth]
+
     def run_parallel_tests(self, passes):
         assert not self.futures
         assert not self.temporary_folders
         self.future_to_pass = {}
         self.last_finished_order = [None] * len(passes)
         with pebble.ProcessPool(max_workers=self.parallel_tests) as pool:
-            # print(f'TestManager.run_parallel_tests')
-
             order = 1
             next_pass_to_schedule = 0
             pass_job_index = 0
@@ -630,6 +668,7 @@ class TestManager:
             best_success_improv = None
             best_success_when = None
             finished_job_improves = []
+            best_success_job_counter = None
             start_time = time.monotonic()
 
             successes = [(s, p, i) for s, p, i in self.next_successes_hint if not isinstance(s, list)] + self.successes_hint
@@ -668,20 +707,7 @@ class TestManager:
                 def better_than_best(state, improv):
                     if best_success_improv is None:
                         return True
-                    if self.strategy == 'size':
-                        return improv > best_success_improv
-
-                    def get_score(state):
-                        if isinstance(state, list):
-                            return max(get_score(i) for i in state)
-                        files_deleted = state.files_deleted if hasattr(state, 'files_deleted') else 0
-                        improv_per_depth = state.improv_per_depth if hasattr(state, 'improv_per_depth') else []
-                        assert files_deleted or improv_per_depth, f'{state}'
-                        return files_deleted, improv_per_depth
-
-                    new_s = get_score(state)
-                    old_s = get_score(best_success_env.state)
-                    return new_s > old_s or (new_s == old_s and improv > best_success_improv)
+                    return self.get_state_comparison_key(state, improv) < self.get_state_comparison_key(best_success_env.state, best_success_improv)
 
                 tmp_futures = copy.copy(self.futures)
                 for future in tmp_futures:
@@ -698,7 +724,6 @@ class TestManager:
                             improv = self.run_test_case_size - get_file_size(env.test_case_path)
                             finished_job_improves.append(improv)
                             assert len(finished_job_improves) == finished_jobs
-                            pass_id = passes.index(pass_)
                             logging.info(f'observed success success_cnt={success_cnt} improv={improv} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={finished_jobs}')
                             if hasattr(pass_, 'on_success_observed'):
                                 pass_.on_success_observed(env.state)
@@ -708,8 +733,10 @@ class TestManager:
                                 best_success_pass = pass_
                                 best_success_improv = improv
                                 best_success_when = time.monotonic()
+                                best_success_job_counter = finished_jobs
                                 pa = os.path.join(self.tmp_for_best, os.path.basename(future.result().test_case_path))
                                 # logging.info(f'copied better res from {future.result().test_case_path} to {pa}')
+                                logging.debug(f'run_parallel_tests: rmtree {pa}')
                                 shutil.rmtree(pa, ignore_errors=True)
                                 shutil.copytree(future.result().test_case_path, pa, symlinks=True)
                                 best_success_env.test_case = pa
@@ -725,33 +752,49 @@ class TestManager:
                     k = (duration_till_now / duration_till_best * best_success_improv - mean) / sigma if sigma else None
                     prob = math.floor(((finished_jobs - 1) / k**2 + 1) * (finished_jobs + 1) / finished_jobs) / (finished_jobs + 1) if sigma and k > 1 else None
                     # logging.info(f'run_parallel_tests: prob={prob} finished_jobs={finished_jobs} max={best_success_improv} mean={mean} sigma={sigma} duration_till_now={duration_till_now} duration_till_best={duration_till_best} k={k}')
-                    if prob is None or k > 1 and prob < 0.01 or order > self.parallel_tests * 5:
+                    if (prob is None or k > 1 and prob < 0.01) and finished_jobs - best_success_job_counter >= self.parallel_tests or \
+                       order > self.parallel_tests * 5:
                         logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} prob={prob} improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} strategy={self.strategy}')
+                        if hasattr(best_success_env.state, 'split_per_file'):
+                            logging.debug(f'run_parallel_tests: split_per_file={best_success_env.state.split_per_file}')
                         for pass_id, state in dict((fu.pass_id, fu.state)
                                                 for fu in sorted(self.futures, key=lambda fu: -fu.order)
-                                                if fu.order > (self.last_finished_order[fu.pass_id] or 0)).items():
+                                                if not isinstance(fu.pass_id, list) and
+                                                   fu.order > (self.last_finished_order[fu.pass_id] or 0)).items():
                             # logging.info(f'run_parallel_tests: rewinding {passes[pass_id]} from {self.states[pass_id]} to {state}')
                             self.states[pass_id] = state
                         self.terminate_all(pool)
                         return best_success_env
-                    
-                mergecands = {}
-                mergeimprov = {}
-                mergepass = {}
-                for s, p, i in self.next_successes_hint:
-                    if hasattr(p, 'supports_merging') and p.supports_merging() and not isinstance(s, list):
-                        mergekey = p.supports_merging()
-                        mergecands.setdefault(mergekey, []).append(s)
-                        mergepass[mergekey] = passes.index(p)
-                        mergeimprov[mergekey] = mergeimprov.get(mergekey, 0) + i
-                for mergekey, cands in mergecands.items():
-                    if len(cands) > 1 and better_than_best(cands, mergeimprov[mergekey]) and mergeimprov[mergekey] not in attempted_merges:
-                        attempted_merges.add(mergeimprov[mergekey])
-                        state = cands
-                        pass_id = mergepass[mergekey]
+
+                merge_cands = [(sta, pa, imp) for sta, pa, imp in self.next_successes_hint if hasattr(pa, 'supports_merging') and pa.supports_merging() and not isinstance(sta, list)]
+                merge_train = []
+                for sta, pa, imp in sorted(merge_cands, key=lambda item: self.get_state_comparison_key(item[0], item[2])):
+                    boardable = True
+                    my_files = set(sta.split_per_file.keys())
+                    for prev_sta, prev_pa, prev_imp in merge_train:
+                        prev_files = set(prev_sta.split_per_file.keys())
+                        if prev_pa != pa and not my_files.isdisjoint(prev_files):
+                            boardable = False
+                    if boardable:
+                        merge_train.append((sta, pa, imp))
+                merge_improv = sum(imp for sta, pa, imp in merge_train)
+                state = None
+                if len(merge_train) >= 2 and merge_improv > 0 and merge_improv not in attempted_merges:
+                    attempted_merges.add(merge_improv)
+                    pass_id = list(sorted(set(passes.index(pa) for sta, pa, imp in merge_train)))
+                    pass_ = [passes[i] if i in pass_id else None for i in range(len(passes))]
+                    path_pass_state_tuples = []
+                    for sta, pa, imp in merge_train:
+                        for path, substate in sta.split_per_file.items():
+                            path_pass_state_tuples.append((path, passes.index(pa), substate))
+                    merged_state = MergedState(path_pass_state_tuples)
+                    if (best_success_improv is None or
+                        self.get_state_comparison_key(merged_state, merge_improv) <
+                        self.get_state_comparison_key(best_success_env.state, best_success_improv)):
+                        state = merged_state
+                        logging.debug(f'attempting merge state={state} merge_improv={merge_improv}')
                         should_advance = False
-                        break
-                else:
+                if not state:
                     pass_job_index += 1
                     while pass_job_index >= passes[next_pass_to_schedule].jobs or not self.states[next_pass_to_schedule] or passes[next_pass_to_schedule].strategy and passes[next_pass_to_schedule].strategy != self.strategy:
                         pass_job_index = 0
@@ -762,17 +805,20 @@ class TestManager:
                     pass_id = next_pass_to_schedule
                     state = self.states[pass_id]
                     should_advance = True
-                pass_ = passes[pass_id]
+                    pass_ = passes[pass_id]
 
-                folder = Path(tempfile.mkdtemp(prefix=self.TEMP_PREFIX, dir=self.roots[pass_id]))
+                tmp_parent_dir = self.roots[pass_id[0]] if isinstance(state, MergedState) else self.roots[pass_id]
+                folder = Path(tempfile.mkdtemp(f'{self.TEMP_PREFIX}job{order}', dir=tmp_parent_dir))
+                test_case = Path(self.current_test_case) if isinstance(state, MergedState) else Path(os.path.join(self.roots[pass_id+len(passes)], os.path.basename(self.current_test_case)))
+                transform = [p.transform for p in passes] if isinstance(state, MergedState) else pass_.transform
                 test_env = TestEnvironment(
                     state,
                     order,
                     self.test_script,
                     folder,
-                    Path(os.path.join(self.roots[pass_id+len(passes)], os.path.basename(self.current_test_case))),
+                    test_case,
                     self.test_cases,
-                    pass_.transform,
+                    transform,
                     self.pid_queue,
                 )
                 test_env.is_regular_iteration = should_advance
@@ -809,6 +855,7 @@ class TestManager:
             # we are at the end of enumeration
             self.current_pass = best_success_pass
             self.terminate_all(pool)
+            logging.debug(f'TestManager.run_parallel_tests: }}END: end of enumeration')
             return best_success_env
 
     def set_desired_pace(self, pace):
@@ -938,6 +985,8 @@ class TestManager:
             sys.exit(1)
 
     def run_concurrent_passes(self, passes):
+        logging.debug(f'run_concurrent_passes: BEGIN{{')
+
         self.current_pass = None
         self.current_passes = passes
         self.futures = []
@@ -986,7 +1035,7 @@ class TestManager:
 
 
                 # create initial state
-                self.strategy = "topo" if random.random() < 0.5 else "size"                
+                self.strategy = "size"                
                 self.init_all_passes(passes)
                 self.skip = False
 
@@ -1030,7 +1079,7 @@ class TestManager:
                     #     logging.info(f'skipping after {self.success_count} successful transformations')
                     #     break
 
-                    self.strategy = "topo" if random.random() < 0.5 else "size"
+                    self.strategy = 'topo' if self.strategy == 'size' else 'size'
                     self.init_all_passes(passes)
 
                 # Cache result of this pass
@@ -1046,6 +1095,7 @@ class TestManager:
             self.remove_root()
             self.current_pass = None
             self.current_passes = None
+            logging.debug(f'run_concurrent_passes: }}END')
         except KeyboardInterrupt:
             logging.info('Exiting now ...')
             self.remove_root()
@@ -1058,6 +1108,7 @@ class TestManager:
             for i, p in enumerate(passes):
                 if not p.strategy or p.strategy == self.strategy:
                     new_path = os.path.join(self.roots[i+len(passes)], os.path.basename(self.current_test_case))
+                    logging.debug(f'init_all_passes: rmtree {new_path}')
                     shutil.rmtree(new_path, ignore_errors=True)
                     shutil.copytree(self.current_test_case, new_path, symlinks=True)
                     env = SetupEnvironment(p, self.test_script, new_path, self.test_cases, self.save_temps,
@@ -1096,6 +1147,7 @@ class TestManager:
             self.states = [self.current_pass.advance_on_success(test_env.test_case_path, test_env.state)]
             new_path = os.path.join(self.roots[1], os.path.basename(self.current_test_case))
             logging.info(f'process_result: after advance_on_success: copy_from={test_env.test_case_path} copy_to={new_path}')
+            logging.debug(f'process_result: rmtree {new_path}')
             shutil.rmtree(new_path, ignore_errors=True)
             shutil.copytree(test_env.test_case_path, new_path, symlinks=True)
         # self.pass_statistic.add_success(self.current_pass)
