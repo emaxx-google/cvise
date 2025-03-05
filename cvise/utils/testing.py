@@ -18,6 +18,7 @@ import tempfile
 import traceback
 import concurrent.futures
 import statistics
+import threading
 import time
 
 from cvise.cvise import CVise
@@ -64,6 +65,9 @@ def rmfolder(name):
     except OSError:
         pass
 
+def schedule_rmfolder(name):
+    threading.Thread(target=lambda: rmfolder(name)).start()
+
 
 class TestEnvironment:
     def __init__(
@@ -80,6 +84,7 @@ class TestEnvironment:
         self.state = state
         self.folder = folder
         self.base_size = None
+        self.new_size = None
         self.test_script = test_script
         self.exitcode = None
         self.result = None
@@ -87,22 +92,13 @@ class TestEnvironment:
         self.transform = transform
         self.pid_queue = pid_queue
         self.pwd = os.getcwd()
-        self.test_case = test_case
-        self.base_size = get_file_size(test_case)
+        self.test_case_full_path = test_case
+        self.test_case = os.path.basename(test_case)
         self.all_test_cases = all_test_cases
-
-        # Copy files to the created folder
-        for test_case in all_test_cases:
-            if os.path.basename(test_case) == os.path.basename(self.test_case):
-                continue
-            (self.folder / test_case.parent).mkdir(parents=True, exist_ok=True)
-            shutil.copytree(test_case, self.folder / test_case.parent / os.path.basename(test_case), symlinks=True)
-        shutil.copytree(self.test_case, self.folder / test_case.parent / os.path.basename(test_case), symlinks=True)
-        self.test_case = os.path.basename(self.test_case)
 
     @property
     def size_improvement(self):
-        return self.base_size - get_file_size(self.test_case_path)
+        return self.base_size - self.new_size
 
     @property
     def test_case_path(self):
@@ -119,6 +115,20 @@ class TestEnvironment:
         shutil.copy(self.test_script, dst)
 
     def run(self):
+        self.base_size = get_file_size(self.test_case_full_path)
+
+        # Copy files to the created folder
+        for test_case in self.all_test_cases:
+            if os.path.basename(test_case) == self.test_case:
+                continue
+            (self.folder / test_case.parent).mkdir(parents=True, exist_ok=True)
+            dest = self.folder / test_case.parent / os.path.basename(test_case)
+            logging.debug(f'TestEnvironment.run: copy from {test_case} to {dest}')
+            shutil.copytree(test_case, dest, symlinks=True)
+        dest = self.folder / test_case.parent / os.path.basename(test_case)
+        logging.debug(f'TestEnvironment.run: copy from {self.test_case_full_path} to {dest}')
+        shutil.copytree(self.test_case_full_path, dest, symlinks=True)
+
         try:
             # transform by state
             if isinstance(self.state, MergedState):
@@ -149,9 +159,11 @@ class TestEnvironment:
             self.result = result
             if self.result != PassResult.OK:
                 return self
+            self.new_size = get_file_size(self.test_case_path)
 
             # run test script
             self.exitcode = self.run_test(verbose=False)
+
             return self
         except OSError as e:
             # this can happen when we clean up temporary files for cancelled processes
@@ -327,6 +339,12 @@ class TestManager:
         self.roots.append(root)
         logging.debug(f'Creating pass root folder: {root}')
 
+    def recreate_root(self, idx, p, suffix):
+        pass_name = str(p).replace('::', '-').replace(' ', '_')
+        root = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}{pass_name}{suffix}-')
+        self.roots[idx] = root
+        logging.debug(f'Creating pass root folder: {root}')
+
     def remove_root(self):
         if not self.save_temps:
             for r in self.roots:
@@ -469,7 +487,7 @@ class TestManager:
     def release_folder(self, future):
         name = self.temporary_folders.pop(future)
         if not self.save_temps:
-            rmfolder(name)
+            schedule_rmfolder(name)
 
     def release_folders(self):
         for future in self.futures:
@@ -721,7 +739,8 @@ class TestManager:
                             success_cnt += 1
                             finished_jobs += 1
                             assert finished_jobs <= order
-                            improv = self.run_test_case_size - get_file_size(env.test_case_path)
+                            improv = env.size_improvement
+                            assert improv == self.run_test_case_size - get_file_size(env.test_case_path)
                             finished_job_improves.append(improv)
                             assert len(finished_job_improves) == finished_jobs
                             logging.info(f'observed success success_cnt={success_cnt} improv={improv} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={finished_jobs}')
@@ -734,11 +753,11 @@ class TestManager:
                                 best_success_improv = improv
                                 best_success_when = time.monotonic()
                                 best_success_job_counter = finished_jobs
+                                schedule_rmfolder(self.tmp_for_best)
+                                self.tmp_for_best = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}best-')
                                 pa = os.path.join(self.tmp_for_best, os.path.basename(future.result().test_case_path))
-                                # logging.info(f'copied better res from {future.result().test_case_path} to {pa}')
-                                logging.debug(f'run_parallel_tests: rmtree {pa}')
-                                shutil.rmtree(pa, ignore_errors=True)
-                                shutil.copytree(future.result().test_case_path, pa, symlinks=True)
+                                logging.debug(f'run_parallel_tests: rename from {future.result().test_case_path} to {pa}')
+                                os.rename(future.result().test_case_path, pa)
                                 best_success_env.test_case = pa
                             self.release_future(future)
                         self.current_pass = None
@@ -755,8 +774,6 @@ class TestManager:
                     if (prob is None or k > 1 and prob < 0.01) and finished_jobs - best_success_job_counter >= self.parallel_tests or \
                        order > self.parallel_tests * 5:
                         logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} prob={prob} improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} strategy={self.strategy}')
-                        if hasattr(best_success_env.state, 'split_per_file'):
-                            logging.debug(f'run_parallel_tests: split_per_file={best_success_env.state.split_per_file}')
                         for pass_id, state in dict((fu.pass_id, fu.state)
                                                 for fu in sorted(self.futures, key=lambda fu: -fu.order)
                                                 if not isinstance(fu.pass_id, list) and
@@ -920,6 +937,7 @@ class TestManager:
 
                 # create initial state
                 new_path = os.path.join(self.roots[1], os.path.basename(self.current_test_case))
+                logging.debug(f'run_pass: copy from {self.current_test_case} to {new_path}')
                 shutil.copytree(self.current_test_case, new_path, symlinks=True)
                 self.states = [self.current_pass.new(new_path, self.check_sanity)]
                 self.skip = False
@@ -1107,12 +1125,11 @@ class TestManager:
             futures = []
             for i, p in enumerate(passes):
                 if not p.strategy or p.strategy == self.strategy:
+                    schedule_rmfolder(self.roots[i+len(passes)])
+                    self.recreate_root(i+len(passes), p=passes[i], suffix='init')
                     new_path = os.path.join(self.roots[i+len(passes)], os.path.basename(self.current_test_case))
-                    logging.debug(f'init_all_passes: rmtree {new_path}')
-                    shutil.rmtree(new_path, ignore_errors=True)
-                    shutil.copytree(self.current_test_case, new_path, symlinks=True)
                     env = SetupEnvironment(p, self.test_script, new_path, self.test_cases, self.save_temps,
-                                           self.last_state_hint[i], strategy=self.strategy)
+                                           self.last_state_hint[i], strategy=self.strategy, current_test_case_origin=self.current_test_case)
                     futures.append(pool.schedule(env.execute))
                 else:
                     futures.append(None)
@@ -1132,9 +1149,9 @@ class TestManager:
             logging.info(diff_str)
 
         try:
-            # logging.info(f'copying {test_env.test_case_path} to {self.current_test_case}')
             with tempfile.TemporaryDirectory(dir=self.current_test_case.parent) as tmp_dest:
                 tmp_dest_subdir = Path(tmp_dest) / self.current_test_case.name
+                logging.debug(f'process_result: copy from {test_env.test_case_path} to {tmp_dest_subdir}')
                 shutil.copytree(test_env.test_case_path, tmp_dest_subdir, symlinks=True)
                 os.replace(self.current_test_case, Path(tmp_dest) / 'tmp_old')
                 os.replace(tmp_dest_subdir, self.current_test_case)
@@ -1149,6 +1166,7 @@ class TestManager:
             logging.info(f'process_result: after advance_on_success: copy_from={test_env.test_case_path} copy_to={new_path}')
             logging.debug(f'process_result: rmtree {new_path}')
             shutil.rmtree(new_path, ignore_errors=True)
+            logging.debug(f'process_result: copy from {test_env.test_case_path} to {new_path}')
             shutil.copytree(test_env.test_case_path, new_path, symlinks=True)
         # self.pass_statistic.add_success(self.current_pass)
         on_succeeded(self.current_pass, self.total_file_size)
@@ -1167,7 +1185,7 @@ class TestManager:
 
 
 class SetupEnvironment:
-    def __init__(self, pass_, test_script, test_case, test_cases, save_temps, last_state_hint, strategy):
+    def __init__(self, pass_, test_script, test_case, test_cases, save_temps, last_state_hint, strategy, current_test_case_origin):
         self.pass_ = pass_
         self.test_script = test_script
         self.test_case = test_case
@@ -1175,8 +1193,11 @@ class SetupEnvironment:
         self.save_temps = save_temps
         self.last_state_hint = last_state_hint
         self.strategy = strategy
+        self.current_test_case_origin = current_test_case_origin
     
     def execute(self):
+        logging.debug(f'SetupEnvironment.execute: copy from {self.current_test_case_origin} to {self.test_case}')
+        shutil.copytree(self.current_test_case_origin, self.test_case, symlinks=True)
         return self.pass_.new(self.test_case, self.check_sanity, last_state_hint=self.last_state_hint, strategy=self.strategy)
 
     def check_sanity(self, verbose=False):
