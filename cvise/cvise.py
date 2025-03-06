@@ -178,6 +178,8 @@ class CVise:
         if pass_group.get('paced'):
             logging.info('PACED PASSES')
             self._run_main_passes(pass_group['paced'], True)
+            logging.info('PACED FINISHED, KILLING')
+            sys.exit(-1)
 
         self.test_manager.set_desired_pace(None)
         logging.info('MAIN PASSES')
