@@ -17,7 +17,7 @@ debug: CXXFLAGS += -O0 -fsanitize=address
 debug: LDFLAGS += -O0 -fsanitize=address
 debug: func_body_remover
 
-func_body_remover: main.o /usr/lib/x86_64-linux-gnu/libtree-sitter.a tree-sitter-cpp-parser.o tree-sitter-cpp-scanner.o
+func_body_remover: main.o ~/tree-sitter-0.25.3/libtree-sitter.a tree-sitter-cpp-parser.o tree-sitter-cpp-scanner.o
 	$(CC) $(LDFLAGS) $^ -o $@
 
 clean:

@@ -16,7 +16,8 @@ extern "C" const TSLanguage *tree_sitter_cpp();
 
 namespace {
 
-void WalkFileOrDir(const std::filesystem::path &start_path, std::vector<std::filesystem::path>& discovered_paths) {
+void WalkFileOrDir(const std::filesystem::path &start_path,
+                   std::vector<std::filesystem::path> &discovered_paths) {
   if (!std::filesystem::is_directory(start_path)) {
     discovered_paths.push_back(start_path);
     return;
@@ -69,38 +70,42 @@ bool ParseFile(const std::string &contents, TSParser *parser, TSQuery *query,
   ts_query_cursor_exec(cursor.get(), query, ts_tree_root_node(tree.get()));
   TSQueryMatch match;
   while (ts_query_cursor_next_match(cursor.get(), &match)) {
-    assert(match.capture_count == 1);
-    const TSNode &node = match.captures[0].node;
+    std::vector<TSNode> captures(ts_query_capture_count(query));
+    for (int i = 0; i < match.capture_count; ++i) {
+      auto index = match.captures[i].index;
+      captures[index] = match.captures[i].node;
+    }
+    const TSNode &missing_double_colon = captures[0];
+    const TSNode &qual_id = captures[1];
+    const TSNode &init_list = captures[2];
+    const TSNode &body = captures[3];
+    assert(!ts_node_is_null(body));
+    const TSNode &func_def = captures[4];
+    assert(!ts_node_is_null(func_def));
+
+    // Walk up until the first "template <>" decl, if there's any.
+    TSNode template_ancestor = func_def;
+    for (;;) {
+      TSNode parent = ts_node_parent(template_ancestor);
+      if (ts_node_is_null(parent) || ts_node_type(parent) != std::string("template_declaration")) {
+        break;
+      }
+      template_ancestor = parent;
+    }
 
     Instance instance{
-        .start_byte = ts_node_start_byte(node),
-        .end_byte = ts_node_end_byte(node),
+        .start_byte = ts_node_start_byte(body),
+        .end_byte = ts_node_end_byte(body),
         .needs_semicolon = true,
     };
-
-    const TSNode prev = ts_node_prev_sibling(node);
-    if (!ts_node_is_null(prev) &&
-        ts_node_type(prev) == std::string("field_initializer_list")) {
-      instance.start_byte = ts_node_start_byte(prev);
+    if (!ts_node_is_null(qual_id) && ts_node_is_null(missing_double_colon)) {
+      // An out-of-line declaration of a member has to be deleted completely.
+      instance.start_byte = ts_node_start_byte(template_ancestor);
+      instance.needs_semicolon = false;
+    } else if (!ts_node_is_null(init_list)) {
+      // In case of a constructor, initializer lists have to be deleted as well.
+      instance.start_byte = ts_node_start_byte(init_list);
     }
-
-    // An out-of-line declaration of a member has to be deleted completely.
-    static constexpr char kDeclarator[] = "declarator";
-    const TSNode parent = ts_node_parent(node);
-    if (!ts_node_is_null(parent)) {
-      const TSNode func_decl = ts_node_child_by_field_name(
-          parent, kDeclarator, std::size(kDeclarator) - 1);
-      if (!ts_node_is_null(func_decl)) {
-        const TSNode qual_id = ts_node_child_by_field_name(
-            func_decl, kDeclarator, std::size(kDeclarator) - 1);
-        if (!ts_node_is_null(qual_id) &&
-            ts_node_type(qual_id) == std::string("qualified_identifier")) {
-          instance.start_byte = ts_node_start_byte(parent);
-          instance.needs_semicolon = false;
-        }
-      }
-    }
-
     assert(instance.start_byte < instance.end_byte);
 
     // Delete overlapping segments: leave only the most detailed matches.
@@ -159,14 +164,30 @@ int main(int argc, char *argv[]) {
   }
 
   // Prepare the common parsing state.
-  TSParser *parser = ts_parser_new();
-  ts_parser_set_language(parser, tree_sitter_cpp());
+  std::unique_ptr<TSParser, decltype(&ts_parser_delete)> parser(
+      ts_parser_new(), ts_parser_delete);
+  ts_parser_set_language(parser.get(), tree_sitter_cpp());
 
-  char query_str[] = "(function_definition body: (_) @the-function-body)";
+  const char kQueryStr[] = R"(
+    (
+      function_definition
+      declarator: (
+        function_declarator
+        declarator: (
+          qualified_identifier
+          (MISSING "::")? @idx0
+        )? @idx1
+      )
+      (field_initializer_list)? @idx2
+      body: (_) @idx3
+    ) @idx4
+    )";
   uint32_t error_offset = 0;
   TSQueryError error_type = TSQueryErrorNone;
-  TSQuery *query = ts_query_new(tree_sitter_cpp(), query_str, strlen(query_str),
-                                &error_offset, &error_type);
+  std::unique_ptr<TSQuery, decltype(&ts_query_delete)> query(
+      ts_query_new(tree_sitter_cpp(), kQueryStr, strlen(kQueryStr),
+                   &error_offset, &error_type),
+      ts_query_delete);
   if (!query) {
     std::cerr << "Failed to init Tree-sitter query: error " << error_type
               << " offset " << error_offset << std::endl;
@@ -182,7 +203,7 @@ int main(int argc, char *argv[]) {
     ReadFile(path, contents);
 
     instances.clear();
-    if (!ParseFile(contents, parser, query, instances)) {
+    if (!ParseFile(contents, parser.get(), query.get(), instances)) {
       std::cerr << "Failed to parse " << path << std::endl;
       return 1;
     }
@@ -204,16 +225,11 @@ int main(int argc, char *argv[]) {
         RemoveInstance(instance, contents);
       }
       std::cerr << "editing " << path << ": old size " << old_size
-                << " new size " << contents.length()
-                << " instance shift "
-                << instance_count - instances.size()
-                << " instance count "
+                << " new size " << contents.length() << " instance shift "
+                << instance_count - instances.size() << " instance count "
                 << instances.size() << std::endl;
       WriteFile(path, contents);
     }
   }
   std::cout << "Total instances: " << instance_count << std::endl;
-
-  ts_query_delete(query);
-  ts_parser_delete(parser);
 }
