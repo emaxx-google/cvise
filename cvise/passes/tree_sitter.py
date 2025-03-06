@@ -43,7 +43,7 @@ class TreeSitterPass(AbstractPass):
         if last_state_hint:
             state = FuzzyBinaryState.create_from_hint(instances, last_state_hint)
         else:
-            state = FuzzyBinaryState.create(instances)
+            state = FuzzyBinaryState.create(instances, strategy)
             # if state:
             #     state.chunk = min(state.chunk, 500)
         if state:

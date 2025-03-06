@@ -21,7 +21,7 @@ class DeleteFilePass(AbstractPass):
         if 'nothing to delete' in out:
             return None
         s = [s.strip() for s in out.splitlines() if 'to delete: ' in s][0]
-        state = FuzzyBinaryState.create(int(s.split()[2]))
+        state = FuzzyBinaryState.create(int(s.split()[2]), strategy)
         if state:
             state.files_deleted = state.end() - state.begin()
         dbg = ' '.join(l.strip() for l in out.splitlines())

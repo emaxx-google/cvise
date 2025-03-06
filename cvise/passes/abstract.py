@@ -2,6 +2,7 @@ import copy
 import collections
 from enum import auto, Enum, unique
 import logging
+import math
 import psutil
 import random
 import shutil
@@ -21,7 +22,8 @@ class BinaryState:
         pass
 
     def __repr__(self):
-        return f'BinaryState({self.index}-{self.end()}, {self.instances} instances, step: {self.chunk})'
+        dbg = f', file={ self.file_id}' if hasattr(self, 'file_id') else ''
+        return f'BinaryState({self.index}-{self.end()}, {self.instances} instances, step: {self.chunk}{dbg})'
 
     @staticmethod
     def create(instances):
@@ -161,7 +163,7 @@ class FuzzyBinaryState(BinaryState):
         return 15 * CORES * 2
 
     @staticmethod
-    def create(instances):
+    def create(instances, strategy):
         # global success_history
         # success_history = collections.deque(maxlen=FuzzyBinaryState.choose_success_history_size())
 
@@ -169,7 +171,7 @@ class FuzzyBinaryState(BinaryState):
             return None
         self = FuzzyBinaryState()
         self.instances = instances
-        self.chunk = instances
+        self.chunk = self.choose_initial_chunk(instances, strategy)
         self.index = 0
         self.tp = 0
         self.rnd_index = None
@@ -177,6 +179,15 @@ class FuzzyBinaryState(BinaryState):
         self.success_history = collections.deque(maxlen=FuzzyBinaryState.choose_success_history_size())
         self.dbg_file = None
         return self
+    
+    @staticmethod
+    def choose_initial_chunk(instances, strategy):
+        if strategy == 'topo':
+            return min(instances, 10)
+        elif strategy == 'size':
+            return max(1, instances // 1000)
+        else:
+            assert False
     
     @staticmethod
     def create_from_hint(instances, last_state_hint):
@@ -251,7 +262,7 @@ class FuzzyBinaryState(BinaryState):
         TOPO_BIAS = 10
         self.rnd_chunk = None
         peak = self.choose_rnd_peak()
-        if peak is None:
+        if peak is None or peak == 0:
             peak = 1
         le = min(self.chunk, self.instances)
         ri = self.instances

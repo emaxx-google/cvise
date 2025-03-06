@@ -45,7 +45,7 @@ class LinesPass(AbstractPass):
         if last_state_hint:
             state = FuzzyBinaryState.create_from_hint(instances, last_state_hint)
         else:
-            state = FuzzyBinaryState.create(instances)
+            state = FuzzyBinaryState.create(instances, strategy)
         if state:
             state.success_history = self.get_success_history(strategy)
             state.strategy = strategy
