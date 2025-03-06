@@ -73,8 +73,22 @@ class LinesPass(AbstractPass):
     def count_instances(self, lines):
         if self.arg == '10':
             return len(lines)
-        return sum(not s.strip().startswith('#') for s in lines)
-
+        return sum(self.should_try_removing_line(s, i, lines) for i, s in enumerate(lines))
+    
+    def should_try_removing_line(self, line, idx, all_lines):
+        if self.arg == '10':
+            return True
+        beg = line.lstrip()
+        if not beg.startswith('#'):
+            return True
+        if beg[1:].lstrip().startswith('include'):
+            return False
+        if sum(all_lines[i].lstrip().startswith('#') for i in range(idx)) <= 1:
+            return False
+        if not any(all_lines[i].lstrip().startswith('#') for i in range(idx+1, len(all_lines))):
+            return False
+        return True
+    
     def advance(self, test_case, state):
         new = state.advance(state.strategy)
         if new:
@@ -117,30 +131,35 @@ class LinesPass(AbstractPass):
         segments = [(s.begin(), s.end()) for s in state_list]
         dbg_files = []
         for le, ri in reversed(self.merge_segments(segments)):
+            dbg_file_instances = {}
+            dbg_file_instances_after = {}
+            original_le, original_ri = le, ri
             if hasattr(state_list[0], 'file_id'):
                 cand_files = [test_case / state_list[0].file_id]
             else:
                 cand_files = files
             for file in cand_files:
+                path = Path(file)
+                rel_path = path.relative_to(test_case)
                 lines = self.reformat_file(file, self.arg)
                 instances = self.count_instances(lines)
-                if le < instances:
+                if le < ri and le < instances:
+                    dbg_file_instances[rel_path] = instances
                     current_le = le
                     current_ri = min(instances,ri)
                     new_lines = []
                     cnt = 0
-                    for s in lines:
-                        if self.arg == '10' or not s.strip().startswith('#'):
+                    for i, s in enumerate(lines):
+                        if self.should_try_removing_line(s, i, lines):
                             cnt += 1
                             if cnt <= current_le or cnt > current_ri:
                                 new_lines.append(s)
                         else:
                             new_lines.append(s)
+                    dbg_file_instances_after[rel_path] = len(new_lines)
                     with open(file, 'w') as f:
                         f.writelines(new_lines)
 
-                    path = Path(file)
-                    rel_path = path.relative_to(test_case)
                     dbg_files.append(str(rel_path))
 
                     if not isinstance(state, list):
@@ -158,10 +177,6 @@ class LinesPass(AbstractPass):
 
                 le = max(0, le - instances)
                 ri -= instances
-                if le >= ri:
-                    break
-            else:
-                assert False, f'jumped beyond end: le={le} ri={ri} cand_files={len(cand_files)} state={state}'
 
         improv_per_depth = [0] * (2 + max_depth)
         for p in files:
@@ -171,7 +186,7 @@ class LinesPass(AbstractPass):
             s.improv_per_depth = improv_per_depth
         state_list[0].dbg_file = ','.join(dbg_files)
 
-        logging.debug(f'{self}.transform: state={state}')
+        logging.debug(f'{self}.transform: state={state} split_per_file={state.split_per_file if not isinstance(state, list) else None} dbg_file_instances={dbg_file_instances} dbg_file_instances_after={dbg_file_instances_after}')
         return (PassResult.OK, state)
 
     def get_ordered_files_list(self, test_case, strategy):
