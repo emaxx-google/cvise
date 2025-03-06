@@ -132,6 +132,7 @@ class TestEnvironment:
         try:
             # transform by state
             if isinstance(self.state, MergedState):
+                assert self.state.path_pass_state_tuples
                 path_to_pass_id = {}
                 path_to_states = {}
                 for path, pass_id, state in self.state.path_pass_state_tuples:
@@ -162,7 +163,7 @@ class TestEnvironment:
             self.new_size = get_file_size(self.test_case_path)
 
             # run test script
-            self.exitcode = self.run_test(verbose=False)
+            self.exitcode = self.run_test(verbose=True)
 
             return self
         except OSError as e:
@@ -771,9 +772,10 @@ class TestManager:
                     k = (duration_till_now / duration_till_best * best_success_improv - mean) / sigma if sigma else None
                     prob = math.floor(((finished_jobs - 1) / k**2 + 1) * (finished_jobs + 1) / finished_jobs) / (finished_jobs + 1) if sigma and k > 1 else None
                     # logging.info(f'run_parallel_tests: prob={prob} finished_jobs={finished_jobs} max={best_success_improv} mean={mean} sigma={sigma} duration_till_now={duration_till_now} duration_till_best={duration_till_best} k={k}')
-                    if (prob is None or k > 1 and prob < 0.01) and finished_jobs - best_success_job_counter >= self.parallel_tests or \
-                       order > self.parallel_tests * 5:
-                        logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} prob={prob} improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} strategy={self.strategy}')
+                    # if (k > 1 and prob < 0.01 and finished_jobs - best_success_job_counter >= 2 * self.parallel_tests or
+                    #     order > self.parallel_tests * 10):
+                    if finished_jobs - best_success_job_counter >= 2 * self.parallel_tests or finished_jobs > self.parallel_tests * 10:
+                        logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} best_success_job_counter={best_success_job_counter} order={order} improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} strategy={self.strategy}')
                         for pass_id, state in dict((fu.pass_id, fu.state)
                                                 for fu in sorted(self.futures, key=lambda fu: -fu.order)
                                                 if not isinstance(fu.pass_id, list) and
@@ -795,9 +797,9 @@ class TestManager:
                     if boardable:
                         merge_train.append((sta, pa, imp))
                 merge_improv = sum(imp for sta, pa, imp in merge_train)
+                logging.debug(f'run_parallel_tests: merge_train={merge_train} merge_improv={merge_improv} in_attempted={merge_improv in attempted_merges}')
                 state = None
                 if len(merge_train) >= 2 and merge_improv > 0 and merge_improv not in attempted_merges:
-                    attempted_merges.add(merge_improv)
                     pass_id = list(sorted(set(passes.index(pa) for sta, pa, imp in merge_train)))
                     pass_ = [passes[i] if i in pass_id else None for i in range(len(passes))]
                     path_pass_state_tuples = []
@@ -808,8 +810,9 @@ class TestManager:
                     if (best_success_improv is None or
                         self.get_state_comparison_key(merged_state, merge_improv) <
                         self.get_state_comparison_key(best_success_env.state, best_success_improv)):
-                        state = merged_state
                         logging.debug(f'attempting merge state={state} merge_improv={merge_improv}')
+                        state = merged_state
+                        attempted_merges.add(merge_improv)
                         should_advance = False
                 if not state:
                     pass_job_index += 1
