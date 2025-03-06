@@ -44,27 +44,29 @@ class TreeSitterPass(AbstractPass):
             state = FuzzyBinaryState.create_from_hint(instances, last_state_hint)
         else:
             state = FuzzyBinaryState.create(instances)
-            if state:
-                state.chunk = min(state.chunk, 500)
+            # if state:
+            #     state.chunk = min(state.chunk, 500)
         if state:
             state.success_history = self.get_success_history(strategy)
             state.strategy = strategy
         while state and strategy == 'topo' and state.tp == 0:
             state = state.advance(strategy)
-        if state and state.tp == 1:
-            state.rnd_chunk = min(state.rnd_chunk, 500)
+        # if state:
+        #     state.chunk = min(state.chunk, 500)
+        #     if state.tp == 1:
+        #         state.rnd_chunk = min(state.rnd_chunk, 500)
         logging.debug(f'TreeSitterPass.new: state={state} instances={instances} stdout="{out.strip()}"')
         return state
 
     def advance(self, test_case, state):
         new = state.advance(state.strategy)
-        logging.debug(f'TreeSitterPass.advance: old={state} new={new}')
         if new:
             new.strategy = state.strategy
         while new and new.strategy == 'topo' and new.tp == 0:
             new = new.advance(new.strategy)
-        if new and new.tp == 1:
-            new.rnd_chunk = min(new.rnd_chunk, 500)
+        # if new and new.tp == 1:
+        #     new.rnd_chunk = min(new.rnd_chunk, 500)
+        logging.debug(f'TreeSitterPass.advance: old={state} new={new}')
         return new
     
     def advance_on_success(self, test_case, state):
@@ -188,12 +190,8 @@ class TreeSitterPass(AbstractPass):
         if not path_to_depth:
             path_to_depth[root_file] = 0
 
-        max_depth = max(path_to_depth.values())
-        depth_threshold = (max_depth + 1) // 2 if strategy == 'topo' else 1E10
-
         files = [f for f in Path(test_case).rglob('*')
-                 if not f.is_dir() and not f.is_symlink() and f.name != 'target.makefile' and f.suffix != '.txt' and f.suffix != '.cppmap'
-                    and path_to_depth.get(f.resolve(), 1E9) <= depth_threshold]
+                 if not f.is_dir() and not f.is_symlink() and f.name != 'target.makefile' and f.suffix != '.txt' and f.suffix != '.cppmap']
         files.sort(key=lambda f: (path_to_depth.get(f.resolve(), 1E9) if strategy == 'topo' else 0, f.suffix != '.cc', f))
 
         return files, path_to_depth
