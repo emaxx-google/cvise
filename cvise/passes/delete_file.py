@@ -1,10 +1,11 @@
 import logging
+from pathlib import Path
 import subprocess
 
 from cvise.passes.abstract import AbstractPass, FuzzyBinaryState, PassResult
 
 
-TOOL = '~/clang-toys/reproducer-tool/delete-unused-files.sh'
+TOOL = Path(__file__).parent / 'delete-unused-files.sh'
 
 
 class DeleteFilePass(AbstractPass):
@@ -12,14 +13,19 @@ class DeleteFilePass(AbstractPass):
         return True
 
     def new(self, test_case, check_sanity=None, last_state_hint=None, strategy=None):
-        out = subprocess.check_output(f'{TOOL} dry', shell=True, cwd=test_case, encoding='utf-8', stderr=subprocess.STDOUT)
+        try:
+            out = subprocess.check_output(f'{TOOL} dry', shell=True, cwd=test_case, encoding='utf-8', stderr=subprocess.STDOUT)
+        except subprocess.CalledProcessError as e:
+            logging.error(f'{e}\nstdout+stderr:\n{e.output}')
+            raise
         if 'nothing to delete' in out:
             return None
         s = [s.strip() for s in out.splitlines() if 'to delete: ' in s][0]
         state = FuzzyBinaryState.create(int(s.split()[2]))
         if state:
             state.files_deleted = state.end() - state.begin()
-        # logging.info(f'DeleteFilePass.new: state={state}')
+        dbg = ' '.join(l.strip() for l in out.splitlines())
+        logging.debug(f'DeleteFilePass.new: state={state} stdout={dbg}')
         return state
 
     def advance(self, test_case, state):
@@ -32,7 +38,7 @@ class DeleteFilePass(AbstractPass):
         return None
 
     def transform(self, test_case, state, process_event_notifier):
-        # logging.info(f'DeleteFilePass.transform: {state}')
+        logging.debug(f'DeleteFilePass.transform: {state}')
         proc = subprocess.Popen(
             f'{TOOL} del {state.begin()+1} {state.end()+1}', shell=True, cwd=test_case,
             encoding='utf-8', stdout=subprocess.PIPE, stderr=subprocess.PIPE)
