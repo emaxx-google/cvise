@@ -165,6 +165,9 @@ class TestEnvironment:
             # run test script
             self.exitcode = self.run_test(verbose=True)
 
+            if self.exitcode != 0 and isinstance(self.state, MergedState):
+                assert False, 'merge failed!'
+
             return self
         except OSError as e:
             # this can happen when we clean up temporary files for cancelled processes
@@ -178,6 +181,7 @@ class TestEnvironment:
     def run_test(self, verbose):
         try:
             os.chdir(self.folder)
+            logging.debug(f'TestEnvironment.run_test: "{self.test_script}" in "{self.folder}"')
             stdout, stderr, returncode = ProcessEventNotifier(self.pid_queue).run_process(
                 str(self.test_script), shell=True
             )
@@ -687,6 +691,7 @@ class TestManager:
             best_success_improv = None
             best_success_when = None
             finished_job_improves = []
+            recent_success_job_counter = None
             best_success_job_counter = None
             start_time = time.monotonic()
 
@@ -723,11 +728,6 @@ class TestManager:
                         self.terminate_all(pool)
                         return success
 
-                def better_than_best(state, improv):
-                    if best_success_improv is None:
-                        return True
-                    return self.get_state_comparison_key(state, improv) < self.get_state_comparison_key(best_success_env.state, best_success_improv)
-
                 tmp_futures = copy.copy(self.futures)
                 for future in tmp_futures:
                     if future.done() and not future.exception():
@@ -744,11 +744,12 @@ class TestManager:
                             assert improv == self.run_test_case_size - get_file_size(env.test_case_path)
                             finished_job_improves.append(improv)
                             assert len(finished_job_improves) == finished_jobs
-                            logging.info(f'observed success success_cnt={success_cnt} improv={improv} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={finished_jobs}')
+                            logging.info(f'observed success success_cnt={success_cnt} improv={improv} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={finished_jobs} comparison_key={self.get_state_comparison_key(env.state, improv)}')
                             if hasattr(pass_, 'on_success_observed'):
                                 pass_.on_success_observed(env.state)
                             self.next_successes_hint.append((env.state, pass_, improv))
-                            if better_than_best(env.state, improv):
+                            recent_success_job_counter = finished_jobs
+                            if best_success_improv is None or self.get_state_comparison_key(env.state, improv) < self.get_state_comparison_key(best_success_env.state, best_success_improv):
                                 best_success_env = env
                                 best_success_pass = pass_
                                 best_success_improv = improv
@@ -774,8 +775,8 @@ class TestManager:
                     # logging.info(f'run_parallel_tests: prob={prob} finished_jobs={finished_jobs} max={best_success_improv} mean={mean} sigma={sigma} duration_till_now={duration_till_now} duration_till_best={duration_till_best} k={k}')
                     # if (k > 1 and prob < 0.01 and finished_jobs - best_success_job_counter >= 2 * self.parallel_tests or
                     #     order > self.parallel_tests * 10):
-                    if finished_jobs - best_success_job_counter >= 2 * self.parallel_tests or finished_jobs > self.parallel_tests * 10:
-                        logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} best_success_job_counter={best_success_job_counter} order={order} improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} strategy={self.strategy}')
+                    if finished_jobs - recent_success_job_counter >= 2 * self.parallel_tests or finished_jobs > self.parallel_tests * 10:
+                        logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} best_success_job_counter={best_success_job_counter} order={order} improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} strategy={self.strategy} comparison_key={self.get_state_comparison_key(best_success_env.state, best_success_improv)}')
                         for pass_id, state in dict((fu.pass_id, fu.state)
                                                 for fu in sorted(self.futures, key=lambda fu: -fu.order)
                                                 if not isinstance(fu.pass_id, list) and
@@ -810,7 +811,7 @@ class TestManager:
                     if (best_success_improv is None or
                         self.get_state_comparison_key(merged_state, merge_improv) <
                         self.get_state_comparison_key(best_success_env.state, best_success_improv)):
-                        logging.debug(f'attempting merge state={state} merge_improv={merge_improv}')
+                        logging.debug(f'attempting merge state={merged_state} merge_improv={merge_improv} comparison_key={self.get_state_comparison_key(merged_state, merge_improv)}')
                         state = merged_state
                         attempted_merges.add(merge_improv)
                         should_advance = False
