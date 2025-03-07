@@ -207,6 +207,7 @@ int main(int argc, char *argv[]) {
       std::cerr << "Failed to parse " << path << std::endl;
       return 1;
     }
+    std::cout << "instances in " << path << ": " << instances.size() << std::endl;
 
     instances_to_remove.clear();
     for (const auto &instance : instances) {

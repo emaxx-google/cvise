@@ -163,7 +163,7 @@ class FuzzyBinaryState(BinaryState):
         return 15 * CORES * 2
 
     @staticmethod
-    def create(instances, strategy):
+    def create(instances, strategy, depth_to_instances=None):
         # global success_history
         # success_history = collections.deque(maxlen=FuzzyBinaryState.choose_success_history_size())
 
@@ -178,6 +178,7 @@ class FuzzyBinaryState(BinaryState):
         self.rnd_chunk = None
         self.success_history = collections.deque(maxlen=FuzzyBinaryState.choose_success_history_size())
         self.dbg_file = None
+        self.depth_to_instances = depth_to_instances
         return self
     
     @staticmethod
@@ -190,7 +191,7 @@ class FuzzyBinaryState(BinaryState):
             assert False
     
     @staticmethod
-    def create_from_hint(instances, last_state_hint):
+    def create_from_hint(instances, last_state_hint, depth_to_instances=None):
         if instances is not None and last_state_hint.chunk > instances:
             return None
         self = copy.copy(last_state_hint)
@@ -201,6 +202,7 @@ class FuzzyBinaryState(BinaryState):
         self.tp = 0
         self.rnd_index = None
         self.rnd_chunk = None
+        self.depth_to_instances = depth_to_instances
         return self
     
     def begin(self):
@@ -259,22 +261,32 @@ class FuzzyBinaryState(BinaryState):
         return max(self.success_history)
 
     def prepare_rnd_step(self, strategy):
-        TOPO_BIAS = 10
         self.rnd_chunk = None
         peak = self.choose_rnd_peak()
         if peak is None or peak == 0:
             peak = 1
-        le = min(self.chunk, self.instances)
-        ri = self.instances
-        peak = max(peak, le)
-        peak = min(peak, ri)
-        while self.rnd_chunk is None or self.rnd_chunk < le or self.rnd_chunk > ri:
-            self.rnd_chunk = round(random.gauss(peak, peak))
+        chunk_le = min(self.chunk, self.instances)
+        chunk_ri = self.instances
         if strategy == 'topo':
-            cands = [int(random.triangular(0, self.instances - self.rnd_chunk, 0)) for _ in range(TOPO_BIAS)]
-            self.rnd_index = min(cands)
+            while True:
+                depth = random.randrange(len(self.depth_to_instances))
+                instances_within_depth = sum(self.depth_to_instances[:depth+1])
+                if instances_within_depth > 0:
+                    break
+            chunk_le = min(chunk_le, instances_within_depth)
+            chunk_ri = min(chunk_ri, instances_within_depth)
+        peak = max(peak, chunk_le)
+        peak = min(peak, chunk_ri)
+        while self.rnd_chunk is None or self.rnd_chunk < chunk_le or self.rnd_chunk > chunk_ri:
+            self.rnd_chunk = round(random.gauss(peak, peak))
+        assert self.rnd_chunk > 0
+        if strategy == 'topo':
+            pos_le = 0
+            pos_ri = instances_within_depth
         else:
-            self.rnd_index = random.randint(0, self.instances - self.rnd_chunk)
+            pos_le = 0
+            pos_ri = self.instances - self.rnd_chunk
+        self.rnd_index = random.randint(pos_le, pos_ri)
 
 class MultiFileFuzzyBinaryState(FuzzyBinaryState):
     def __repr__(self):

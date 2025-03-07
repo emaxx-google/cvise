@@ -9,7 +9,7 @@
    {"pass": "lines", "arg": "10"}
 ],
  "paced": [
-    {"pass": "delete-file"},
+    {"pass": "delete-file", "strategy": "size"},
     {"pass": "tree_sitter", "arg": "replace-function-def-with-decl", "strategy": "topo", "jobs": 8},
     {"pass": "tree_sitter", "arg": "replace-function-def-with-decl", "strategy": "size", "jobs": 8},
     {"pass": "lines", "arg": "0", "strategy": "topo"},

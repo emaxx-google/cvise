@@ -39,12 +39,28 @@ class TreeSitterPass(AbstractPass):
         if not files:
             return None
         out = subprocess.check_output([TOOL], encoding='utf-8', stderr=subprocess.STDOUT, input='\n'.join(str(p) for p in files))
-        s = [s.strip() for s in out.splitlines() if 'Total instances: ' in s][0]
-        instances = int(s.split()[2])
+
+        max_depth = max(path_to_depth.values())
+        depth_to_instances = [0] * (max_depth + 2)
+        for s in out.splitlines():
+            if 'Total instances: ' in s:
+                instances = int(s.split()[2])
+            else:
+                m = re.match(r'instances in (.*): ([0-9]+)', s)
+                if m:
+                    path = m[1]
+                    if path.startswith('"'):
+                        path = path[1:-1]
+                    path = Path(path)
+                    cur_instances = int(m[2])
+                    d = path_to_depth.get(path, max_depth+1)
+                    depth_to_instances[d] += cur_instances
+        assert sum(depth_to_instances) == instances, f'instances={instances} depth_to_instances={depth_to_instances}'
+
         if last_state_hint:
-            state = FuzzyBinaryState.create_from_hint(instances, last_state_hint)
+            state = FuzzyBinaryState.create_from_hint(instances, last_state_hint, depth_to_instances)
         else:
-            state = FuzzyBinaryState.create(instances, strategy)
+            state = FuzzyBinaryState.create(instances, strategy, depth_to_instances)
             # if state:
             #     state.chunk = min(state.chunk, 500)
         if state:
@@ -61,9 +77,8 @@ class TreeSitterPass(AbstractPass):
         logging.debug(f'TreeSitterPass.new: state={state} instances={instances} stdout="{out.strip()}"')
         return state
     
-    @staticmethod
-    def extra_file_path(test_case):
-        return Path(test_case)/'../extra.dat'
+    def extra_file_path(self, test_case):
+        return Path(test_case).parent / f'extra{self}.dat'
 
     def advance(self, test_case, state):
         new = state.advance(state.strategy)
@@ -154,8 +169,6 @@ class TreeSitterPass(AbstractPass):
                             for s in state_list:
                                 if le <= s.begin() and s.end() <= ri:
                                     s.dbg_file = l.strip()
-                if not isinstance(state, list):
-                    assert sum_of_splits == ri - le, f'le={le} ri={ri} sum_of_splits={sum_of_splits} state={state}'
 
         improv_per_depth = [0] * (2 + max_depth)
         for p in files:

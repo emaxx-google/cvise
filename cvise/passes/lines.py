@@ -40,13 +40,20 @@ class LinesPass(AbstractPass):
         files, path_to_depth = self.get_ordered_files_list(test_case, strategy)
         if not files:
             return None
+        path_to_instances = {}
+        max_depth = max(path_to_depth.values())
+        depth_to_instances = [0] * (max_depth + 2)
         instances = 0
         for file in files:
-            instances += self.count_instances(self.reformat_file(file, self.arg))
+            cur_instances = self.count_instances(self.reformat_file(file, self.arg))
+            path_to_instances[file] = cur_instances
+            instances += cur_instances
+            d = path_to_depth.get(file, max_depth + 1)
+            depth_to_instances[d] += cur_instances
         if last_state_hint:
-            state = FuzzyBinaryState.create_from_hint(instances, last_state_hint)
+            state = FuzzyBinaryState.create_from_hint(instances, last_state_hint, depth_to_instances)
         else:
-            state = FuzzyBinaryState.create(instances, strategy)
+            state = FuzzyBinaryState.create(instances, strategy, depth_to_instances)
         if state:
             state.success_history = self.get_success_history(strategy)
             state.strategy = strategy
@@ -56,14 +63,14 @@ class LinesPass(AbstractPass):
             with open(self.extra_file_path(test_case), 'wb') as f:
                 pickle.dump({
                     'files': [s.relative_to(test_case) for s in files],
-                    'path_to_depth': dict((s.relative_to(test_case), v) for s,v in path_to_depth.items())
+                    'path_to_instances': dict((s.relative_to(test_case), v) for s,v in path_to_instances.items()),
+                    'path_to_depth': dict((s.relative_to(test_case), v) for s,v in path_to_depth.items()),
                 }, f)
         logging.debug(f'LinesPass.new: state={state} test_case={test_case} instances={instances}')
         return state
     
-    @staticmethod
-    def extra_file_path(test_case):
-        return Path(test_case)/'../extra.dat'
+    def extra_file_path(self, test_case):
+        return Path(test_case).parent / f'extra{self}.dat'
     
     def reformat_file(self, file, arg):
         assert arg is not None
@@ -135,6 +142,7 @@ class LinesPass(AbstractPass):
             obj = pickle.load(f)
             logging.debug(f'obj={obj}')
             files = [test_case / Path(s) for s in obj['files']]
+            path_to_instances = dict((test_case / Path(s), v) for s, v in obj['path_to_instances'].items())
             path_to_depth = dict((test_case / Path(s), v) for s, v in obj['path_to_depth'].items())
 
         path_to_size = dict((p, p.stat().st_size) for p in files)
@@ -152,9 +160,9 @@ class LinesPass(AbstractPass):
             for file in cand_files:
                 path = Path(file)
                 rel_path = path.relative_to(test_case)
-                lines = self.reformat_file(file, self.arg)
-                instances = self.count_instances(lines)
+                instances = path_to_instances[path]
                 if le < ri and le < instances:
+                    lines = self.reformat_file(file, self.arg)
                     dbg_file_instances[rel_path] = instances
                     current_le = le
                     current_ri = min(instances,ri)

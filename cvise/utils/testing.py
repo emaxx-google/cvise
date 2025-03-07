@@ -93,7 +93,7 @@ class TestEnvironment:
         self.pid_queue = pid_queue
         self.pwd = os.getcwd()
         self.test_case_full_path = test_case
-        self.test_case = os.path.basename(test_case)
+        self.test_case = test_case[0].name if isinstance(test_case, list) else test_case.name
         self.all_test_cases = all_test_cases
 
     @property
@@ -115,30 +115,34 @@ class TestEnvironment:
         shutil.copy(self.test_script, dst)
 
     @staticmethod
-    def extra_file_path(test_case):
-        return Path(test_case)/'../extra.dat'
+    def extra_file_paths(test_case):
+        return Path(test_case).parent.glob('extra*.dat')
 
     def run(self):
-        self.base_size = get_file_size(self.test_case_full_path)
-
-        # Copy files to the created folder
-        for test_case in self.all_test_cases:
-            if os.path.basename(test_case) == self.test_case:
-                continue
-            (self.folder / test_case.parent).mkdir(parents=True, exist_ok=True)
-            dest = self.folder / test_case.parent / os.path.basename(test_case)
-            logging.debug(f'TestEnvironment.run: copy from {test_case} to {dest}')
-            shutil.copytree(test_case, dest, symlinks=True)
-            if self.extra_file_path(test_case).exists():
-                shutil.copy(self.extra_file_path(test_case), self.extra_file_path(dest))
-
-        dest = self.folder / test_case.parent / os.path.basename(test_case)
-        logging.debug(f'TestEnvironment.run: copy from {self.test_case_full_path} to {dest}')
-        shutil.copytree(self.test_case_full_path, dest, symlinks=True)
-        if self.extra_file_path(self.test_case_full_path).exists():
-            shutil.copy(self.extra_file_path(self.test_case_full_path), self.extra_file_path(dest))
-
         try:
+            self.base_size = get_file_size(self.test_case_full_path[0] if isinstance(self.test_case_full_path, list) else self.test_case_full_path)
+
+            # Copy files to the created folder
+            for test_case in self.all_test_cases:
+                if os.path.basename(test_case) == self.test_case:
+                    continue
+                (self.folder / test_case.parent).mkdir(parents=True, exist_ok=True)
+                dest = self.folder / test_case.parent / os.path.basename(test_case)
+                logging.debug(f'TestEnvironment.run: copy from {test_case} to {dest}')
+                shutil.copytree(test_case, dest, symlinks=True)
+                for extra in self.extra_file_paths(test_case):
+                    logging.debug(f'TestEnvironment.run: copy from {extra} to {dest.parent}')
+                    shutil.copy(extra, dest.parent)
+
+            src = self.test_case_full_path[0] if isinstance(self.test_case_full_path, list) else self.test_case_full_path
+            dest = self.folder / test_case.parent / os.path.basename(test_case)
+            logging.debug(f'TestEnvironment.run: copy from {src} to {dest}')
+            shutil.copytree(src, dest, symlinks=True)
+            for origin in self.test_case_full_path if isinstance(self.test_case_full_path, list) else [self.test_case_full_path]:
+                for extra in self.extra_file_paths(origin):
+                    logging.debug(f'TestEnvironment.run: copy from {extra} to {dest.parent}')
+                    shutil.copy(extra, dest.parent)
+
             # transform by state
             if isinstance(self.state, MergedState):
                 assert self.state.path_pass_state_tuples
@@ -350,13 +354,13 @@ class TestManager:
     def create_root(self, p=None, suffix=''):
         pass_name = str(p or self.current_pass).replace('::', '-').replace(' ', '_')
         root = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}{pass_name}{suffix}-')
-        self.roots.append(root)
+        self.roots.append(Path(root))
         logging.debug(f'Creating pass root folder: {root}')
 
     def recreate_root(self, idx, p, suffix):
         pass_name = str(p).replace('::', '-').replace(' ', '_')
         root = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}{pass_name}{suffix}-')
-        self.roots[idx] = root
+        self.roots[idx] = Path(root)
         logging.debug(f'Creating pass root folder: {root}')
 
     def remove_root(self):
@@ -838,8 +842,8 @@ class TestManager:
 
                 tmp_parent_dir = self.roots[pass_id[0]] if isinstance(state, MergedState) else self.roots[pass_id]
                 folder = Path(tempfile.mkdtemp(f'{self.TEMP_PREFIX}job{order}', dir=tmp_parent_dir))
-                any_pass_id = pass_id[0] if isinstance(state, MergedState) else pass_id
-                test_case = Path(os.path.join(self.roots[any_pass_id+len(passes)], os.path.basename(self.current_test_case)))
+                test_case = [self.roots[i+len(passes)] / self.current_test_case.name for i in pass_id] if isinstance(state, MergedState) else \
+                    (self.roots[pass_id+len(passes)] / self.current_test_case.name)
                 transform = [p.transform for p in passes] if isinstance(state, MergedState) else pass_.transform
                 test_env = TestEnvironment(
                     state,
