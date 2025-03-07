@@ -178,9 +178,6 @@ class TestEnvironment:
             # run test script
             self.exitcode = self.run_test(verbose=True)
 
-            if self.exitcode != 0 and isinstance(self.state, MergedState):
-                assert False, 'merge failed!'
-
             return self
         except OSError as e:
             # this can happen when we clean up temporary files for cancelled processes
