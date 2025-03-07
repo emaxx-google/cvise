@@ -114,6 +114,10 @@ class TestEnvironment:
 
         shutil.copy(self.test_script, dst)
 
+    @staticmethod
+    def extra_file_path(test_case):
+        return Path(test_case)/'../extra.dat'
+
     def run(self):
         self.base_size = get_file_size(self.test_case_full_path)
 
@@ -125,9 +129,14 @@ class TestEnvironment:
             dest = self.folder / test_case.parent / os.path.basename(test_case)
             logging.debug(f'TestEnvironment.run: copy from {test_case} to {dest}')
             shutil.copytree(test_case, dest, symlinks=True)
+            if self.extra_file_path(test_case).exists():
+                shutil.copy(self.extra_file_path(test_case), self.extra_file_path(dest))
+
         dest = self.folder / test_case.parent / os.path.basename(test_case)
         logging.debug(f'TestEnvironment.run: copy from {self.test_case_full_path} to {dest}')
         shutil.copytree(self.test_case_full_path, dest, symlinks=True)
+        if self.extra_file_path(self.test_case_full_path).exists():
+            shutil.copy(self.extra_file_path(self.test_case_full_path), self.extra_file_path(dest))
 
         try:
             # transform by state
@@ -829,7 +838,8 @@ class TestManager:
 
                 tmp_parent_dir = self.roots[pass_id[0]] if isinstance(state, MergedState) else self.roots[pass_id]
                 folder = Path(tempfile.mkdtemp(f'{self.TEMP_PREFIX}job{order}', dir=tmp_parent_dir))
-                test_case = Path(self.current_test_case) if isinstance(state, MergedState) else Path(os.path.join(self.roots[pass_id+len(passes)], os.path.basename(self.current_test_case)))
+                any_pass_id = pass_id[0] if isinstance(state, MergedState) else pass_id
+                test_case = Path(os.path.join(self.roots[any_pass_id+len(passes)], os.path.basename(self.current_test_case)))
                 transform = [p.transform for p in passes] if isinstance(state, MergedState) else pass_.transform
                 test_env = TestEnvironment(
                     state,

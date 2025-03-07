@@ -3,6 +3,7 @@ import copy
 import logging
 import os
 from pathlib import Path
+import pickle
 import random
 import re
 import shutil
@@ -51,12 +52,18 @@ class LinesPass(AbstractPass):
             state.strategy = strategy
         while state and strategy == 'topo' and state.tp == 0:
             state = state.advance(strategy)
-        # if state:
-        #     state.chunk = min(state.chunk, 500)
-        #     if state.tp == 1:
-        #         state.rnd_chunk = min(state.rnd_chunk, 500)
-        logging.debug(f'LinesPass.new: state={state} instances={instances}')
+        if state:
+            with open(self.extra_file_path(test_case), 'wb') as f:
+                pickle.dump({
+                    'files': [s.relative_to(test_case) for s in files],
+                    'path_to_depth': dict((s.relative_to(test_case), v) for s,v in path_to_depth.items())
+                }, f)
+        logging.debug(f'LinesPass.new: state={state} test_case={test_case} instances={instances}')
         return state
+    
+    @staticmethod
+    def extra_file_path(test_case):
+        return Path(test_case)/'../extra.dat'
     
     def reformat_file(self, file, arg):
         assert arg is not None
@@ -124,7 +131,12 @@ class LinesPass(AbstractPass):
         if not isinstance(state, list):
             state.split_per_file = {}
 
-        files, path_to_depth = self.get_ordered_files_list(test_case, state_list[0].strategy)
+        with open(self.extra_file_path(test_case), 'rb') as f:
+            obj = pickle.load(f)
+            logging.debug(f'obj={obj}')
+            files = [test_case / Path(s) for s in obj['files']]
+            path_to_depth = dict((test_case / Path(s), v) for s, v in obj['path_to_depth'].items())
+
         path_to_size = dict((p, p.stat().st_size) for p in files)
         max_depth = max(path_to_depth.values())
 
@@ -133,7 +145,6 @@ class LinesPass(AbstractPass):
         for le, ri in reversed(self.merge_segments(segments)):
             dbg_file_instances = {}
             dbg_file_instances_after = {}
-            original_le, original_ri = le, ri
             if hasattr(state_list[0], 'file_id'):
                 cand_files = [test_case / state_list[0].file_id]
             else:
