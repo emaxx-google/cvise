@@ -146,27 +146,7 @@ class FuzzyBinaryState(BinaryState):
         return f'FuzzyBinaryState(chunk={self.chunk} index={self.index} instances={self.instances} tp={self.tp} rnd_index={self.rnd_index} rnd_chunk={self.rnd_chunk} dbg_file={self.dbg_file} strategy={self.strategy if hasattr(self, "strategy") else None} improv_per_depth={self.improv_per_depth if hasattr(self, "improv_per_depth") else None})'
 
     @staticmethod
-    def choose_success_history_size():
-        # Chosen heuristically to make the algorithm sufficiently adaptive: to keep
-        # trying around the recently observed big successful leaps, but without
-        # being stuck too long if no more such successes occur.
-        #
-        # The formula can be treated as mostly empirical. However, some grounding
-        # for it can be loosely derived from Chebyshev's inequality in a similar way
-        # as the statistics' "rule of three", if we aim for the "one of the parallel
-        # processes successfully improves the window's maximum" event's probability
-        # to be bounded at 50% with 99% confidence. The analytical solution in this
-        # model would be "10 / (1 - 0.5 ** (1 / CORES))", but we roughly
-        # approximated it with this very simple formula.
-        #
-        # TODO: doubling because half of runs are non-random.
-        return 15 * CORES * 2
-
-    @staticmethod
-    def create(instances, strategy, depth_to_instances=None):
-        # global success_history
-        # success_history = collections.deque(maxlen=FuzzyBinaryState.choose_success_history_size())
-
+    def create(instances, strategy, depth_to_instances=None, pass_repr=''):
         if not instances:
             return None
         self = FuzzyBinaryState()
@@ -176,22 +156,24 @@ class FuzzyBinaryState(BinaryState):
         self.tp = 0
         self.rnd_index = None
         self.rnd_chunk = None
-        self.success_history = collections.deque(maxlen=FuzzyBinaryState.choose_success_history_size())
+        self.rnd_depth = None
         self.dbg_file = None
         self.depth_to_instances = depth_to_instances
+        self.strategy = strategy
+        self.pass_repr = pass_repr
         return self
     
     @staticmethod
     def choose_initial_chunk(instances, strategy):
         if strategy == 'topo':
-            return min(instances, 10)
+            return 1
         elif strategy == 'size':
             return max(1, instances // 1000)
         else:
             assert False
     
     @staticmethod
-    def create_from_hint(instances, last_state_hint, depth_to_instances=None):
+    def create_from_hint(instances, strategy, last_state_hint, depth_to_instances=None):
         if instances is not None and last_state_hint.chunk > instances:
             return None
         self = copy.copy(last_state_hint)
@@ -202,7 +184,9 @@ class FuzzyBinaryState(BinaryState):
         self.tp = 0
         self.rnd_index = None
         self.rnd_chunk = None
+        self.rnd_depth = None
         self.depth_to_instances = depth_to_instances
+        self.strategy = strategy
         return self
     
     def begin(self):
@@ -222,55 +206,51 @@ class FuzzyBinaryState(BinaryState):
             return super().real_chunk()
         else:
             return self.rnd_chunk
+        
+    def get_success_history(self, success_histories):
+        key = f'{self.pass_repr} {self.strategy} {self.rnd_depth}'
+        return success_histories.setdefault(key, collections.deque(maxlen=300))
 
-    def advance(self, strategy):
-        self.success_history.append(0)
+    def advance(self, success_histories):
         state = copy.copy(self)
         state.dbg_file = None
         if state.tp == 0 and state.chunk < state.instances:
             state.tp += 1
-            state.prepare_rnd_step(strategy)
-            # logging.debug(f'***ADVANCE*** to {state}')
-            return state
-        bi = super().advance()
-        if not bi:
-            return None
-        state.index = bi.index
-        state.chunk = bi.chunk
-        state.tp = 0
-        state.rnd_index = None
-        state.rnd_chunk = None
+            state.prepare_rnd_step(success_histories)
+        else:
+            bi = super().advance()
+            if not bi:
+                return None
+            state.index = bi.index
+            state.chunk = bi.chunk
+            state.tp = 0
+            state.rnd_index = None
+            state.rnd_chunk = None
+            state.rnd_depth = None
+        self.get_success_history(success_histories).append(0)
         # logging.debug(f'***ADVANCE*** to {state}')
         return state
     
     def advance_on_success(self, instances):
-        self.success_history.append(self.instances - instances)
-        state = copy.copy(self)
-        state.instances = instances
-        state.tp = 0
-        state.rnd_index = None
-        state.rnd_chunk = None
-        if state.index >= state.instances:
-            return state.advance()
-        else:
-            return state
+        assert False, 'not implemented'
 
-    def choose_rnd_peak(self):
-        if not self.success_history:
+    def choose_rnd_peak(self, success_history):
+        if not success_history:
             return None
-        return max(self.success_history)
+        return max(success_history)
 
-    def prepare_rnd_step(self, strategy):
+    def prepare_rnd_step(self, success_histories):
         self.rnd_chunk = None
-        peak = self.choose_rnd_peak()
+        self.rnd_depth = None
+        peak = self.choose_rnd_peak(self.get_success_history(success_histories))
         if peak is None or peak == 0:
             peak = 1
         chunk_le = min(self.chunk, self.instances)
         chunk_ri = self.instances
-        if strategy == 'topo':
+        if self.strategy == 'topo':
             while True:
-                depth = random.randrange(len(self.depth_to_instances))
-                instances_within_depth = sum(self.depth_to_instances[:depth+1])
+                self.rnd_depth = int(random.triangular(0, len(self.depth_to_instances), 0))
+                instances_within_depth = sum(self.depth_to_instances[:self.rnd_depth+1])
                 if instances_within_depth > 0:
                     break
             chunk_le = min(chunk_le, instances_within_depth)
@@ -280,7 +260,7 @@ class FuzzyBinaryState(BinaryState):
         while self.rnd_chunk is None or self.rnd_chunk < chunk_le or self.rnd_chunk > chunk_ri:
             self.rnd_chunk = round(random.gauss(peak, peak))
         assert self.rnd_chunk > 0
-        if strategy == 'topo':
+        if self.strategy == 'topo':
             pos_le = 0
             pos_ri = instances_within_depth
         else:

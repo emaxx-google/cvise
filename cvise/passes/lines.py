@@ -31,10 +31,6 @@ class LinesPass(AbstractPass):
 
     def supports_merging(self):
         return True
-    
-    def get_success_history(self, strategy):
-        key = f'{self} {strategy}'
-        return success_histories.setdefault(key, collections.deque(maxlen=300))
 
     def new(self, test_case, check_sanity=None, last_state_hint=None, strategy=None):
         files, path_to_depth = self.get_ordered_files_list(test_case, strategy)
@@ -51,14 +47,11 @@ class LinesPass(AbstractPass):
             d = path_to_depth.get(file, max_depth + 1)
             depth_to_instances[d] += cur_instances
         if last_state_hint:
-            state = FuzzyBinaryState.create_from_hint(instances, last_state_hint, depth_to_instances)
+            state = FuzzyBinaryState.create_from_hint(instances, strategy, last_state_hint, depth_to_instances)
         else:
-            state = FuzzyBinaryState.create(instances, strategy, depth_to_instances)
-        if state:
-            state.success_history = self.get_success_history(strategy)
-            state.strategy = strategy
+            state = FuzzyBinaryState.create(instances, strategy, depth_to_instances, repr(self))
         while state and strategy == 'topo' and state.tp == 0:
-            state = state.advance(strategy)
+            state = state.advance(success_histories)
         if state:
             with open(self.extra_file_path(test_case), 'wb') as f:
                 pickle.dump({
@@ -104,24 +97,19 @@ class LinesPass(AbstractPass):
         return True
     
     def advance(self, test_case, state):
-        new = state.advance(state.strategy)
-        if new:
-            new.strategy = state.strategy
+        logging.debug(f'advance: before: success_histories={success_histories} self={self}')
+        new = state.advance(success_histories)
         while new and new.strategy == 'topo' and new.tp == 0:
-            new = new.advance(new.strategy)
-        # if new and new.tp == 1:
-        #     new.rnd_chunk = min(new.rnd_chunk, 500)
+            new = new.advance(success_histories)
         logging.debug(f'LinesPass.advance: old={state} new={new}')
         return new
 
     def advance_on_success(self, test_case, state):
-        if not isinstance(state, list):
-            self.get_success_history(state.strategy).append(state.end() - state.begin())
-        return state
+        assert False, 'not implemented'
     
     def on_success_observed(self, state):
         if not isinstance(state, list):
-            self.get_success_history(state.strategy).append(state.end() - state.begin())
+            state.get_success_history(success_histories).append(state.end() - state.begin())
 
     def merge_segments(self, segments):
         result = []

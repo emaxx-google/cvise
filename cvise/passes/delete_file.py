@@ -7,6 +7,8 @@ from cvise.passes.abstract import AbstractPass, FuzzyBinaryState, PassResult
 
 TOOL = Path(__file__).parent / 'delete-unused-files.sh'
 
+success_histories = {}
+
 
 class DeleteFilePass(AbstractPass):
     def check_prerequisites(self):
@@ -29,13 +31,17 @@ class DeleteFilePass(AbstractPass):
         return state
 
     def advance(self, test_case, state):
-        new = state.advance(strategy='size')
+        new = state.advance(success_histories)
         if new:
             new.files_deleted = new.end() - new.begin()
         return new
     
     def advance_on_success(self, test_case, state):
         return None
+
+    def on_success_observed(self, state):
+        if not isinstance(state, list):
+            state.get_success_history(success_histories).append(state.end() - state.begin())
 
     def transform(self, test_case, state, process_event_notifier):
         logging.debug(f'DeleteFilePass.transform: {state}')
