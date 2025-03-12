@@ -16,6 +16,8 @@ from cvise.utils.error import InsaneTestCaseError
 from cvise.utils.misc import CloseableTemporaryFile
 
 
+INCLUDE_DEPTH_TOOL = '/usr/local/google/home/emaxx/cvise/cvise/calc-include-depth/calc-include-depth'
+
 success_histories = {}
 
 
@@ -213,7 +215,7 @@ class LinesPass(AbstractPass):
         root_file = next(Path(test_case).rglob('*.cc'))
         orig_command = re.sub(r'\S*-fmodule\S*', '', orig_command).split()
         command = [
-            '/usr/local/google/home/emaxx/clang-toys/calc-include-depth/calc-include-depth',
+            INCLUDE_DEPTH_TOOL,
             root_file,
             '--',
             '-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk'] + orig_command

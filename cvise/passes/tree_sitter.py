@@ -12,6 +12,7 @@ import types
 from cvise.passes.abstract import AbstractPass, BinaryState, FuzzyBinaryState, PassResult
 
 
+INCLUDE_DEPTH_TOOL = '/usr/local/google/home/emaxx/cvise/cvise/calc-include-depth/calc-include-depth'
 TOOL = '/usr/local/google/home/emaxx/cvise/cvise/tree_sit/func_body_remover'
 
 success_histories = {}
@@ -183,7 +184,7 @@ class TreeSitterPass(AbstractPass):
         root_file = next(Path(test_case).rglob('*.cc'))
         orig_command = re.sub(r'\S*-fmodule\S*', '', orig_command).split()
         command = [
-            '/usr/local/google/home/emaxx/clang-toys/calc-include-depth/calc-include-depth',
+            INCLUDE_DEPTH_TOOL,
             root_file,
             '--',
             '-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk'] + orig_command
