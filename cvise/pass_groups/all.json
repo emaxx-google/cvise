@@ -10,9 +10,10 @@
 ],
  "paced": [
     {"pass": "delete-file", "strategy": "size"},
-    {"pass": "clang_unused_code", "strategy": "size"},
-    {"pass": "tree_sitter", "arg": "replace-function-def-with-decl", "strategy": "topo", "jobs": 8},
-    {"pass": "tree_sitter", "arg": "replace-function-def-with-decl", "strategy": "size", "jobs": 8},
+    {"pass": "clang_unused_code", "strategy": "topo", "jobs": 4},
+    {"pass": "clang_unused_code", "strategy": "size", "jobs": 4},
+    {"pass": "tree_sitter", "arg": "replace-function-def-with-decl", "strategy": "topo", "jobs": 4},
+    {"pass": "tree_sitter", "arg": "replace-function-def-with-decl", "strategy": "size", "jobs": 4},
     {"pass": "lines", "arg": "0", "strategy": "topo"},
     {"pass": "lines", "arg": "0", "strategy": "size"},
     {"pass": "lines", "arg": "1", "strategy": "topo"},
