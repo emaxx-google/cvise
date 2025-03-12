@@ -57,8 +57,13 @@ public:
                           StringRef FileName, bool IsAngled,
                           CharSourceRange FilenameRange,
                           OptionalFileEntryRef File, StringRef SearchPath,
-                          StringRef RelativePath, const Module *SuggestedModule,
+                          StringRef RelativePath,
+#if LLVM_VERSION_MAJOR < 19
+                          const Module *Imported,
+#else
+                          const Module *SuggestedModule,
                           bool ModuleImported,
+#endif
                           SrcMgr::CharacteristicKind FileType) override {
     if (!File) {
       // Ignore broken includes.
