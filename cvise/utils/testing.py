@@ -750,7 +750,7 @@ class TestManager:
                             finished_jobs += 1
                             assert finished_jobs <= order
                             improv = env.size_improvement
-                            assert improv == self.run_test_case_size - get_file_size(env.test_case_path)
+                            assert improv == self.run_test_case_size - get_file_size(env.test_case_path), f'improv={improv} run_test_case_size={self.run_test_case_size} get_file_size(env.test_case_path)={get_file_size(env.test_case_path)} files={list(env.test_case_path.rglob('*'))}'
                             finished_job_improves.append(improv)
                             assert len(finished_job_improves) == finished_jobs
                             logging.info(f'observed success success_cnt={success_cnt} improv={improv} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={finished_jobs} comparison_key={self.get_state_comparison_key(env.state, improv)}')
@@ -1083,6 +1083,7 @@ class TestManager:
                             self.print_diff = not self.print_diff
 
                     self.run_test_case_size = get_file_size(self.current_test_case)
+                    logging.debug(f'run_test_case_size={self.run_test_case_size}')
                     success_env = self.run_parallel_tests(passes)
                     self.kill_pid_queue()
 

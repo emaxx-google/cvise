@@ -74,6 +74,7 @@ set(SOURCE_FILES
   "passes/blank.py"
   "passes/clang.py"
   "passes/clangbinarysearch.py"
+  "passes/clang_unused_code.py"
   "passes/clex.py"
   "passes/comments.py"
   "passes/delete_file.py"

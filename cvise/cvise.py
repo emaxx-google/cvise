@@ -8,6 +8,7 @@ from cvise.passes.balanced import BalancedPass
 from cvise.passes.blank import BlankPass
 from cvise.passes.clang import ClangPass
 from cvise.passes.clangbinarysearch import ClangBinarySearchPass
+from cvise.passes.clang_unused_code import ClangUnusedCodePass
 from cvise.passes.clex import ClexPass
 from cvise.passes.comments import CommentsPass
 from cvise.passes.delete_file import DeleteFilePass
@@ -44,6 +45,7 @@ class CVise:
         'blank': BlankPass,
         'clang': ClangPass,
         'clangbinarysearch': ClangBinarySearchPass,
+        'clang_unused_code': ClangUnusedCodePass,
         'clex': ClexPass,
         'comments': CommentsPass,
         'delete-file': DeleteFilePass,
