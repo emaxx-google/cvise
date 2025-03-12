@@ -61,7 +61,7 @@ class LinesPass(AbstractPass):
                     'path_to_instances': dict((s.relative_to(test_case), v) for s,v in path_to_instances.items()),
                     'path_to_depth': dict((s.relative_to(test_case), v) for s,v in path_to_depth.items()),
                 }, f)
-        logging.debug(f'LinesPass.new: state={state} test_case={test_case} instances={instances}')
+        # logging.debug(f'LinesPass.new: state={state} test_case={test_case} instances={instances}')
         return state
     
     def extra_file_path(self, test_case):
@@ -99,11 +99,11 @@ class LinesPass(AbstractPass):
         return True
     
     def advance(self, test_case, state):
-        logging.debug(f'advance: before: success_histories={success_histories} self={self}')
+        # logging.debug(f'advance: before: success_histories={success_histories} self={self}')
         new = state.advance(success_histories)
         while new and new.strategy == 'topo' and new.tp == 0:
             new = new.advance(success_histories)
-        logging.debug(f'LinesPass.advance: old={state} new={new}')
+        # logging.debug(f'LinesPass.advance: old={state} new={new}')
         return new
 
     def advance_on_success(self, test_case, state):
@@ -123,14 +123,14 @@ class LinesPass(AbstractPass):
         return result
 
     def transform(self, test_case, state, process_event_notifier):
-        logging.debug(f'LinesPass.transform: test_case={test_case} state={state}')
+        # logging.debug(f'LinesPass.transform: test_case={test_case} state={state}')
         state_list = copy.copy(state) if isinstance(state, list) else [state]
         if not isinstance(state, list):
             state.split_per_file = {}
 
         with open(self.extra_file_path(test_case), 'rb') as f:
             obj = pickle.load(f)
-            logging.debug(f'obj={obj}')
+            # logging.debug(f'obj={obj}')
             files = [test_case / Path(s) for s in obj['files']]
             path_to_instances = dict((test_case / Path(s), v) for s, v in obj['path_to_instances'].items())
             path_to_depth = dict((test_case / Path(s), v) for s, v in obj['path_to_depth'].items())
@@ -195,7 +195,7 @@ class LinesPass(AbstractPass):
             s.improv_per_depth = improv_per_depth
         state_list[0].dbg_file = ','.join(dbg_files)
 
-        logging.debug(f'{self}.transform: state={state} split_per_file={state.split_per_file if not isinstance(state, list) else None} dbg_file_instances={dbg_file_instances} dbg_file_instances_after={dbg_file_instances_after}')
+        # logging.debug(f'{self}.transform: state={state} split_per_file={state.split_per_file if not isinstance(state, list) else None} dbg_file_instances={dbg_file_instances} dbg_file_instances_after={dbg_file_instances_after}')
         return (PassResult.OK, state)
 
     def get_ordered_files_list(self, test_case, strategy):

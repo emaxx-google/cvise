@@ -68,7 +68,7 @@ class TreeSitterPass(AbstractPass):
                     'files': [s.relative_to(test_case) for s in files],
                     'path_to_depth': dict((s.relative_to(test_case), v) for s,v in path_to_depth.items())
                 }, f)
-        logging.debug(f'TreeSitterPass.new: state={state} instances={instances} stdout="{out.strip()}"')
+        # logging.debug(f'TreeSitterPass.new: state={state} instances={instances} stdout="{out.strip()}"')
         return state
     
     def extra_file_path(self, test_case):
@@ -78,7 +78,7 @@ class TreeSitterPass(AbstractPass):
         new = state.advance(success_histories)
         while new and new.strategy == 'topo' and new.tp == 0:
             new = new.advance(success_histories)
-        logging.debug(f'TreeSitterPass.advance: old={state} new={new}')
+        # logging.debug(f'TreeSitterPass.advance: old={state} new={new}')
         return new
     
     def advance_on_success(self, test_case, state):
@@ -98,14 +98,14 @@ class TreeSitterPass(AbstractPass):
         return result
 
     def transform(self, test_case, state, process_event_notifier):
-        logging.debug(f'TreeSitterPass.transform: test_case={test_case} state={state}')
+        # logging.debug(f'TreeSitterPass.transform: test_case={test_case} state={state}')
         state_list = copy.copy(state) if isinstance(state, list) else [state]
         if not isinstance(state, list):
             state.split_per_file = {}
 
         with open(self.extra_file_path(test_case), 'rb') as f:
             obj = pickle.load(f)
-            logging.debug(f'obj={obj}')
+            # logging.debug(f'obj={obj}')
             files = [test_case / Path(s) for s in obj['files']]
             path_to_depth = dict((test_case / Path(s), v) for s, v in obj['path_to_depth'].items())
 
@@ -118,7 +118,7 @@ class TreeSitterPass(AbstractPass):
             files_for_tool = files
             if hasattr(state_list[0], 'file_id'):
                 files_for_tool = [test_case / state_list[0].file_id]
-            logging.debug(f'TreeSitterPass.transform: running tool for {le+1}..{ri} for files_count={len(files_for_tool)}')
+            # logging.debug(f'TreeSitterPass.transform: running tool for {le+1}..{ri} for files_count={len(files_for_tool)}')
             with tempfile.NamedTemporaryFile('wt') as fs:
                 fs.writelines([str(p)+'\n' for p in files_for_tool])
                 fs.flush()
@@ -127,7 +127,7 @@ class TreeSitterPass(AbstractPass):
                 best_dbg = None
                 sum_of_splits = 0
                 dbg_out = ' '.join(l.strip() for l in out.splitlines())
-                logging.debug(f'TreeSitterPass.transform: out={dbg_out}')
+                # logging.debug(f'TreeSitterPass.transform: out={dbg_out}')
                 for l in out.splitlines():
                     m = re.match(r'editing (.*): old size ([0-9]+) new size ([0-9]+) instance shift ([0-9]+) instance count ([0-9]+)', l)
                     if m:

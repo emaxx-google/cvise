@@ -153,7 +153,7 @@ class TestEnvironment:
                     path_to_states.setdefault(path, [])
                     path_to_states[path].append(state)
                 files_dbg = list(Path(self.test_case_path).rglob('*'))
-                logging.debug(f'TestEnvironment.run: merged: BEGIN{{: files={files_dbg}')
+                # logging.debug(f'TestEnvironment.run: merged: BEGIN{{: files={files_dbg}')
                 new_path_pass_state_tuples = []
                 for path, pass_id in path_to_pass_id.items():
                     transform = self.transform[pass_id]
@@ -161,11 +161,11 @@ class TestEnvironment:
                         str(self.test_case_path), path_to_states[path], ProcessEventNotifier(self.pid_queue))
                     self.result = result
                     if self.result != PassResult.OK:
-                        logging.debug(f'TestEnvironment.run: merged: }}END: error')
+                        # logging.debug(f'TestEnvironment.run: merged: }}END: error')
                         return self
                     new_path_pass_state_tuples.append((path, pass_id, upd_state))
                 self.state.path_pass_state_tuples = new_path_pass_state_tuples
-                logging.debug(f'TestEnvironment.run: merged: }}END')
+                # logging.debug(f'TestEnvironment.run: merged: }}END')
             else:
                 (result, self.state) = self.transform(
                     str(self.test_case_path), self.state, ProcessEventNotifier(self.pid_queue)
@@ -195,9 +195,9 @@ class TestEnvironment:
             stdout, stderr, returncode = ProcessEventNotifier(self.pid_queue).run_process(
                 str(self.test_script), shell=True
             )
-            if verbose and returncode != 0:
-                logging.debug('stdout:\n' + stdout)
-                logging.debug('stderr:\n' + stderr)
+            # if verbose and returncode != 0:
+                # logging.debug('stdout:\n' + stdout)
+                # logging.debug('stderr:\n' + stderr)
         finally:
             os.chdir(self.pwd)
         return returncode
@@ -807,7 +807,7 @@ class TestManager:
                     if boardable:
                         merge_train.append((sta, pa, imp))
                 merge_improv = sum(imp for sta, pa, imp in merge_train)
-                logging.debug(f'run_parallel_tests: merge_train={merge_train} merge_improv={merge_improv} in_attempted={merge_improv in attempted_merges}')
+                # logging.debug(f'run_parallel_tests: merge_train={merge_train} merge_improv={merge_improv} in_attempted={merge_improv in attempted_merges}')
                 state = None
                 if len(merge_train) >= 2 and merge_improv > 0 and merge_improv not in attempted_merges:
                     pass_id = list(sorted(set(passes.index(pa) for sta, pa, imp in merge_train)))
@@ -820,7 +820,7 @@ class TestManager:
                     if (best_success_improv is None or
                         self.get_state_comparison_key(merged_state, merge_improv) <
                         self.get_state_comparison_key(best_success_env.state, best_success_improv)):
-                        logging.debug(f'attempting merge state={merged_state} merge_improv={merge_improv} comparison_key={self.get_state_comparison_key(merged_state, merge_improv)}')
+                        # logging.debug(f'attempting merge state={merged_state} merge_improv={merge_improv} comparison_key={self.get_state_comparison_key(merged_state, merge_improv)}')
                         state = merged_state
                         attempted_merges.add(merge_improv)
                         should_advance = False
