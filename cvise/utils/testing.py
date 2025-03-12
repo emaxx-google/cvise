@@ -273,7 +273,7 @@ def is_pace_good(current_pass, desired):
 
 class TestManager:
     GIVEUP_CONSTANT = 50000
-    MAX_TIMEOUTS = 20
+    MAX_TIMEOUTS = 0  # TODO: 20
     MAX_CRASH_DIRS = 10
     MAX_EXTRA_DIRS = 25000
     TEMP_PREFIX = 'cvise-'
