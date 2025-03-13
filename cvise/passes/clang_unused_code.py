@@ -153,6 +153,7 @@ class ClangUnusedCodePass(AbstractPass):
 
         segments = [(s.begin(), s.end()) for s in state_list]
         dbg_files = []
+        any_change = False
         for le, ri in reversed(self.merge_segments(segments)):
             dbg_file_instances = {}
             dbg_file_instances_after = {}
@@ -178,6 +179,8 @@ class ClangUnusedCodePass(AbstractPass):
                             cnt += 1
                             if cnt <= current_le or cnt > current_ri:
                                 new_lines.append(s)
+                            else:
+                                any_change = True
                         else:
                             new_lines.append(s)
                     dbg_file_instances_after[rel_path] = len(new_lines)
@@ -210,6 +213,8 @@ class ClangUnusedCodePass(AbstractPass):
             s.improv_per_depth = improv_per_depth
         state_list[0].dbg_file = ','.join(dbg_files)
 
+        if not any_change:
+            return (PassResult.INVALID, state)
         # logging.debug(f'{self}.transform: state={state} split_per_file={state.split_per_file if not isinstance(state, list) else None} dbg_file_instances={dbg_file_instances} dbg_file_instances_after={dbg_file_instances_after}')
         return (PassResult.OK, state)
 

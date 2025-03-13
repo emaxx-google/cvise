@@ -113,6 +113,7 @@ class TreeSitterPass(AbstractPass):
         max_depth = max(path_to_depth.values())
 
         segments = [(s.begin(), s.end()) for s in state_list]
+        any_change = False
         for le, ri in reversed(self.merge_segments(segments)):
             cmd = [TOOL, str(le+1), str(ri)]
             files_for_tool = files
@@ -131,6 +132,7 @@ class TreeSitterPass(AbstractPass):
                 for l in out.splitlines():
                     m = re.match(r'editing (.*): old size ([0-9]+) new size ([0-9]+) instance shift ([0-9]+) instance count ([0-9]+)', l)
                     if m:
+                        any_change = True
                         improv = int(m[2]) - int(m[3])
                         if not isinstance(state, list):
                             path = m[1]
@@ -165,6 +167,8 @@ class TreeSitterPass(AbstractPass):
         for s in state_list:
             s.improv_per_depth = improv_per_depth
 
+        if not any_change:
+            return (PassResult.INVALID, state)
         return (PassResult.OK, state)
 
     def get_ordered_files_list(self, test_case, strategy):
