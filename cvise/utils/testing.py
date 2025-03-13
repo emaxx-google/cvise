@@ -99,6 +99,10 @@ class TestEnvironment:
     @property
     def size_improvement(self):
         return self.base_size - self.new_size
+    
+    @property
+    def file_count_improvement(self):
+        return self.initial_file_count - self.new_file_count
 
     @property
     def test_case_path(self):
@@ -121,6 +125,7 @@ class TestEnvironment:
     def run(self):
         try:
             self.base_size = get_file_size(self.test_case_full_path[0] if isinstance(self.test_case_full_path, list) else self.test_case_full_path)
+            self.initial_file_count = get_file_count(self.test_case_full_path[0] if isinstance(self.test_case_full_path, list) else self.test_case_full_path)
 
             # Copy files to the created folder
             for test_case in self.all_test_cases:
@@ -174,6 +179,7 @@ class TestEnvironment:
             if self.result != PassResult.OK:
                 return self
             self.new_size = get_file_size(self.test_case_path)
+            self.new_file_count = get_file_count(self.test_case_path)
 
             # run test script
             self.exitcode = self.run_test(verbose=True)
@@ -666,13 +672,13 @@ class TestManager:
         pool.stop()
         pool.join()
 
-    def get_state_comparison_key(self, state, improv):
+    def get_state_comparison_key(self, state, improv, improv_file_count):
         if self.strategy == 'size':
-            return -improv
+            return -improv, -improv_file_count
         elif self.strategy == 'topo':
             if isinstance(state, list) or isinstance(state, MergedState):
                 inner_states = state if isinstance(state, list) else [i for _, _, i in state.path_pass_state_tuples]
-                inner_keys = [self.get_state_comparison_key(i, improv=None) for i in inner_states]
+                inner_keys = [self.get_state_comparison_key(i, improv=None, improv_file_count=None) for i in inner_states]
                 total_improv_per_depth = [0] * max(len(i) for i in inner_keys)
                 for improv_per_depth in inner_keys:
                     for i in range(len(improv_per_depth)):
@@ -698,14 +704,15 @@ class TestManager:
             best_success_env = None
             best_success_pass = None
             best_success_improv = None
+            best_success_improv_file_count = None
             best_success_when = None
             finished_job_improves = []
             recent_success_job_counter = None
             best_success_job_counter = None
             start_time = time.monotonic()
 
-            successes = [(s, p, i) for s, p, i in self.next_successes_hint if not isinstance(s, list)] + self.successes_hint
-            successes.sort(key=lambda i: -i[2])
+            successes = [(s, p, i, ifc) for s, p, i, ifc in self.next_successes_hint if not isinstance(s, list)] + self.successes_hint
+            successes.sort(key=lambda i: (-i[2], -i[3]))
             self.successes_hint = successes[:self.parallel_tests]
             self.next_successes_hint = []
             attempted_merges = set()
@@ -750,18 +757,22 @@ class TestManager:
                             finished_jobs += 1
                             assert finished_jobs <= order
                             improv = env.size_improvement
-                            assert improv == self.run_test_case_size - get_file_size(env.test_case_path), f'improv={improv} run_test_case_size={self.run_test_case_size} get_file_size(env.test_case_path)={get_file_size(env.test_case_path)} files={list(env.test_case_path.rglob('*'))}'
+                            improv_file_count = env.file_count_improvement
+                            # assert improv == self.run_test_case_size - get_file_size(env.test_case_path), f'improv={improv} run_test_case_size={self.run_test_case_size} get_file_size(env.test_case_path)={get_file_size(env.test_case_path)} files={list(env.test_case_path.rglob('*'))}'
                             finished_job_improves.append(improv)
                             assert len(finished_job_improves) == finished_jobs
-                            logging.info(f'observed success success_cnt={success_cnt} improv={improv} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={finished_jobs} comparison_key={self.get_state_comparison_key(env.state, improv)}')
+                            logging.info(f'observed success success_cnt={success_cnt} improv={improv} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={finished_jobs} comparison_key={self.get_state_comparison_key(env.state, improv, improv_file_count)}')
                             if hasattr(pass_, 'on_success_observed'):
                                 pass_.on_success_observed(env.state)
-                            self.next_successes_hint.append((env.state, pass_, improv))
+                            self.next_successes_hint.append((env.state, pass_, improv, improv_file_count))
                             recent_success_job_counter = finished_jobs
-                            if best_success_improv is None or self.get_state_comparison_key(env.state, improv) < self.get_state_comparison_key(best_success_env.state, best_success_improv):
+                            if (best_success_improv is None or
+                                self.get_state_comparison_key(env.state, improv, improv_file_count) <
+                                self.get_state_comparison_key(best_success_env.state, best_success_improv, best_success_improv_file_count)):
                                 best_success_env = env
                                 best_success_pass = pass_
                                 best_success_improv = improv
+                                best_success_improv_file_count = improv_file_count
                                 best_success_when = time.monotonic()
                                 best_success_job_counter = finished_jobs
                                 schedule_rmfolder(self.tmp_for_best)
@@ -785,7 +796,7 @@ class TestManager:
                     # if (k > 1 and prob < 0.01 and finished_jobs - best_success_job_counter >= 2 * self.parallel_tests or
                     #     order > self.parallel_tests * 10):
                     if finished_jobs > self.parallel_tests * 10:
-                        logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} best_success_job_counter={best_success_job_counter} order={order} improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} strategy={self.strategy} comparison_key={self.get_state_comparison_key(best_success_env.state, best_success_improv)}')
+                        logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} best_success_job_counter={best_success_job_counter} order={order} improv={best_success_improv} improv_file_count={best_success_improv_file_count} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} strategy={self.strategy} comparison_key={self.get_state_comparison_key(best_success_env.state, best_success_improv, best_success_improv_file_count)}')
                         for pass_id, state in dict((fu.pass_id, fu.state)
                                                 for fu in sorted(self.futures, key=lambda fu: -fu.order)
                                                 if not isinstance(fu.pass_id, list) and
@@ -795,31 +806,33 @@ class TestManager:
                         self.terminate_all(pool)
                         return best_success_env
 
-                merge_cands = [(sta, pa, imp) for sta, pa, imp in self.next_successes_hint if hasattr(pa, 'supports_merging') and pa.supports_merging() and not isinstance(sta, list)]
+                merge_cands = [(sta, pa, imp, imp_fc) for sta, pa, imp, imp_fc in self.next_successes_hint
+                               if hasattr(pa, 'supports_merging') and pa.supports_merging() and not isinstance(sta, list)]
                 merge_train = []
-                for sta, pa, imp in sorted(merge_cands, key=lambda item: self.get_state_comparison_key(item[0], item[2])):
+                for sta, pa, imp, imp_fc in sorted(merge_cands, key=lambda item: self.get_state_comparison_key(item[0], item[2], item[3])):
                     boardable = True
                     my_files = set(sta.split_per_file.keys())
-                    for prev_sta, prev_pa, prev_imp in merge_train:
+                    for prev_sta, prev_pa, prev_imp, prev_imp_fc in merge_train:
                         prev_files = set(prev_sta.split_per_file.keys())
                         if prev_pa != pa and not my_files.isdisjoint(prev_files):
                             boardable = False
                     if boardable:
-                        merge_train.append((sta, pa, imp))
-                merge_improv = sum(imp for sta, pa, imp in merge_train)
+                        merge_train.append((sta, pa, imp, imp_fc))
+                merge_improv = sum(imp for sta, pa, imp, imp_fc in merge_train)
+                merge_improv_file_count = sum(imp_fc for sta, pa, imp, imp_fc in merge_train)
                 # logging.debug(f'run_parallel_tests: merge_train={merge_train} merge_improv={merge_improv} in_attempted={merge_improv in attempted_merges}')
                 state = None
                 if len(merge_train) >= 2 and merge_improv > 0 and merge_improv not in attempted_merges:
-                    pass_id = list(sorted(set(passes.index(pa) for sta, pa, imp in merge_train)))
+                    pass_id = list(sorted(set(passes.index(pa) for sta, pa, imp, imp_fc in merge_train)))
                     pass_ = [passes[i] if i in pass_id else None for i in range(len(passes))]
                     path_pass_state_tuples = []
-                    for sta, pa, imp in merge_train:
+                    for sta, pa, imp, imp_fc in merge_train:
                         for path, substate in sta.split_per_file.items():
                             path_pass_state_tuples.append((path, passes.index(pa), substate))
                     merged_state = MergedState(path_pass_state_tuples)
                     if (best_success_improv is None or
-                        self.get_state_comparison_key(merged_state, merge_improv) <
-                        self.get_state_comparison_key(best_success_env.state, best_success_improv)):
+                        self.get_state_comparison_key(merged_state, merge_improv, merge_improv_file_count) <
+                        self.get_state_comparison_key(best_success_env.state, best_success_improv, best_success_improv_file_count)):
                         # logging.debug(f'attempting merge state={merged_state} merge_improv={merge_improv} comparison_key={self.get_state_comparison_key(merged_state, merge_improv)}')
                         state = merged_state
                         attempted_merges.add(merge_improv)

@@ -210,6 +210,7 @@ class CVise:
     def _run_main_passes(self, passes, paced=False):
         while True:
             total_file_size = self.test_manager.total_file_size
+            total_file_count = self.test_manager.total_file_count
 
             met_stopping_threshold = False
             if paced:
@@ -231,7 +232,8 @@ class CVise:
                     else:
                         self.test_manager.run_pass(p)
 
-            logging.info(f'Termination check: size was {total_file_size}; now {self.test_manager.total_file_size}')
+            logging.info(f'Termination check: size was {total_file_size} count {total_file_count}; now size {self.test_manager.total_file_size} count {self.test_manager.total_file_count}')
 
-            if self.test_manager.total_file_size >= total_file_size or met_stopping_threshold:
+            worse = self.test_manager.total_file_size >= total_file_size and self.test_manager.total_file_count >= total_file_count
+            if worse or met_stopping_threshold:
                 break
