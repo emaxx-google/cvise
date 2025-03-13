@@ -14,7 +14,6 @@ from cvise.passes.abstract import AbstractPass, BinaryState, FuzzyBinaryState, P
 
 
 INCLUDE_DEPTH_TOOL = '/usr/local/google/home/emaxx/cvise/cvise/calc-include-depth/calc-include-depth'
-TOOL = '/usr/local/google/home/emaxx/clang-toys/clang-fprint-deserialized-declarations'
 
 success_histories = {}
 
@@ -42,15 +41,18 @@ class ClangUnusedCodePass(AbstractPass):
         orig_command = self.get_root_compile_command(test_case)
         orig_command = re.sub(r'\s-o\s\S+', ' ', orig_command).split()
         command = copy.copy(orig_command)
-        command[0] = TOOL
         command.append('-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk')
         command.append('-Xclang')
         command.append('-print-deserialized-declarations-to-file=dbg.txt')
         proc = subprocess.run(command, cwd=test_case, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
         out = proc.stdout
         path_to_used = {}
-        with open(Path(test_case) / 'dbg.txt') as f:
-            os.remove(Path(test_case) / 'dbg.txt')
+        out_path = Path(test_case) / 'dbg.txt'
+        if not out_path.exists():
+            # Likely an old Clang version, before the switch was introduced.
+            return None
+        with open(out_path) as f:
+            os.remove(out_path)
             file = None
             seg_from = None
             for line in f:
