@@ -9,27 +9,8 @@
    {"pass": "lines", "arg": "10"}
 ],
  "paced": [
-    {"pass": "delete-file", "strategy": "size"},
-    {"pass": "clang_unused_code", "strategy": "topo", "jobs": 4},
-    {"pass": "clang_unused_code", "strategy": "size", "jobs": 4},
-    {"pass": "tree_sitter", "arg": "replace-function-def-with-decl", "strategy": "topo", "jobs": 4},
-    {"pass": "tree_sitter", "arg": "replace-function-def-with-decl", "strategy": "size", "jobs": 4},
-    {"pass": "lines", "arg": "0", "strategy": "topo"},
-    {"pass": "lines", "arg": "0", "strategy": "size"},
-    {"pass": "lines", "arg": "1", "strategy": "topo"},
-    {"pass": "lines", "arg": "1", "strategy": "size"},
-    {"pass": "lines", "arg": "2", "strategy": "topo"},
-    {"pass": "lines", "arg": "2", "strategy": "size"},
-    {"pass": "lines", "arg": "3", "strategy": "topo"},
-    {"pass": "lines", "arg": "3", "strategy": "size"},
-    {"pass": "lines", "arg": "4", "strategy": "topo"},
-    {"pass": "lines", "arg": "4", "strategy": "size"},
-    {"pass": "lines", "arg": "6", "strategy": "topo"},
-    {"pass": "lines", "arg": "6", "strategy": "size"},
-    {"pass": "lines", "arg": "8", "strategy": "topo"},
-    {"pass": "lines", "arg": "8", "strategy": "size"},
-    {"pass": "lines", "arg": "10", "strategy": "topo"},
-    {"pass": "lines", "arg": "10", "strategy": "size"}
+    {"pass": "generic", "jobs": 10},
+    {"pass": "delete-file", "strategy": "size"}
  ],
  "main": [
     {"pass": "clangbinarysearch", "arg": "replace-function-def-with-decl", "c": true },

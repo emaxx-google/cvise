@@ -209,7 +209,9 @@ class FuzzyBinaryState(BinaryState):
         
     def get_success_history(self, success_histories):
         key = f'{self.pass_repr} {self.strategy} {self.rnd_depth}'
-        return success_histories.setdefault(key, collections.deque(maxlen=300))
+        if key not in success_histories:
+            success_histories[key] = collections.deque(maxlen=300)
+        return success_histories[key]
 
     def advance(self, success_histories):
         state = copy.copy(self)

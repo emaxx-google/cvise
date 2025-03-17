@@ -80,6 +80,7 @@ set(SOURCE_FILES
   "passes/delete_file.py"
   "passes/delete-unused-files.sh"
   "passes/gcdabinary.py"
+  "passes/generic.py"
   "passes/ifs.py"
   "passes/includeincludes.py"
   "passes/includes.py"

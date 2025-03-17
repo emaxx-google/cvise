@@ -13,6 +13,7 @@ from cvise.passes.clex import ClexPass
 from cvise.passes.comments import CommentsPass
 from cvise.passes.delete_file import DeleteFilePass
 from cvise.passes.gcdabinary import GCDABinaryPass
+from cvise.passes.generic import GenericPass
 from cvise.passes.ifs import IfPass
 from cvise.passes.includeincludes import IncludeIncludesPass
 from cvise.passes.includes import IncludesPass
@@ -50,6 +51,7 @@ class CVise:
         'comments': CommentsPass,
         'delete-file': DeleteFilePass,
         'gcda-binary': GCDABinaryPass,
+        'generic': GenericPass,
         'ifs': IfPass,
         'includeincludes': IncludeIncludesPass,
         'includes': IncludesPass,

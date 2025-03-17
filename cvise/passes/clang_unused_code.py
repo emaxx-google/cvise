@@ -226,7 +226,7 @@ class ClangUnusedCodePass(AbstractPass):
             lines = f.readlines()
             for i, l in enumerate(lines):
                 if '.o:' in l:
-                    return lines[i+1].strip()
+                    return lines[i+1].strip().lstrip('@').lstrip()
             else:
                 raise RuntimeError("compile command not found in makefile")
 

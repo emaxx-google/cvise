@@ -201,9 +201,9 @@ class TestEnvironment:
             stdout, stderr, returncode = ProcessEventNotifier(self.pid_queue).run_process(
                 str(self.test_script), shell=True
             )
-            # if verbose and returncode != 0:
-                # logging.debug('stdout:\n' + stdout)
-                # logging.debug('stderr:\n' + stderr)
+            if verbose and returncode != 0 and logging.getLogger().isEnabledFor(logging.DEBUG) and False:  # DISABLED
+                logging.debug('stdout:\n' + stdout)
+                logging.debug('stderr:\n' + stderr)
         finally:
             os.chdir(self.pwd)
         return returncode
@@ -1057,6 +1057,7 @@ class TestManager:
         self.last_state_hint = [None] * len(passes)
         self.successes_hint = []
         self.next_successes_hint = []
+        tracker = SummaryTracker()
 
         try:
             for test_case in self.sorted_test_cases:
@@ -1125,8 +1126,10 @@ class TestManager:
                     #     logging.info(f'skipping after {self.success_count} successful transformations')
                     #     break
 
-                    self.strategy = 'topo' if self.strategy == 'size' else 'size'
+                    # self.strategy = 'topo' if self.strategy == 'size' else 'size' # TEMP!!
                     self.init_all_passes(passes)
+
+                    tracker.print_diff()
 
                 # Cache result of this pass
                 # if not self.no_cache:
