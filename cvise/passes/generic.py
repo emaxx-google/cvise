@@ -52,7 +52,7 @@ class GenericPass(AbstractPass):
         files, path_to_depth = self.get_ordered_files_list(test_case, strategy)
         if not files:
             return None
-        max_depth = max(path_to_depth.values())
+        max_depth = max(path_to_depth.values()) if path_to_depth else 0
 
         hints = []
         hints += self.generate_makefile_hints(test_case)
@@ -63,8 +63,14 @@ class GenericPass(AbstractPass):
             return test_case / (h['name'] if h['type'] == 'fileref' else h['locations'][0]['file'])
 
         hints = self.regroup_hints(hints)
+        self.append_unused_file_removal_hints(test_case, hints)
         hints.sort(key=lambda h: path_to_depth.get(hint_main_file(h), max_depth + 1))
         instances = len(hints)
+
+        for h in hints:
+            if h['type'] == 'fileref':
+                path = test_case / h['name']
+                assert path.exists(), 'path={path} hint={h}'
 
         depth_to_instances = [0] * (max_depth + 2)
         for h in hints:
@@ -72,7 +78,7 @@ class GenericPass(AbstractPass):
             depth_to_instances[d] += 1
         logging.info(f'{self}.new: len(hints)={instances} depth_to_instances={depth_to_instances}')
 
-        if logging.getLogger().isEnabledFor(logging.DEBUG) and False:  # DISABLED
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
             for hint in hints:
                 if hint['type'] == 'fileref':
                     logging.debug(f'*** MENTION OF {hint["name"]}')
@@ -115,62 +121,44 @@ class GenericPass(AbstractPass):
             state.get_success_history(success_histories).append(state.end() - state.begin())
 
     def transform(self, test_case, state, process_event_notifier):
+        # if state.end() - state.begin() > 1:  # TEMP!!
+        #     return (PassResult.INVALID, state)
+
+        state_list = state if isinstance(state, list) else [state]
+
         test_case = Path(test_case)
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            logging.debug(f'{self}.transform: state={state}')
 
         hints_to_load = set()
-        if isinstance(state, list):
-            for s in state:
-                if s.type == 'edit':
-                    hints_to_load.update(s.hints)
-        else:
-            hints_to_load = set(range(state.begin(), state.end()))
+        for s in state_list:
+            hints_to_load |= set(range(s.begin(), s.end()))
 
         hints = {}
-        with open(self.extra_file_path(test_case), 'r') as f:
+        min_hint_id = min(hints_to_load)
+        max_hint_id = max(hints_to_load)
+        with open(self.extra_file_path(test_case)) as f:
             path_to_depth = json.loads(next(f))
             path_to_depth = dict((test_case / s, v) for s, v in path_to_depth.items())
             for i, line in enumerate(f):
+                if i < min_hint_id:
+                    continue
+                if i > max_hint_id:
+                    break
                 if i in hints_to_load:
                     hints[i] = json.loads(line)
-        max_depth = max(path_to_depth.values())
+        max_depth = max(path_to_depth.values()) if path_to_depth else 0
 
+        files_for_deletion = set(h['name'] for h in hints.values() if h['type'] == 'fileref')
         file_to_edit_hints = {}
-        files_for_deletion = set()
-        if isinstance(state, list):
-            for s in state:
-                if s.type == 'delete':
-                    files_for_deletion.add(s.file)
-            for s in state:
-                if s.type == 'edit' and s.file not in files_for_deletion:
-                    file_to_edit_hints.setdefault(s.file, set()).update(s.hints)
-        else:
-            files_for_deletion = set(h['name'] for h in hints.values() if h['type'] == 'fileref')
-            for i, h in hints.items():
-                for l in h['locations']:
-                    if l['file'] not in files_for_deletion:
-                        file_to_edit_hints.setdefault(l['file'], set()).add(i)
-            
-            state.split_per_file = {}
-            for file in files_for_deletion:
-                path = test_case / file
-                improv_per_depth = [0] * (2 + max_depth)
-                d = path_to_depth.get(path, max_depth + 1)
-                improv_per_depth[d] = path.stat().st_size
-                state.split_per_file[file] = types.SimpleNamespace(file=file, type='delete', improv_per_depth=improv_per_depth)
-            for file, hint_ids in file_to_edit_hints.items():
-                if file not in files_for_deletion:
-                    path = test_case / file
-                    chunks = []
-                    for hint_id in hint_ids:
-                        for l in hints[hint_id]['locations']:
-                            if l['file'] == file:
-                                chunks += l['chunks']
-                    improv_per_depth = [0] * (2 + max_depth)
-                    d = path_to_depth.get(path, max_depth + 1)
-                    improv_per_depth[d] = sum(c['end'] - c['begin'] for c in self.merge_chunks(chunks))
-                    state.split_per_file[file] = types.SimpleNamespace(file=file, type='edit', hints=list(hint_ids), improv_per_depth=improv_per_depth)
+        for i, h in hints.items():
+            for l in h['locations']:
+                if l['file'] not in files_for_deletion:
+                    file_to_edit_hints.setdefault(l['file'], set()).add(i)
+
+        # if isinstance(state, list) or state.end() - state.begin() > 1 or not files_for_deletion:
+        #     return (PassResult.INVALID, state)  # TEMP!!
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f'{self}.transform: state={state}')
+
         if logging.getLogger().isEnabledFor(logging.DEBUG):
             logging.debug(f'files_for_deletion={files_for_deletion} file_to_edit_hints={file_to_edit_hints}')
 
@@ -192,9 +180,25 @@ class GenericPass(AbstractPass):
             improv_per_depth[d] += improv
             os.unlink(path)
 
-        for s in (state if isinstance(state, list) else [state]):
-            s.improv_per_depth = improv_per_depth
+        for s in state_list:
+            s.improv_per_depth = []
+        state_list[0].improv_per_depth = improv_per_depth
+
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f'{self}.transform: END: state={state}')
         return (PassResult.OK, state)
+
+    def append_unused_file_removal_hints(self, test_case, hints):
+        mentioned_files = set(Path(h['name']) for h in hints if h['type'] == 'fileref')
+        for file in test_case.rglob('*'):
+            rel_path = file.relative_to(test_case)
+            if not file.is_dir() and not file.is_symlink() and rel_path not in mentioned_files:
+                if file.suffix in ('.cppmap', '.txt'):  # TODO
+                    hints.append({
+                        'type': 'fileref',
+                        'name': str(rel_path),
+                        'locations': [],
+                    })
 
     def edit_file(self, file, chunks_to_delete):
         with open(file, 'rb') as f:
@@ -226,8 +230,9 @@ class GenericPass(AbstractPass):
 
     def generate_makefile_hints(self, test_case):
         targets = {}
-        cppmap_to_target = {}
+        file_to_generating_targets = {}
         file_mentions = {}
+        token_to_locs = {}
 
         makefile_rel_path = Path('target.makefile')
         makefile_path = test_case / makefile_rel_path
@@ -258,22 +263,41 @@ class GenericPass(AbstractPass):
                         'end': line_end_pos,
                     })
                     token_search_pos = 0
-                    for token in line.split():
+                    skip_next = False
+                    for i, token in enumerate(line.split()):
                         token_pos = line.find(token, token_search_pos)
                         assert token_pos != -1, f'token "{token}" not found in line "{line}"'
-                        token_search_pos = token_pos + 1
-                        match = re.match(r'([^=]*=)*([^=]+\.(txt|cppmap|pcm|o))$', token)
+                        token_search_pos = token_pos + len(token)
+                        mention_pos = line_start_pos + token_pos
+                        match = re.match(r'([^=]*=)*([^=]+\.(txt|cppmap|pcm|o|cc))$', token)
                         if match:
                             mentioned_file = match.group(2)
-                            is_main_rule_for_cppmap = not match.group(1) and Path(mentioned_file).suffix == '.cppmap'
-                            if is_main_rule_for_cppmap:
-                                cppmap_to_target[mentioned_file] = cur_target_name
+                            is_main_file_for_rule = not match.group(1) and not skip_next
+                            if is_main_file_for_rule:
+                                file_to_generating_targets.setdefault(mentioned_file, []).append(cur_target_name)
                             else:
-                                mention_pos = line_start_pos + token_pos
                                 file_mentions.setdefault(mentioned_file, []).append({
                                     'begin': mention_pos,
                                     'end': mention_pos + len(token),
                                 })
+                            skip_next = False
+                        elif i > 0 and not skip_next and \
+                                token not in ('-c', '-nostdinc++', '-nostdlib++', '-fno-crash-diagnostics', '-ferror-limit=0', '-Xclang=-emit-module', '-xc++', '-fmodules', '-fno-implicit-modules', '-fno-implicit-module-maps', '-Xclang=-fno-cxx-modules', '-Xclang=-fmodule-map-file-home-is-cwd') and \
+                                not token.startswith('-fmodule-name=') and not token.startswith('-std='):
+                            if token in ('-o', '-iquote', '-isystem', '-I'):
+                                skip_next = True
+                                continue
+                            if token == '-Xclang':
+                                next_tokens = line[token_search_pos:].split(maxsplit=2)
+                                if next_tokens and next_tokens[0] == '-fallow-pcm-with-compiler-errors':
+                                    skip_next = True
+                                    continue
+                            token_to_locs.setdefault(token, []).append({
+                                'begin': mention_pos,
+                                'end': mention_pos + len(token),
+                            })
+                        else:
+                            skip_next = False
                 else:
                     cur_target = None
                     cur_target_name = None
@@ -281,29 +305,37 @@ class GenericPass(AbstractPass):
                 line_start_pos = line_end_pos
 
         hints = []
-        candidates = set(list(file_mentions.keys()) + list(cppmap_to_target.keys()))
-        for path in candidates:
+        deletion_candidates = set(list(file_mentions.keys()) + list(file_to_generating_targets.keys()))
+        for path in deletion_candidates:
             full_path = test_case / path
-            if not full_path.exists():
+            if not full_path.exists() or full_path.suffix in ('.cc'):
                 continue
             chunks = []
             chunks += file_mentions.get(path, [])
-            if path in cppmap_to_target:
-                target_name = cppmap_to_target[path]
+            for target_name in file_to_generating_targets.get(path, []):
                 chunks += targets[target_name]
                 chunks += file_mentions.get(target_name, [])
+            assert chunks, f'path={path}'
             hints.append({
                 'type': 'fileref',
                 'name': path,
                 'locations': [{
                     'file': str(makefile_rel_path),
-                    'chunks': [{
-                        'begin': chunk['begin'],
-                        'end': chunk['end'],
-                    } for chunk in chunks]
+                    'chunks': chunks,
                 }],
             })
-
+        for token, locs in sorted(token_to_locs.items()):
+            for chunk in locs:
+                hints.append({
+                    'type': 'edit',
+                    'locations': [{
+                        'file': str(makefile_rel_path),
+                        'chunks': [{
+                            'begin': chunk['begin'],
+                            'end': chunk['end'],
+                        }],
+                    }],
+                })
         return hints
 
     def generate_cppmaps_hints(self, test_case):
@@ -311,11 +343,10 @@ class GenericPass(AbstractPass):
         name_to_cppmaps = {}
         cppmap_to_uses = {}
         for cppmap_path in test_case.rglob('*.cppmap'):
-            name, headers, uses = self.parse_cppmap(test_case, cppmap_path)
-            if not name:
-                # Parsing failed - ignore this map.
-                continue
-            name_to_cppmaps.setdefault(name, []).append(cppmap_path)
+            cppmap_hints, top_level_names, headers, uses = self.parse_cppmap(test_case, cppmap_path)
+            hints += cppmap_hints
+            for name in top_level_names:
+                name_to_cppmaps.setdefault(name, []).append(cppmap_path)
             cppmap_to_uses[cppmap_path] = uses
             cppmap_rel_path = str(cppmap_path.relative_to(test_case))
             for header_path, chunks in headers.items():
@@ -344,45 +375,123 @@ class GenericPass(AbstractPass):
         return hints
 
     def parse_cppmap(self, test_case, cppmap_path):
-        name = None
+        cppmap_rel_path = cppmap_path.relative_to(test_case)
+        hints = []
+        top_level_names = []
         headers = {}
         uses = {}
+        nested_module_start_pos = None
+        nested_module_start_line_end_pos = None
+        nested_module_empty = None
+        module_depth = 0
         with open(cppmap_path) as f:
             line_start_pos = 0
             for line in f:
                 line_end_pos = line_start_pos + len(line)
 
-                match = re.match (r'.*module\s+(\S+).*', line)
-                if match and not name:
-                    name = match.group(1).strip('"')
+                module_match = re.match(r'.*module\s+(\S+).*', line)
+                if module_match:
+                    if module_depth == 0:
+                        top_level_names.append(module_match.group(1).strip('"'))
+                    else:
+                        nested_module_start_pos = line_start_pos
+                        nested_module_start_line_end_pos = line_end_pos
+                        nested_module_empty = True
+                    module_depth += 1
 
-                match = re.match(r'.*header\s+"(.*)".*', line)
-                if match:
-                    mentioned_file = match.group(1)
+                header_match = re.match(r'.*header\s+"(.*)".*', line)
+                if not module_match and header_match:
+                    mentioned_file = header_match.group(1)
                     if (test_case / mentioned_file).exists():
                         headers.setdefault(mentioned_file, []).append({
                             'begin': line_start_pos,
                             'end': line_end_pos,
                         })
+                        hints.append({
+                            'type': 'edit',
+                            'locations': [{
+                                'file': str(cppmap_rel_path),
+                                'chunks': [{
+                                    'begin': line_start_pos,
+                                    'end': line_end_pos,
+                                }],
+                            }]
+                        })
+                    nested_module_empty = False
 
-                match = re.match(r'\s*use\s+(\S+)\s*', line)
-                if match:
-                    mentioned_module = match.group(1).strip('"')
+                use_match = re.match(r'\s*use\s+(\S+)\s*', line)
+                if not module_match and not header_match and use_match:
+                    mentioned_module = use_match.group(1).strip('"')
                     uses.setdefault(mentioned_module, []).append({
                         'begin': line_start_pos,
                         'end': line_end_pos,
                     })
+                    hints.append({
+                        'type': 'edit',
+                        'locations': [{
+                            'file': str(cppmap_rel_path),
+                            'chunks': [{
+                                'begin': line_start_pos,
+                                'end': line_end_pos,
+                            }],
+                        }]
+                    })
+                    nested_module_empty = False
+
+                closing_brace = line.strip() == '}'
+                if closing_brace:
+                    module_depth -= 1
+                    assert module_depth >= 0, f'cppmap_path={cppmap_path}'
+                    if nested_module_start_pos is not None:
+                        if nested_module_empty:
+                            # Attempt to delete the empty submodule.
+                            hints.append({
+                                'type': 'edit',
+                                'locations': [{
+                                    'file': str(cppmap_rel_path),
+                                    'chunks': [{
+                                        'begin': nested_module_start_pos,
+                                        'end': line_end_pos,
+                                    }],
+                                }]
+                            })
+                        # Attempt to inline the submodule's contents into the outer module.
+                        hints.append({
+                            'type': 'edit',
+                            'locations': [{
+                                'file': str(cppmap_rel_path),
+                                'chunks': [{
+                                    'begin': nested_module_start_pos,
+                                    'end': nested_module_start_line_end_pos,
+                                }, {
+                                    'begin': line_start_pos,
+                                    'end': line_end_pos,
+                                }],
+                            }]
+                        })
+                        nested_module_start_pos = None
+
+                if not module_match and not header_match and not use_match and not closing_brace:
+                    hints.append({
+                        'type': 'edit',
+                        'locations': [{
+                            'file': str(cppmap_rel_path),
+                            'chunks': [{
+                                'begin': line_start_pos,
+                                'end': line_end_pos,
+                            }],
+                        }]
+                    })
 
                 line_start_pos = line_end_pos
 
-        if not name:
-            return None, None, None
-        return name, headers, uses
+        assert module_depth == 0, f'cppmap_path={cppmap_path}'
+        return hints, top_level_names, headers, uses
     
     def generate_line_hints(self, test_case):
         hints = []
         for file in test_case.rglob('*'):
-            if not file.is_dir() and not file.is_symlink():
+            if not file.is_dir() and not file.is_symlink() and file.suffix not in ('.makefile', '.cppmap'):
                 file_rel_path = str(file.relative_to(test_case))
                 with open(file) as f:
                     line_start_pos = 0
@@ -414,10 +523,11 @@ class GenericPass(AbstractPass):
             else:
                 orig_command = None
 
-        root_file = next(Path(test_case).rglob('*.cc'))
+        root_file_candidates = list(Path(test_case).rglob('*.cc'))
+        root_file = root_file_candidates[0] if root_file_candidates else None
             
         path_to_depth = {}
-        if orig_command:
+        if root_file and orig_command:
             orig_command = re.sub(r'\S*-fmodule\S*', '', orig_command).split()
             command = [
                 INCLUDE_DEPTH_TOOL,
@@ -436,7 +546,7 @@ class GenericPass(AbstractPass):
                 assert path.exists(), f'doesnt exist: {path}'
                 path_and_depth.append((path.resolve(), int(depth)))
             path_to_depth = dict(path_and_depth)
-        if not path_to_depth:
+        if root_file and not path_to_depth:
             path_to_depth[root_file] = 0
 
         files = [f for f in Path(test_case).rglob('*') if not f.is_dir() and not f.is_symlink()]

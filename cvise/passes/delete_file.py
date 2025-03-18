@@ -1,7 +1,6 @@
 import logging
 from pathlib import Path
 import subprocess
-import time
 
 from cvise.passes.abstract import AbstractPass, BinaryState, FuzzyBinaryState, PassResult
 
@@ -16,9 +15,6 @@ class DeleteFilePass(AbstractPass):
         return True
 
     def new(self, test_case, check_sanity=None, last_state_hint=None, strategy=None):
-        # TEMP!!
-        return BinaryState.create(instances=1000)
-
         try:
             out = subprocess.check_output(f'{TOOL} dry', shell=True, cwd=test_case, encoding='utf-8', stderr=subprocess.STDOUT)
         except subprocess.CalledProcessError as e:
@@ -35,9 +31,6 @@ class DeleteFilePass(AbstractPass):
         return state
 
     def advance(self, test_case, state):
-        # TEMP!!
-        return state.advance()
-
         new = state.advance(success_histories)
         if new:
             new.files_deleted = new.end() - new.begin()
@@ -51,9 +44,6 @@ class DeleteFilePass(AbstractPass):
             state.get_success_history(success_histories).append(state.end() - state.begin())
 
     def transform(self, test_case, state, process_event_notifier):
-        # TEMP!!
-        return (PassResult.INVALID, state)
-
         logging.debug(f'DeleteFilePass.transform: {state}')
         proc = subprocess.Popen(
             f'{TOOL} del {state.begin()+1} {state.end()+1}', shell=True, cwd=test_case,

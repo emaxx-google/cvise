@@ -9,8 +9,8 @@
    {"pass": "lines", "arg": "10"}
 ],
  "paced": [
-    {"pass": "generic", "jobs": 10},
-    {"pass": "delete-file", "strategy": "size"}
+   {"pass": "generic", "strategy": "size"},
+   {"pass": "generic", "strategy": "topo"}
  ],
  "main": [
     {"pass": "clangbinarysearch", "arg": "replace-function-def-with-decl", "c": true },
