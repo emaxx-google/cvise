@@ -12,8 +12,8 @@ import types
 from cvise.passes.abstract import AbstractPass, BinaryState, FuzzyBinaryState, PassResult
 
 
-INCLUDE_DEPTH_TOOL = '/usr/local/google/home/emaxx/cvise/cvise/calc-include-depth/calc-include-depth'
-TOOL = '/usr/local/google/home/emaxx/cvise/cvise/tree_sit/func_body_remover'
+INCLUDE_DEPTH_TOOL = Path(__file__).resolve().parent.parent / 'calc-include-depth/calc-include-depth'
+TOOL = Path(__file__).resolve().parent.parent / 'tree_sit/func_body_remover'
 
 success_histories = {}
 

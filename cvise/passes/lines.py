@@ -16,7 +16,7 @@ from cvise.utils.error import InsaneTestCaseError
 from cvise.utils.misc import CloseableTemporaryFile
 
 
-INCLUDE_DEPTH_TOOL = '/usr/local/google/home/emaxx/cvise/cvise/calc-include-depth/calc-include-depth'
+INCLUDE_DEPTH_TOOL = Path(__file__).resolve().parent.parent / 'calc-include-depth/calc-include-depth'
 
 success_histories = {}
 
