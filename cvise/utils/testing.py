@@ -776,7 +776,6 @@ class TestManager:
                     # if (k > 1 and prob < 0.01 and finished_jobs - best_success_job_counter >= 2 * self.parallel_tests or
                     #     order > self.parallel_tests * 10):
                     if finished_jobs > self.parallel_tests * 10 or not self.futures:
-                        # assert False  # TEMP!!
                         logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} best_success_job_counter={best_success_job_counter} order={order} improv={best_success_improv} improv_file_count={best_success_improv_file_count} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} strategy={self.strategy} comparison_key={self.get_state_comparison_key(best_success_env.state, best_success_improv, best_success_improv_file_count)}')
                         for pass_id, state in dict((fu.pass_id, fu.state)
                                                 for fu in sorted(self.futures, key=lambda fu: -fu.order)
@@ -801,7 +800,7 @@ class TestManager:
                 merge_improv_file_count = sum(imp_fc for sta, pa, imp, imp_fc in merge_train)
                 # logging.debug(f'run_parallel_tests: merge_train={merge_train} merge_improv={merge_improv} in_attempted={merge_improv in attempted_merges}')
                 state = None
-                if len(merge_train) >= 2 and merge_improv > 0 and merge_improv not in attempted_merges:
+                if len(merge_train) >= 2 and (merge_improv > 0 or merge_improv_file_count > 0) and (merge_improv not in attempted_merges):
                     pass_id = passes.index(merge_train[0][1])
                     pass_ = passes[pass_id]
                     merged_state = [sta for sta, pa, imp, imp_fc in merge_train]
@@ -1104,7 +1103,7 @@ class TestManager:
                     #     logging.info(f'skipping after {self.success_count} successful transformations')
                     #     break
 
-                    # self.strategy = 'topo' if self.strategy == 'size' else 'size' # TEMP!!
+                    self.strategy = 'topo' if self.strategy == 'size' else 'size'
                     self.init_all_passes(passes)
 
                 # Cache result of this pass
