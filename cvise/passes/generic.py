@@ -63,10 +63,19 @@ class GenericPass(AbstractPass):
 
         def hint_main_file(h):
             return test_case / (h['name'] if h['type'] == 'fileref' else h['locations'][0]['file'])
+        def hint_comparison_key(h):
+            file = hint_main_file(h)
+            d = path_to_depth.get(hint_main_file(h), max_depth + 1) if strategy == 'topo' else 0
+            return d, file
 
         hints = self.regroup_hints(hints)
         self.append_unused_file_removal_hints(test_case, hints)
-        hints.sort(key=lambda h: path_to_depth.get(hint_main_file(h), max_depth + 1))
+        for h in hints:
+            if h['type'] == 'fileref':
+                assert not Path(h['name']).is_absolute()
+            for l in h['locations']:
+                assert not Path(l['file']).is_absolute()
+        hints.sort(key=hint_comparison_key)
         instances = len(hints)
 
         for h in hints:
@@ -164,6 +173,20 @@ class GenericPass(AbstractPass):
         if logging.getLogger().isEnabledFor(logging.DEBUG):
             logging.debug(f'files_for_deletion={files_for_deletion} file_to_edit_hints={file_to_edit_hints}')
 
+        dbg = []
+        if file_to_edit_hints:
+            file = list(file_to_edit_hints.keys())[0]
+            with open(test_case / file) as f:
+                contents = f.read()
+            hint_ids = file_to_edit_hints[file]
+            chunks = []
+            for hint_id in hint_ids:
+                for l in hints[hint_id]['locations']:
+                    if l['file'] == file:
+                        chunks += l['chunks']
+            for c in self.merge_chunks(chunks):
+                dbg.append('`' + contents[c['begin']:c['end']] + '`')
+
         improv_per_depth = [0] * (2 + max_depth)
         for file, hint_ids in file_to_edit_hints.items():
             chunks = []
@@ -181,6 +204,12 @@ class GenericPass(AbstractPass):
             d = path_to_depth.get(path, max_depth + 1)
             improv_per_depth[d] += improv
             os.unlink(path)
+
+        # Sanity-check we don't start including files outside of bundle.
+        try:
+            self.get_ordered_files_list(test_case, self.strategy)
+        except AssertionError as e:
+            raise RuntimeError(f'Sanity check failed:\nfiles_for_deletion={files_for_deletion}\nfile_to_edit_hints={file_to_edit_hints.keys()}\nedits={"; ".join(dbg)}\nstate={state}\n{e}')
 
         for s in state_list:
             s.improv_per_depth = []
@@ -203,10 +232,10 @@ class GenericPass(AbstractPass):
                     })
 
     def edit_file(self, file, chunks_to_delete):
-        with open(file, 'rb') as f:
+        with open(file) as f:
             data = f.read()
         merged = self.merge_chunks(chunks_to_delete)
-        new_data = b''
+        new_data = ''
         ptr = 0
         for c in merged:
             new_data += data[ptr:c['begin']]
@@ -214,7 +243,7 @@ class GenericPass(AbstractPass):
         new_data += data[ptr:]
         if logging.getLogger().isEnabledFor(logging.DEBUG):
             logging.debug(f'file={file} before:\n{data}\nafter:\n{new_data}')
-        with open(file, 'wb') as f:
+        with open(file, 'w') as f:
             f.write(new_data)
         return sum(c['end'] - c['begin'] for c in merged)
 
@@ -247,25 +276,27 @@ class GenericPass(AbstractPass):
                 if line.strip() and not line.startswith('\t') and ':' in line:
                     cur_target_name = line.split(':')[0].strip()
                     assert cur_target_name
-                    cur_target = targets.setdefault(cur_target_name, [])
-                    cur_target.append({
-                        'begin': line_start_pos,
-                        'end': line_end_pos,
-                    })
-                    for dep_name in line.split(':', maxsplit=2)[1].split():
-                        mention_pos = line_start_pos + line.find(dep_name)
-                        targets.setdefault(dep_name, []).append({
-                            'begin': mention_pos,
-                            'end': mention_pos + len(dep_name),
+                    is_special_target = cur_target_name in ('clean', '.ALWAYS')
+                    if not is_special_target:
+                        cur_target = targets.setdefault(cur_target_name, [])
+                        cur_target.append({
+                            'begin': line_start_pos,
+                            'end': line_end_pos,
                         })
-                elif line.startswith('\t'):
+                        for dep_name in line.split(':', maxsplit=2)[1].split():
+                            mention_pos = line_start_pos + line.find(dep_name)
+                            targets.setdefault(dep_name, []).append({
+                                'begin': mention_pos,
+                                'end': mention_pos + len(dep_name),
+                            })
+                elif line.startswith('\t') and not is_special_target:
                     assert cur_target
                     cur_target.append({
                         'begin': line_start_pos,
                         'end': line_end_pos,
                     })
                     token_search_pos = 0
-                    skip_next = False
+                    option_with_untouchable_arg = False
                     for i, token in enumerate(line.split()):
                         if token == '||':  # hack
                             break
@@ -273,10 +304,11 @@ class GenericPass(AbstractPass):
                         assert token_pos != -1, f'token "{token}" not found in line "{line}"'
                         token_search_pos = token_pos + len(token)
                         mention_pos = line_start_pos + token_pos
+                        assert line[mention_pos-line_start_pos: mention_pos-line_start_pos+len(token)] == token
                         match = re.match(r'([^=]*=)*([^=]+\.(txt|cppmap|pcm|o|cc))$', token)
                         if match:
                             mentioned_file = match.group(2)
-                            is_main_file_for_rule = not match.group(1) and not skip_next
+                            is_main_file_for_rule = not match.group(1) and not option_with_untouchable_arg
                             if is_main_file_for_rule:
                                 file_to_generating_targets.setdefault(mentioned_file, []).append(cur_target_name)
                             else:
@@ -284,24 +316,23 @@ class GenericPass(AbstractPass):
                                     'begin': mention_pos,
                                     'end': mention_pos + len(token),
                                 })
-                            skip_next = False
-                        elif i > 0 and not skip_next and \
-                                token not in ('-c', '-nostdinc++', '-nostdlib++', '-fno-crash-diagnostics', '-ferror-limit=0', '-Xclang=-emit-module', '-xc++', '-fmodules', '-fno-implicit-modules', '-fno-implicit-module-maps', '-Xclang=-fno-cxx-modules', '-Xclang=-fmodule-map-file-home-is-cwd') and \
-                                not token.startswith('-fmodule-name=') and not token.startswith('-std='):
+                            option_with_untouchable_arg = False
+                        elif i > 0 and not option_with_untouchable_arg and \
+                                token not in ('-c', '-nostdinc++', '-nostdlib++', '-fno-crash-diagnostics', '-ferror-limit=0', '-w', '-Wno-error', '-Xclang=-emit-module', '-xc++', '-fmodules', '-fno-implicit-modules', '-fno-implicit-module-maps', '-Xclang=-fno-cxx-modules', '-Xclang=-fmodule-map-file-home-is-cwd') and \
+                                not token.startswith('-fmodule-name=') and not token.startswith('-std=') and not token.startswith('--sysroot='):
                             if token in ('-o', '-iquote', '-isystem', '-I'):
-                                skip_next = True
-                                continue
+                                option_with_untouchable_arg = True
                             if token == '-Xclang':
                                 next_tokens = line[token_search_pos:].split(maxsplit=2)
                                 if next_tokens and next_tokens[0] == '-fallow-pcm-with-compiler-errors':
-                                    skip_next = True
-                                    continue
-                            token_to_locs.setdefault(token, []).append({
-                                'begin': mention_pos,
-                                'end': mention_pos + len(token),
-                            })
+                                    option_with_untouchable_arg = True
+                            if not option_with_untouchable_arg:                            
+                                token_to_locs.setdefault(token, []).append({
+                                    'begin': mention_pos,
+                                    'end': mention_pos + len(token),
+                                })
                         else:
-                            skip_next = False
+                            option_with_untouchable_arg = False
                 else:
                     cur_target = None
                     cur_target_name = None
@@ -591,7 +622,7 @@ class GenericPass(AbstractPass):
         if not test_case.is_dir():
             return [test_case], {test_case: 0}
         
-        with open(Path(test_case) / 'target.makefile') as f:
+        with open(test_case / 'target.makefile') as f:
             lines = f.readlines()
             for i, l in enumerate(lines):
                 if '.o:' in l and i+1 < len(lines):
@@ -600,7 +631,7 @@ class GenericPass(AbstractPass):
             else:
                 orig_command = None
 
-        root_file_candidates = list(Path(test_case).rglob('*.cc'))
+        root_file_candidates = list(test_case.rglob('*.cc'))
         root_file = root_file_candidates[0] if root_file_candidates else None
             
         path_to_depth = {}
@@ -619,7 +650,8 @@ class GenericPass(AbstractPass):
                 path, depth = line.rsplit(maxsplit=1)
                 path = Path(path)
                 if not path.is_absolute():
-                    path = Path(test_case) / path
+                    path = test_case / path
+                assert path.is_relative_to(test_case), f'{path} doesnt belong to {test_case}'
                 assert path.exists(), f'doesnt exist: {path}'
                 path_and_depth.append((path.resolve(), int(depth)))
             path_to_depth = dict(path_and_depth)
