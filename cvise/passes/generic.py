@@ -6,6 +6,7 @@ from pathlib import Path
 import pickle
 import re
 import subprocess
+import tempfile
 import types
 
 from cvise.passes.abstract import AbstractPass, BinaryState, FuzzyBinaryState, PassResult
@@ -57,6 +58,7 @@ class GenericPass(AbstractPass):
         hints = []
         hints += self.generate_makefile_hints(test_case)
         hints += self.generate_cppmaps_hints(test_case)
+        hints += self.generate_clang_pcm_lazy_load_hints(test_case)
         hints += self.generate_line_hints(test_case)
 
         def hint_main_file(h):
@@ -511,6 +513,79 @@ class GenericPass(AbstractPass):
                         })
                         line_start_pos = line_end_pos
         return hints
+
+    def generate_clang_pcm_lazy_load_hints(self, test_case):
+        orig_command = self.get_root_compile_command(test_case)
+        if not orig_command:
+            return []
+
+        subprocess.run(['make', '-f', 'target.makefile', '-j64'], cwd=Path(test_case), stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
+
+        with tempfile.NamedTemporaryFile() as tmp:
+            orig_command = re.sub(r'\s-o\s\S+', ' ', orig_command).split()
+            command = copy.copy(orig_command)
+            command.append('-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk')
+            command.append('-Xclang')
+            command.append(f'-print-deserialized-declarations-to-file={tmp.name}')
+            proc = subprocess.run(command, cwd=test_case, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
+            logging.debug(f'stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
+            subprocess.run(['make', '-f', 'target.makefile', 'clean'], cwd=Path(test_case), stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
+            path_to_used = {}
+            if not Path(tmp.name).exists():
+                # Likely an old Clang version, before the switch was introduced.
+                return None
+            with open(tmp.name) as f:
+                file = None
+                seg_from = None
+                for line in f:
+                    logging.debug(f'LINE {line.strip()}')
+                    match = re.match(r'required lines in file: (.*)', line)
+                    if match:
+                        file = Path(test_case) / match[1]
+                        seg_from = None
+                        seg_to = None
+                    match = re.match(r'\s*from: (\d+)', line)
+                    if match:
+                        seg_from = int(match[1])
+                        seg_to = None
+                    match = re.match(r'\s*to: (\d+)', line)
+                    if match:
+                        seg_to = int(match[1])
+                    if file and seg_from and seg_to:
+                        path_to_used.setdefault(file, []).append((seg_from-1, seg_to-1))
+
+        hints = []
+        for file, segs in path_to_used.items():
+            file_rel_path = file.relative_to(test_case)
+            segptr = 0
+            with open(file) as f:
+                line_start_pos = 0
+                for i, line in enumerate(f):
+                    line_end_pos = line_start_pos + len(line)
+                    while segptr < len(segs) and segs[segptr][1] < i:
+                        segptr += 1
+                    if segptr >= len(segs) or not (segs[segptr][0] <= i <= segs[segptr][1]):
+                        hints.append({
+                            'type': 'edit',
+                            'locations': [{
+                                'file': str(file_rel_path),
+                                'chunks': [{
+                                    'begin': line_start_pos,
+                                    'end': line_end_pos,
+                                }],
+                            }],
+                        })
+                    line_start_pos = line_end_pos
+        return hints
+
+    def get_root_compile_command(self, test_case):
+        with open(Path(test_case) / 'target.makefile') as f:
+            lines = f.readlines()
+            for i, l in enumerate(lines):
+                if '.o:' in l:
+                    return lines[i+1].strip().lstrip('@').lstrip()
+            else:
+                return None
 
     def get_ordered_files_list(self, test_case, strategy):
         if not test_case.is_dir():
