@@ -13,6 +13,7 @@ from cvise.passes.abstract import AbstractPass, BinaryState, FuzzyBinaryState, P
 
 
 INCLUDE_DEPTH_TOOL = Path(__file__).resolve().parent.parent / 'calc-include-depth/calc-include-depth'
+INCLUSION_GRAPH_TOOL = Path(__file__).resolve().parent.parent / 'inclusion-graph/inclusion-graph'
 
 success_histories = {}
 
@@ -29,7 +30,7 @@ class GenericPass(AbstractPass):
 
     def supports_merging(self):
         return True
-    
+
     def regroup_hints(self, hints):
         file_to_locs = {}
         for h in hints:
@@ -58,6 +59,7 @@ class GenericPass(AbstractPass):
         hints = []
         hints += self.generate_makefile_hints(test_case)
         hints += self.generate_cppmaps_hints(test_case)
+        hints += self.generate_inclusion_directive_hints(test_case)
         hints += self.generate_clang_pcm_lazy_load_hints(test_case)
         hints += self.generate_line_hints(test_case)
 
@@ -213,7 +215,10 @@ class GenericPass(AbstractPass):
 
         for s in state_list:
             s.improv_per_depth = []
+            s.dbg_file = None
         state_list[0].improv_per_depth = improv_per_depth
+        if files_for_deletion:
+            state_list[0].dbg_file = ','.join(files_for_deletion)
 
         if logging.getLogger().isEnabledFor(logging.DEBUG):
             logging.debug(f'{self}.transform: END: state={state}')
@@ -326,7 +331,7 @@ class GenericPass(AbstractPass):
                                 next_tokens = line[token_search_pos:].split(maxsplit=2)
                                 if next_tokens and next_tokens[0] == '-fallow-pcm-with-compiler-errors':
                                     option_with_untouchable_arg = True
-                            if not option_with_untouchable_arg:                            
+                            if not option_with_untouchable_arg:
                                 token_to_locs.setdefault(token, []).append({
                                     'begin': mention_pos,
                                     'end': mention_pos + len(token),
@@ -522,7 +527,7 @@ class GenericPass(AbstractPass):
 
         assert module_depth == 0, f'cppmap_path={cppmap_path}'
         return hints, top_level_names, headers, uses
-    
+
     def generate_line_hints(self, test_case):
         hints = []
         for file in test_case.rglob('*'):
@@ -543,6 +548,71 @@ class GenericPass(AbstractPass):
                             }]
                         })
                         line_start_pos = line_end_pos
+        return hints
+
+    def generate_inclusion_directive_hints(self, test_case):
+        if not test_case.is_dir():
+            return []
+
+        with open(test_case / 'target.makefile') as f:
+            lines = f.readlines()
+            for i, l in enumerate(lines):
+                if '.o:' in l and i+1 < len(lines):
+                    orig_command = lines[i+1].strip()
+                    break
+            else:
+                return []
+
+        root_file_candidates = list(test_case.rglob('*.cc'))
+        if not root_file_candidates:
+            return []
+        root_file = root_file_candidates[0]
+
+        file_to_line_pos = {}
+        def get_line_pos_in_file(file, idx):
+            if file not in file_to_line_pos:
+                lines_pos = []
+                with open(file) as f:
+                    line_start_pos = 0
+                    for line in f:
+                        line_end_pos = line_start_pos + len(line)
+                        lines_pos.append((line_start_pos, line_end_pos))
+                        line_start_pos = line_end_pos
+                file_to_line_pos[file] = lines_pos
+            return file_to_line_pos[file][idx]
+
+        orig_command = re.sub(r'\S*-fmodule\S*', '', orig_command).split()
+        command = [
+            INCLUSION_GRAPH_TOOL,
+            root_file,
+            '--',
+            '-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk'] + orig_command
+        path_and_depth = []
+        out = subprocess.check_output(command, cwd=test_case, stderr=subprocess.DEVNULL, encoding='utf-8')
+        hints = []
+        for line in out.splitlines():
+            if not line.strip():
+                continue
+            from_file, from_line, to_file = line.split(' ')
+            from_file = Path(from_file)
+            if not from_file.is_absolute():
+                from_file = test_case / from_file
+            from_line = int(from_line) - 1
+            to_file = Path(to_file)
+            if not to_file.is_absolute():
+                to_file = test_case / to_file
+            start_pos, end_pos = get_line_pos_in_file(from_file, from_line)
+            hints.append({
+                'type': 'fileref',
+                'name': str(to_file.relative_to(test_case)),
+                'locations': [{
+                    'file': str(from_file.relative_to(test_case)),
+                    'chunks': [{
+                        'begin': start_pos,
+                        'end': end_pos,
+                    }],
+                }],
+            })
         return hints
 
     def generate_clang_pcm_lazy_load_hints(self, test_case):
@@ -621,7 +691,7 @@ class GenericPass(AbstractPass):
     def get_ordered_files_list(self, test_case, strategy):
         if not test_case.is_dir():
             return [test_case], {test_case: 0}
-        
+
         with open(test_case / 'target.makefile') as f:
             lines = f.readlines()
             for i, l in enumerate(lines):
@@ -633,7 +703,7 @@ class GenericPass(AbstractPass):
 
         root_file_candidates = list(test_case.rglob('*.cc'))
         root_file = root_file_candidates[0] if root_file_candidates else None
-            
+
         path_to_depth = {}
         if root_file and orig_command:
             orig_command = re.sub(r'\S*-fmodule\S*', '', orig_command).split()

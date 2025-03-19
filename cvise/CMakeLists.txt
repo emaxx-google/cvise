@@ -115,6 +115,7 @@ set(SOURCE_FILES
   "utils/statistics.py"
   "utils/testing.py"
   "calc-include-depth/calc-include-depth"
+  "inclusion-graph/inclusion-graph"
   "tree_sit/func_body_remover"
 )
 
