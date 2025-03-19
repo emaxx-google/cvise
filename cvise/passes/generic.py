@@ -229,7 +229,7 @@ class GenericPass(AbstractPass):
         for file in test_case.rglob('*'):
             rel_path = file.relative_to(test_case)
             if not file.is_dir() and not file.is_symlink() and rel_path not in mentioned_files:
-                if file.suffix in ('.cppmap', '.txt'):  # TODO
+                if file.suffix in ('.makefile'):
                     hints.append({
                         'type': 'fileref',
                         'name': str(rel_path),
@@ -535,19 +535,22 @@ class GenericPass(AbstractPass):
                 file_rel_path = str(file.relative_to(test_case))
                 with open(file) as f:
                     line_start_pos = 0
-                    for line in f:
-                        line_end_pos = line_start_pos + len(line)
-                        hints.append({
-                            'type': 'edit',
-                            'locations': [{
-                                'file': file_rel_path,
-                                'chunks': [{
-                                    'begin': line_start_pos,
-                                    'end': line_end_pos,
-                                }],
-                            }]
-                        })
-                        line_start_pos = line_end_pos
+                    try:
+                        for line in f:
+                            line_end_pos = line_start_pos + len(line)
+                            hints.append({
+                                'type': 'edit',
+                                'locations': [{
+                                    'file': file_rel_path,
+                                    'chunks': [{
+                                        'begin': line_start_pos,
+                                        'end': line_end_pos,
+                                    }],
+                                }]
+                            })
+                            line_start_pos = line_end_pos
+                    except UnicodeDecodeError as e:
+                        raise RuntimeError(f'Failure while parsing {file}: {e}')
         return hints
 
     def generate_inclusion_directive_hints(self, test_case):
