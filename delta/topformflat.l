@@ -8,7 +8,6 @@
 %{
 #include <stdlib.h>     // atoi
 
-char* input_file_name;
 int position = 0;
 int chunk_start_position = 0;
 
@@ -123,8 +122,7 @@ void diag(char const *str)
 void possibleNewline(void)
 {
   if (nesting <= threshold && chunk_start_position < position) {
-    printf("{\"type\": \"edit\", \"locations\": [{\"file\": \"%s\", \"chunks\": [{\"begin\": %d, \"end\": %d}]}]}\n",
-           input_file_name, chunk_start_position, position);
+    printf("{\"l\":%d,\"r\":%d}\n", chunk_start_position, position);
     chunk_start_position = position;
   }
 }
@@ -149,14 +147,11 @@ int main(int argc, char *argv[])
   }
   yyin = stdin;
   if (argc >= 3) {
-    input_file_name = argv[2];
-    yyin = fopen(input_file_name, "rt");
+    yyin = fopen(argv[2], "rt");
     if (!yyin) {
-      fprintf(stderr, "Failed to open %s .\n", input_file_name);
+      fprintf(stderr, "Failed to open %s .\n", argv[2]);
       return 1;
     }
-  } else {
-    input_file_name = "";
   }
   yylex();
   return 0;
