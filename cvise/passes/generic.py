@@ -14,6 +14,7 @@ from cvise.passes.abstract import AbstractPass, BinaryState, FuzzyBinaryState, P
 
 INCLUDE_DEPTH_TOOL = Path(__file__).resolve().parent.parent / 'calc-include-depth/calc-include-depth'
 INCLUSION_GRAPH_TOOL = Path(__file__).resolve().parent.parent / 'inclusion-graph/inclusion-graph'
+TOPFORMFLAT_TOOL = Path(__file__).resolve().parent.parent.parent / 'delta/topformflat'
 
 success_histories = {}
 
@@ -33,12 +34,11 @@ class GenericPass(AbstractPass):
 
     def regroup_hints(self, hints):
         file_to_locs = {}
+        new_hints = []
         for h in hints:
             if h['type'] == 'fileref':
                 file_to_locs.setdefault(h['name'], []).extend(h['locations'])
-        new_hints = []
-        for h in hints:
-            if h['type'] != 'fileref':
+            else:
                 new_hints.append(h)
         for file, locs in file_to_locs.items():
             new_hints.append({
@@ -57,11 +57,13 @@ class GenericPass(AbstractPass):
         max_depth = max(path_to_depth.values()) if path_to_depth else 0
 
         hints = []
+        logging.info('Generating hints...')
         hints += self.generate_makefile_hints(test_case)
         hints += self.generate_cppmaps_hints(test_case)
         hints += self.generate_inclusion_directive_hints(test_case)
         hints += self.generate_clang_pcm_lazy_load_hints(test_case)
         hints += self.generate_line_hints(test_case)
+        hints += self.generate_topformflat_hints(test_case)
 
         def hint_main_file(h):
             return test_case / (h['name'] if h['type'] == 'fileref' else h['locations'][0]['file'])
@@ -70,6 +72,7 @@ class GenericPass(AbstractPass):
             d = path_to_depth.get(hint_main_file(h), max_depth + 1) if strategy == 'topo' else 0
             return d, file
 
+        logging.info('Generating hints...')
         hints = self.regroup_hints(hints)
         self.append_unused_file_removal_hints(test_case, hints)
         for h in hints:
@@ -553,6 +556,27 @@ class GenericPass(AbstractPass):
                         raise RuntimeError(f'Failure while parsing {file}: {e}')
         return hints
 
+    def generate_topformflat_hints(self, test_case):
+        hints = []
+        for file in test_case.rglob('*'):
+            if not file.is_dir() and not file.is_symlink() and file.suffix not in ('.makefile', '.cppmap'):
+                hints_at_prev_depth = None
+                for depth in range(10):
+                    command = [TOPFORMFLAT_TOOL, str(depth), file.relative_to(test_case)]
+                    out = subprocess.check_output(command, cwd=test_case, stderr=subprocess.DEVNULL, encoding='utf-8')
+                    current_hints = []
+                    for line in out.splitlines():
+                        if line.strip():
+                            try:
+                                current_hints.append(json.loads(line))
+                            except json.decoder.JSONDecodeError as e:
+                                raise RuntimeError(f'Error while processing {file}: JSON line "{line}": {e}')
+                    if len(current_hints) == hints_at_prev_depth:
+                        break
+                    hints += current_hints
+                    hints_at_prev_depth = len(current_hints)
+        return hints
+
     def generate_inclusion_directive_hints(self, test_case):
         if not test_case.is_dir():
             return []
@@ -632,7 +656,8 @@ class GenericPass(AbstractPass):
             command.append('-Xclang')
             command.append(f'-print-deserialized-declarations-to-file={tmp.name}')
             proc = subprocess.run(command, cwd=test_case, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
-            logging.debug(f'stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f'stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
             subprocess.run(['make', '-f', 'target.makefile', 'clean'], cwd=Path(test_case), stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
             path_to_used = {}
             if not Path(tmp.name).exists():
@@ -642,7 +667,8 @@ class GenericPass(AbstractPass):
                 file = None
                 seg_from = None
                 for line in f:
-                    logging.debug(f'LINE {line.strip()}')
+                    if logging.getLogger().isEnabledFor(logging.DEBUG):
+                        logging.debug(f'LINE {line.strip()}')
                     match = re.match(r'required lines in file: (.*)', line)
                     if match:
                         file = Path(test_case) / match[1]
@@ -695,6 +721,10 @@ class GenericPass(AbstractPass):
         if not test_case.is_dir():
             return [test_case], {test_case: 0}
 
+        files = [f for f in Path(test_case).rglob('*') if not f.is_dir() and not f.is_symlink()]
+        if strategy == 'size':
+            return files, {}
+
         with open(test_case / 'target.makefile') as f:
             lines = f.readlines()
             for i, l in enumerate(lines):
@@ -728,10 +758,7 @@ class GenericPass(AbstractPass):
                 assert path.exists(), f'doesnt exist: {path}'
                 path_and_depth.append((path.resolve(), int(depth)))
             path_to_depth = dict(path_and_depth)
-        if root_file and not path_to_depth:
-            path_to_depth[root_file] = 0
 
-        files = [f for f in Path(test_case).rglob('*') if not f.is_dir() and not f.is_symlink()]
         files.sort(key=lambda f: (path_to_depth.get(f.resolve(), 1E9) if strategy == 'topo' else 0, f.suffix != '.cc', f))
 
         return files, path_to_depth

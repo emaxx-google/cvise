@@ -1,5 +1,5 @@
 /* topformflat.l; see License.txt for copyright and terms of use
- * 
+ *
  * Scott McPeak        <smcpeak@cs.berkeley.edu>
  *
  * flatten all toplevel forms to single lines.
@@ -7,6 +7,12 @@
 
 %{
 #include <stdlib.h>     // atoi
+
+char* input_file_name;
+int position = 0;
+int chunk_start_position = 0;
+
+#define YY_USER_ACTION position += yyleng;
 
 // emit yytext as-is
 void emit(void);
@@ -44,7 +50,7 @@ int threshold = 0;
                   emit();
                 }
                 else {
-                  printf("%c", yytext[0]);
+                  // printf("%c", yytext[0]);
                 }
               }
 
@@ -62,13 +68,21 @@ int threshold = 0;
    * newline followed by more non-newlines (repeat as needed).
    * finally, a newline */
 "#".*("\\\n".*)*"\n" {
-                printf("\n");      /* make sure starts on own line */
+                position -= yyleng;
+                possibleNewline();
+                position += yyleng;
+                possibleNewline();
+                // printf("\n");      /* make sure starts on own line */
                 emit();            /* preprocessor */
               }
 
-"\\\n"        { printf(" "); }
+"\\\n"        {
+                // printf(" ");
+              }
 
-"\n"          { printf(" "); }     /* not any above case, eat it*/
+"\n"          {
+                // printf(" ");
+              }     /* not any above case, eat it*/
 
 "//".*"\n"    { emit(); }          /* C++ comment */
 
@@ -98,7 +112,7 @@ int threshold = 0;
 
 void emit(void)
 {
-  printf("%.*s", (int) yyleng, yytext);
+  //printf("%.*s", (int) yyleng, yytext);
 }
 
 void diag(char const *str)
@@ -108,15 +122,17 @@ void diag(char const *str)
 
 void possibleNewline(void)
 {
-  if (nesting <= threshold) {
-    printf("\n");
+  if (nesting <= threshold && chunk_start_position < position) {
+    printf("{\"type\": \"edit\", \"locations\": [{\"file\": \"%s\", \"chunks\": [{\"begin\": %d, \"end\": %d}]}]}\n",
+           input_file_name, chunk_start_position, position);
+    chunk_start_position = position;
   }
 }
 
 char *version = "2003.7.14";
 int main(int argc, char *argv[])
 {
-  if (isatty(0)) {
+  if (isatty(0) && argc < 3) {
     printf("topformflat version %s\n", version);
     printf("usage: %s [threshold] <input.c >output.c\n", argv[0]);
     printf("  The threshold (default: 0) specifies at what nesting level\n"
@@ -130,9 +146,18 @@ int main(int argc, char *argv[])
 
   if (argc >= 2) {
     threshold = atoi(argv[1]);    // user-specified threshold
-  }  
-
+  }
   yyin = stdin;
+  if (argc >= 3) {
+    input_file_name = argv[2];
+    yyin = fopen(input_file_name, "rt");
+    if (!yyin) {
+      fprintf(stderr, "Failed to open %s .\n", input_file_name);
+      return 1;
+    }
+  } else {
+    input_file_name = "";
+  }
   yylex();
   return 0;
 }
