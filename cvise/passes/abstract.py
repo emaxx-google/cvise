@@ -168,7 +168,7 @@ class FuzzyBinaryState(BinaryState):
         if strategy == 'topo':
             return 1
         elif strategy == 'size':
-            return max(1, instances // 1000)
+            return max(1, instances)
         else:
             assert False
 
