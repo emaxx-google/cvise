@@ -8,10 +8,12 @@
 %{
 #include <stdlib.h>     // atoi
 
-int position = 0;
-int chunk_start_position = 0;
+int pos = 0;
+int state_before_multicomment = 0;
+int multicomment_start = 0;
+int chunk_start = 0;
 
-#define YY_USER_ACTION position += yyleng;
+#define YY_USER_ACTION pos += yyleng;
 
 // emit yytext as-is
 void emit(void);
@@ -39,9 +41,27 @@ int threshold = 0;
 /* start condition for strings */
 %x STRING
 %x CHARLIT
-
+%x MACRO
+%x MULTICOMMENT
 
 %%
+
+<INITIAL,MACRO>"/*" {
+                      multicomment_start = pos - yyleng;
+                      state_before_multicomment = YY_START;
+                      BEGIN(MULTICOMMENT);
+                    }
+<MULTICOMMENT>"*/"  {
+                      if (threshold == 0) {
+                        printf("{\"t\":\"comment\",\"l\":%d,\"r\":%d}\n", multicomment_start, pos);
+                        multicomment_start = -1;
+                      }
+                      BEGIN(state_before_multicomment);
+                      state_before_multicomment = -1;
+                    }
+<MULTICOMMENT>[^*\n]+
+<MULTICOMMENT>"*"
+<MULTICOMMENT>\n
 
 ";"           { emit(); possibleNewline(); }
 
@@ -63,18 +83,6 @@ int threshold = 0;
                 possibleNewline();
               }
 
-  /* a hash, then some non-newlines.  then, possibly, an escaped
-   * newline followed by more non-newlines (repeat as needed).
-   * finally, a newline */
-"#".*("\\\n".*)*"\n" {
-                position -= yyleng;
-                possibleNewline();
-                position += yyleng;
-                possibleNewline();
-                // printf("\n");      /* make sure starts on own line */
-                emit();            /* preprocessor */
-              }
-
 "\\\n"        {
                 // printf(" ");
               }
@@ -83,7 +91,25 @@ int threshold = 0;
                 // printf(" ");
               }     /* not any above case, eat it*/
 
-"//".*"\n"    { emit(); }          /* C++ comment */
+<INITIAL,MACRO>"//".*    {
+                if (threshold == 0) {
+                  printf("{\"t\":\"comment\",\"l\":%d,\"r\":%d}\n", pos-yyleng, pos);
+                }
+                emit();
+              }          /* C++ comment */
+
+"#"           {
+                pos -= yyleng;
+                possibleNewline();
+                pos += yyleng;
+                BEGIN(MACRO);
+              }
+<MACRO>.
+<MACRO>"\\\n"
+<MACRO>\n     {
+                possibleNewline();
+                BEGIN(INITIAL);
+              }
 
 "\""          { diag("<STR>"); emit(); BEGIN(STRING); }     /* start quote */
 
@@ -121,9 +147,9 @@ void diag(char const *str)
 
 void possibleNewline(void)
 {
-  if (nesting <= threshold && chunk_start_position < position) {
-    printf("{\"l\":%d,\"r\":%d}\n", chunk_start_position, position);
-    chunk_start_position = position;
+  if (nesting <= threshold && chunk_start < pos) {
+    printf("{\"t\":\"curly::%d\",\"l\":%d,\"r\":%d}\n", threshold, chunk_start, pos);
+    chunk_start = pos;
   }
 }
 
