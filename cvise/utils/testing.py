@@ -801,38 +801,38 @@ class TestManager:
 
                 state = None
                 if finished_jobs % 5 == 0 and len(self.next_successes_hint) >= 2:
-                    merge_blocklist = set()
-                    for failed_state in self.failed_merges:
-                        for s in random.sample(failed_state, (len(failed_state) + 1) // 2):
-                            merge_blocklist.add(self.get_state_compact_repr(s))
-                    merge_cands = [(sta, pa, imp, imp_fc) for sta, pa, imp, imp_fc in self.next_successes_hint
-                                    if hasattr(pa, 'supports_merging') and pa.supports_merging() and not isinstance(sta, list) and
-                                    self.get_state_compact_repr(sta) not in merge_blocklist]
-                    merge_train = []
-                    for sta, pa, imp, imp_fc in sorted(merge_cands, key=lambda item: self.get_state_comparison_key(item[0], item[2], item[3])):
-                        boardable = True
-                        cand_state = [s for s, p, i, ifc in merge_train] + [sta]
-                        if merge_train and (self.get_state_compact_repr(cand_state) in self.failed_merges):
-                            boardable = False
-                        if boardable:
-                            merge_train.append((sta, pa, imp, imp_fc))
-                    merge_comparison_key = None
-                    if len(merge_train) >= 2:
-                        merged_state = [sta for sta, pa, imp, imp_fc in merge_train]
-                        merge_improv, merge_improv_file_count = merge_cands[0][1].predict_improv(self.current_test_case, merged_state)
-                        # logging.debug(f'run_parallel_tests: merge_train={merge_train} merge_improv={merge_improv} in_attempted={merge_improv in attempted_merges}')
-                        merge_repr = self.get_state_compact_repr([sta for sta, pa, imp, imp_fc in merge_train])
-                        if len(merge_train) >= 2 and (merge_improv > 0 or merge_improv_file_count > 0) and (merge_repr not in attempted_merges):
-                            pass_id = passes.index(merge_train[0][1])
-                            pass_ = passes[pass_id]
+                    for attempt in range(10):
+                        merge_blocklist = set()
+                        for failed_state in self.failed_merges:
+                            for s in random.sample(failed_state, (len(failed_state) + 1) // 2):
+                                merge_blocklist.add(self.get_state_compact_repr(s))
+                        merge_cands = [(sta, pa, imp, imp_fc) for sta, pa, imp, imp_fc in self.next_successes_hint
+                                        if hasattr(pa, 'supports_merging') and pa.supports_merging() and not isinstance(sta, list) and
+                                        self.get_state_compact_repr(sta) not in merge_blocklist]
+                        merge_train = []
+                        for sta, pa, imp, imp_fc in sorted(merge_cands, key=lambda item: self.get_state_comparison_key(item[0], item[2], item[3])):
+                            boardable = True
+                            cand_state = [s for s, p, i, ifc in merge_train] + [sta]
+                            if merge_train and (self.get_state_compact_repr(cand_state) in self.failed_merges):
+                                boardable = False
+                            if boardable:
+                                merge_train.append((sta, pa, imp, imp_fc))
+                        merge_comparison_key = None
+                        if len(merge_train) >= 2:
                             merged_state = [sta for sta, pa, imp, imp_fc in merge_train]
-                            merge_comparison_key = self.get_state_comparison_key(merged_state, merge_improv, merge_improv_file_count)
-                            if merge_comparison_key < best_success_comparison_key:
-                                state = merged_state
-                                attempted_merges.add(merge_repr)
-                                should_advance = False
-                    if not state:
-                        logging.info(f'No merge scheduled: merge_cands={len(merge_cands)} merge_train={len(merge_train)} failed_merges={len(self.failed_merges)} merge_comparison_key={merge_comparison_key} best_success_comparison_key={best_success_comparison_key}')
+                            merge_improv, merge_improv_file_count = merge_cands[0][1].predict_improv(self.current_test_case, merged_state)
+                            # logging.debug(f'run_parallel_tests: merge_train={merge_train} merge_improv={merge_improv} in_attempted={merge_improv in attempted_merges}')
+                            merge_repr = self.get_state_compact_repr([sta for sta, pa, imp, imp_fc in merge_train])
+                            if (merge_improv > 0 or merge_improv_file_count > 0) and (merge_repr not in attempted_merges):
+                                pass_id = passes.index(merge_train[0][1])
+                                pass_ = passes[pass_id]
+                                merge_comparison_key = self.get_state_comparison_key(merged_state, merge_improv, merge_improv_file_count)
+                                if merge_comparison_key < best_success_comparison_key:
+                                    state = merged_state
+                                    attempted_merges.add(merge_repr)
+                                    should_advance = False
+                        if state or not self.failed_merges:
+                            break
 
                 if not state and any(self.states):
                     pass_job_index += 1
