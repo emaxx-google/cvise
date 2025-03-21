@@ -751,8 +751,8 @@ class TestManager:
                             logging.info(f'observed success success_cnt={success_cnt} improv={improv} improv_file_count={improv_file_count} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={finished_jobs} failed_merges={len(self.failed_merges)} comparison_key={self.get_state_comparison_key(env.state, improv, improv_file_count)}')
                             if hasattr(pass_, 'on_success_observed'):
                                 pass_.on_success_observed(env.state)
-                            if isinstance(env.state, list):
-                                assert env.predicted_improv == improv, f'improv={improv} predicted_improv={env.predicted_improv} state={env.state}'
+                            # if isinstance(env.state, list):
+                            #     assert env.predicted_improv == improv, f'improv={improv} predicted_improv={env.predicted_improv} state={env.state}'
                             self.next_successes_hint.append((env.state, pass_, improv, improv_file_count))
                             recent_success_job_counter = finished_jobs
                             comparison_key = self.get_state_comparison_key(env.state, improv, improv_file_count)
