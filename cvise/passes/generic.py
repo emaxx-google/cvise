@@ -1,11 +1,12 @@
 import atexit
 import copy
 import functools
+import gzip
 import json
 import logging
 import os
 from pathlib import Path
-import pickle
+import random
 import re
 import subprocess
 import tempfile
@@ -20,12 +21,103 @@ INCLUSION_GRAPH_TOOL = Path(__file__).resolve().parent.parent / 'inclusion-graph
 TOPFORMFLAT_TOOL = Path(__file__).resolve().parent.parent.parent / 'delta/topformflat'
 
 success_histories = {}
+type_to_successes_gen = None
+type_to_successes = {}
+
+
+class PolyState(dict):
+    def __init__(self):
+        self.generation = random.randint(0, 10 ** 9)
+
+    @staticmethod
+    def create(instances, strategy, depth_to_instances, pass_repr):
+        self = PolyState()
+        self.types = list(sorted(instances.keys()))
+        self.instances = instances
+        for k, i in instances.items():
+            self[k] = FuzzyBinaryState.create(i, strategy, depth_to_instances, pass_repr + ' :: ' + k)
+        if not any(self.values()):
+            return None
+        self.ptr = 0
+        while not self[self.types[self.ptr]]:
+            self.ptr += 1
+        return self
+
+    @staticmethod
+    def create_from_hint(instances, strategy, last_state_hint, depth_to_instances, pass_repr):
+        self = PolyState()
+        self.types = list(instances.keys())
+        self.instances = instances
+        for k, i in instances.items():
+            if (k in last_state_hint) and last_state_hint[k]:
+                self[k] = FuzzyBinaryState.create_from_hint(i, strategy, last_state_hint[k], depth_to_instances)
+            else:
+                self[k] = FuzzyBinaryState.create(i, strategy, depth_to_instances, pass_repr + ' :: ' + k)
+        if not any(self.values()):
+            return None
+        self.ptr = 0
+        while not self[self.types[self.ptr]]:
+            self.ptr += 1
+        return self
+
+    def advance(self, success_histories):
+        global type_to_successes_gen
+        global type_to_successes
+        if type_to_successes_gen != self.generation:
+            type_to_successes_gen = self.generation
+            type_to_successes = {}
+
+        new = copy.copy(self)
+        while True:
+            tp = new.types[new.ptr]
+            new[tp] = new[tp].advance(success_histories)
+            if not new[tp]:
+                break
+            if not any(le <= new[tp].begin() and new[tp].end() <= ri
+                       for le, ri in type_to_successes.get(tp, [])):
+                break
+        if not any(new.values()):
+            return None
+        new.ptr += 1
+        if new.ptr == len(new.types):
+            new.ptr = 0
+        while not new[new.types[new.ptr]]:
+            new.ptr += 1
+            if new.ptr == len(new.types):
+                new.ptr = 0
+        return new
+
+    def on_success_observed(self):
+        history = self[self.types[self.ptr]].get_success_history(success_histories)
+        history.append(self.end() - self.begin())
+
+        global type_to_successes_gen
+        global type_to_successes
+        if type_to_successes_gen != self.generation:
+            type_to_successes_gen = self.generation
+            type_to_successes = {}
+        type_to_successes.setdefault(self.types[self.ptr], []).append((
+            self[self.types[self.ptr]].begin(),
+            self[self.types[self.ptr]].end()))
+
+    def begin(self):
+        return self.shift() + self[self.types[self.ptr]].begin()
+
+    def end(self):
+        return self.shift() + self[self.types[self.ptr]].end()
+
+    def shift(self):
+        return sum(self.instances[self.types[i]] for i in range(self.ptr))
+
+    def __repr__(self):
+        t = self.types[self.ptr]
+        return t + '::' + repr(self[t])
 
 
 class GenericPass(AbstractPass):
     def __init__(self, arg=None, external_programs=None):
         super().__init__(arg, external_programs)
-        self.extra_file_path = tempfile.NamedTemporaryFile(suffix='cviseextra', delete=False).name
+        self.extra_file_path = tempfile.NamedTemporaryFile(suffix='cviseextra.gz', delete=False).name
         atexit.register(functools.partial(os.unlink, self.extra_file_path))
 
     def __repr__(self):
@@ -50,7 +142,6 @@ class GenericPass(AbstractPass):
         file_to_id = dict((f, i) for i, f in enumerate(files))
 
         hints = []
-        logging.info('Generating hints...')
         with pebble.ProcessPool() as pool:
             futures = []
             futures.append(pool.schedule(functools.partial(generate_makefile_hints, test_case, files, file_to_id)))
@@ -63,7 +154,7 @@ class GenericPass(AbstractPass):
                 hints += f.result()
 
         def hint_main_file(h):
-            if h['t'] == 'fileref':
+            if h['t'].startswith('delfile::'):
                 return files[h['n']]
             if 'f' in h:
                 return files[h['f']]
@@ -71,41 +162,40 @@ class GenericPass(AbstractPass):
         def hint_comparison_key(h):
             file = hint_main_file(h)
             d = path_to_depth.get(hint_main_file(h), max_depth + 1) if strategy == 'topo' else 0
-            return d, file
+            return h['t'], d, file
 
-        logging.info('Regrouping hints...')
         hints = regroup_hints(hints)
         append_unused_file_removal_hints(test_case, hints, files, file_to_id)
         for h in hints:
-            assert_valid_hint(h)
+            assert_valid_hint(h, files)
         hints.sort(key=hint_comparison_key)
-        instances = len(hints)
+
+        instances = {}
+        for h in hints:
+            instances[h['t']] = instances.get(h['t'], 0) + 1
 
         for h in hints:
-            if h['t'] == 'fileref':
-                path = test_case / files[h['n']]
+            if h['t'].startswith('delfile::'):
+                path = files[h['n']]
                 assert path.exists(), 'path={path} hint={h}'
 
         depth_to_instances = [0] * (max_depth + 2)
         for h in hints:
             d = path_to_depth.get(hint_main_file(h), max_depth + 1)
             depth_to_instances[d] += 1
-        logging.info(f'{self}.new: len(hints)={instances} depth_to_instances={depth_to_instances}')
+        logging.info(f'Generated hints: len(hints)={instances}')
 
         if logging.getLogger().isEnabledFor(logging.DEBUG):
             for hint in hints:
-                if hint['t'] == 'fileref':
-                    logging.debug(f'*** MENTION OF {hint["n"]}')
-                else:
-                    logging.debug(f'***')
+                logging.debug(f'*** {hint["t"]}')
                 for c in get_hint_locs(hint):
                     logging.debug(f'    in {files[c["f"]]}:')
-                    with open(test_case / files[c["f"]]) as f:
+                    with open(files[c["f"]]) as f:
                         contents = f.read()
-                    dbg = contents[c['l']:c['r']].replace('\n', ' ')
+                    dbg = contents[c['l']:c['r']].replace('\n', '\\n')
                     logging.debug(f'       {c["l"]}..{c["r"]}: "{dbg}"')
 
-        with open(self.extra_file_path, 'w') as f:
+        with gzip.open(self.extra_file_path, 'wt') as f:
             f.write(dump_json([str(f.relative_to(test_case)) for f in files]))
             f.write('\n')
             f.write(dump_json(dict((str(s.relative_to(test_case)), v) for s,v in path_to_depth.items())))
@@ -118,26 +208,28 @@ class GenericPass(AbstractPass):
             return None
 
         if last_state_hint:
-            state = FuzzyBinaryState.create_from_hint(instances, strategy, last_state_hint, depth_to_instances)
+            state = PolyState.create_from_hint(instances, strategy, last_state_hint, depth_to_instances, repr(self))
         else:
-            state = FuzzyBinaryState.create(instances, strategy, depth_to_instances, repr(self))
-        while state and strategy == 'topo' and state.tp == 0:
-            state = state.advance(success_histories)
+            state = PolyState.create(instances, strategy, depth_to_instances, repr(self))
+        # while state and strategy == 'topo' and state.tp == 0:
+        #     state = state.advance(success_histories)
         return state
 
     def advance(self, test_case, state):
         new = state.advance(success_histories)
-        while new and new.strategy == 'topo' and new.tp == 0:
-            new = new.advance(success_histories)
+        # while new and new.strategy == 'topo' and new.tp == 0:
+        #     new = new.advance(success_histories)
         return new
 
     def on_success_observed(self, state):
         if not isinstance(state, list):
-            state.get_success_history(success_histories).append(state.end() - state.begin())
+            state.on_success_observed()
 
     def transform(self, test_case, state, process_event_notifier):
         test_case = Path(test_case)
         state_list = state if isinstance(state, list) else [state]
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f'{self}.transform: state={state}')
 
         hints_to_load = set()
         for s in state_list:
@@ -146,7 +238,7 @@ class GenericPass(AbstractPass):
         hints = {}
         min_hint_id = min(hints_to_load)
         max_hint_id = max(hints_to_load)
-        with open(self.extra_file_path) as f:
+        with gzip.open(self.extra_file_path, 'rt') as f:
             files = json.loads(next(f))
             files = [test_case / f for f in files]
             path_to_depth = json.loads(next(f))
@@ -160,7 +252,11 @@ class GenericPass(AbstractPass):
                     hints[i] = json.loads(line)
         max_depth = max(path_to_depth.values()) if path_to_depth else 0
 
-        files_for_deletion = set(h['n'] for h in hints.values() if h['t'] == 'fileref')
+        if not isinstance(state, list):
+            for h in hints.values():
+                assert state.types[state.ptr] == h['t']
+
+        files_for_deletion = set(h['n'] for h in hints.values() if h['t'].startswith('delfile::'))
         file_to_edits = {}
         for i, h in hints.items():
             for l in get_hint_locs(h):
@@ -169,8 +265,6 @@ class GenericPass(AbstractPass):
 
         # if isinstance(state, list) or state.end() - state.begin() > 1 or not files_for_deletion:
         #     return (PassResult.INVALID, state)  # TEMP!!
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            logging.debug(f'{self}.transform: state={state}')
 
         if logging.getLogger().isEnabledFor(logging.DEBUG):
             logging.debug(f'files_for_deletion={files_for_deletion} file_to_edits={file_to_edits}')
@@ -215,7 +309,7 @@ class GenericPass(AbstractPass):
         hints = {}
         min_hint_id = min(hints_to_load)
         max_hint_id = max(hints_to_load)
-        with open(self.extra_file_path) as f:
+        with gzip.open(self.extra_file_path, 'rt') as f:
             files = json.loads(next(f))
             files = [test_case / f for f in files]
             next(f)  # path_to_depth
@@ -227,7 +321,7 @@ class GenericPass(AbstractPass):
                 if i in hints_to_load:
                     hints[i] = json.loads(line)
 
-        files_for_deletion = set(h['n'] for h in hints.values() if h['t'] == 'fileref')
+        files_for_deletion = set(h['n'] for h in hints.values() if h['t'].startswith('delfile::'))
         file_to_edits = {}
         for i, h in hints.items():
             for l in get_hint_locs(h):
@@ -237,20 +331,20 @@ class GenericPass(AbstractPass):
         improv = 0
         for f in files_for_deletion:
             improv += files[f].stat().st_size
-        for file_id, chunks in file_to_edits.items():
-            if file_id not in files_for_deletion:
-                for s in merge_chunks(chunks):
-                    improv += s['r'] - s['l']
+        for chunks in file_to_edits.values():
+            for s in merge_chunks(chunks):
+                improv += s['r'] - s['l']
         return improv, len(files_for_deletion)
 
 
 def append_unused_file_removal_hints(test_case, hints, files, file_to_id):
-    mentioned_files = set(h['n'] for h in hints if h['t'] == 'fileref')
+    mentioned_files = set(h['n'] for h in hints if h['t'].startswith('delfile::'))
     for file in files:
-        if not file.is_dir() and not file.is_symlink() and file_to_id[file] not in mentioned_files:
-            if file.suffix not in ('.makefile'):
+        if not file.is_dir() and not file.is_symlink() and (file_to_id[file] not in mentioned_files):
+            if file.suffix not in ('.makefile',):
+                logging.debug(f'APPENDING: {file} {file_to_id[file]}')
                 hints.append({
-                    't': 'fileref',
+                    't': 'delfile::0',
                     'n': file_to_id[file],
                     'multi': [],
                 })
@@ -360,7 +454,7 @@ def generate_makefile_hints(test_case, files, file_to_id):
     deletion_candidates = set(list(file_mentions.keys()) + list(file_to_generating_targets.keys()))
     for path in deletion_candidates:
         full_path = test_case / path
-        if not full_path.exists() or full_path.suffix in ('.cc'):
+        if not full_path.exists() or full_path.suffix in ('.cc',):
             continue
         if full_path.suffix in ('.pcm', '.o', '.tmp'):
             continue  # TODO: solve concurrency
@@ -546,7 +640,6 @@ def generate_topformflat_hints(test_case, files, file_to_id):
                     if line.strip():
                         try:
                             h = json.loads(line)
-                            h['t'] = f'curly{depth}'
                             h['f'] = file_id
                             current_hints.append(h)
                         except json.decoder.JSONDecodeError as e:
@@ -738,22 +831,33 @@ def get_ordered_files_list(test_case, strategy):
 def dump_json(o):
     return json.dumps(o, separators=(',', ':'), check_circular=False)
 
-def assert_valid_hint(h):
-    assert isinstance(h, dict), f'{h}'
-    assert 't' in h, f'{h}'
-    if h['t'] == 'fileref':
-        assert isinstance(h['n'], int), f'{h}'
-    if 'l' in h or 'r' in h or 'f' in h:
-        assert isinstance(h['f'], int), f'{h}'
-        assert isinstance(h['l'], int), f'{h}'
-        assert isinstance(h['r'], int), f'{h}'
-        assert 'multi' not in h
-    else:
-        for l in h['multi']:
-            assert isinstance(l, dict), f'{h}'
-            assert isinstance(l['f'], int), f'{h}'
-            assert isinstance(l['l'], int), f'{h}'
-            assert isinstance(l['r'], int), f'{h}'
+def assert_valid_hint(h, files):
+    try:
+        assert isinstance(h, dict)
+        assert 't' in h
+        assert isinstance(h['t'], str)
+        assert h['t'] != 'fileref'
+        if h['t'].startswith('delfile::'):
+            assert isinstance(h['n'], int)
+        if 'l' in h or 'r' in h or 'f' in h:
+            assert 'multi' not in h
+            assert isinstance(h['f'], int)
+            assert 0 <= h['f'] < len(files)
+            assert isinstance(h['l'], int)
+            assert 0 <= h['l']
+            assert isinstance(h['r'], int)
+            assert h['l'] < h['r']
+        else:
+            for l in h['multi']:
+                assert isinstance(l, dict)
+                assert isinstance(l['f'], int)
+                assert 0 <= l['f'] < len(files)
+                assert isinstance(l['l'], int)
+                assert 0 <= l['l']
+                assert isinstance(l['r'], int)
+                assert l['l'] < l['r']
+    except AssertionError as e:
+        raise RuntimeError(f'Invalid hint: {h}')
 
 def get_hint_locs(hint):
     if 'multi' in hint:
@@ -791,8 +895,9 @@ def regroup_hints(hints):
         else:
             new_hints.append(h)
     for file, locs in file_to_locs.items():
+        c = min(5, len(locs))
         h = {
-            't': 'fileref',
+            't': f'delfile::{c}',
             'n': file,
         }
         set_hint_locs(h, locs)
