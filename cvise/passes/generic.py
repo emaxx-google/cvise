@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import random
 import re
+import shlex
 import subprocess
 import tempfile
 import types
@@ -113,6 +114,9 @@ class PolyState(dict):
         t = self.types[self.ptr]
         return t + '::' + repr(self[t])
 
+    def set_dbg(self, data):
+        self[self.types[self.ptr]].dbg_file = data
+
 
 class GenericPass(AbstractPass):
     def __init__(self, arg=None, external_programs=None):
@@ -142,7 +146,10 @@ class GenericPass(AbstractPass):
         file_to_id = dict((f, i) for i, f in enumerate(files))
 
         hints = []
-        with pebble.ProcessPool() as pool:
+        args = {}
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            args['max_workers'] = 1
+        with pebble.ProcessPool(**args) as pool:
             futures = []
             futures.append(pool.schedule(functools.partial(generate_makefile_hints, test_case, files, file_to_id)))
             futures.append(pool.schedule(functools.partial(generate_cppmaps_hints, test_case, files, file_to_id)))
@@ -290,9 +297,10 @@ class GenericPass(AbstractPass):
 
         for s in state_list:
             s.improv_per_depth = []
-            s.dbg_file = None
+            s.set_dbg(None)
         state_list[0].improv_per_depth = improv_per_depth
-        state_list[0].dbg_file = 'HINTS=' + ','.join(sorted(set(h['t'] for h in hints.values()))) + ';DEL=' + ','.join(sorted(str(files[f].relative_to(test_case)) for f in files_for_deletion))
+        state_list[0].set_dbg('HINTS=' + ','.join(sorted(set(h['t'] for h in hints.values()))) +
+                              ';DEL=' + ','.join(sorted(str(files[f].relative_to(test_case)) for f in files_for_deletion)))
 
         if logging.getLogger().isEnabledFor(logging.DEBUG):
             logging.debug(f'{self}.transform: END: state={state}')
@@ -341,7 +349,7 @@ def append_unused_file_removal_hints(test_case, hints, files, file_to_id):
     mentioned_files = set(h['n'] for h in hints if h['t'].startswith('delfile::'))
     for file in files:
         if not file.is_dir() and not file.is_symlink() and (file_to_id[file] not in mentioned_files):
-            if file.suffix not in ('.makefile',):
+            if file.suffix not in ('.makefile',) and file.name not in ('Makefile',):
                 logging.debug(f'APPENDING: {file} {file_to_id[file]}')
                 hints.append({
                     't': 'delfile::0',
@@ -371,7 +379,7 @@ def generate_makefile_hints(test_case, files, file_to_id):
     file_mentions = {}
     token_to_locs = {}
 
-    makefile_path = test_case / 'target.makefile'
+    makefile_path = test_case / 'Makefile'
     makefile_file_id = file_to_id[makefile_path]
     with open(makefile_path) as f:
         line_start_pos = 0
@@ -404,46 +412,48 @@ def generate_makefile_hints(test_case, files, file_to_id):
                     'l': line_start_pos,
                     'r': line_end_pos,
                 })
-                token_search_pos = 0
-                option_with_untouchable_arg = False
-                for i, token in enumerate(line.split()):
-                    if token == '||':  # hack
-                        break
-                    token_pos = line.find(token, token_search_pos)
-                    assert token_pos != -1, f'token "{token}" not found in line "{line}"'
-                    token_search_pos = token_pos + len(token)
-                    mention_pos = line_start_pos + token_pos
-                    assert line[mention_pos-line_start_pos: mention_pos-line_start_pos+len(token)] == token
-                    match = re.match(r'([^=]*=)*([^=]+\.(txt|cppmap|pcm|o|cc))$', token)
-                    if match:
-                        mentioned_file = match.group(2)
-                        is_main_file_for_rule = not match.group(1) and not option_with_untouchable_arg
-                        if is_main_file_for_rule:
-                            file_to_generating_targets.setdefault(mentioned_file, []).append(cur_target_name)
-                        else:
-                            file_mentions.setdefault(mentioned_file, []).append({
-                                'f': makefile_file_id,
-                                'l': mention_pos,
-                                'r': mention_pos + len(token),
-                            })
-                        option_with_untouchable_arg = False
-                    elif i > 0 and not option_with_untouchable_arg and \
-                            token not in ('-c', '-nostdinc++', '-nostdlib++', '-fno-crash-diagnostics', '-ferror-limit=0', '-w', '-Wno-error', '-Xclang=-emit-module', '-xc++', '-fmodules', '-fno-implicit-modules', '-fno-implicit-module-maps', '-Xclang=-fno-cxx-modules', '-Xclang=-fmodule-map-file-home-is-cwd') and \
-                            not token.startswith('-fmodule-name=') and not token.startswith('-std=') and not token.startswith('--sysroot='):
-                        if token in ('-o', '-iquote', '-isystem', '-I'):
-                            option_with_untouchable_arg = True
-                        if token == '-Xclang':
-                            next_tokens = line[token_search_pos:].split(maxsplit=2)
-                            if next_tokens and next_tokens[0] == '-fallow-pcm-with-compiler-errors':
+                tokens = line.split()
+                if tokens and tokens[0] == '$(CLANG)':
+                    token_search_pos = 0
+                    option_with_untouchable_arg = False
+                    for i, token in enumerate(tokens):
+                        if token == '||':  # hack
+                            break
+                        token_pos = line.find(token, token_search_pos)
+                        assert token_pos != -1, f'token "{token}" not found in line "{line}"'
+                        token_search_pos = token_pos + len(token)
+                        mention_pos = line_start_pos + token_pos
+                        assert line[mention_pos-line_start_pos: mention_pos-line_start_pos+len(token)] == token
+                        match = re.match(r'([^=]*=)*([^=]+\.(txt|cppmap|pcm|o|cc))$', token)
+                        if match:
+                            mentioned_file = match.group(2)
+                            is_main_file_for_rule = not match.group(1) and not option_with_untouchable_arg
+                            if is_main_file_for_rule:
+                                file_to_generating_targets.setdefault(mentioned_file, []).append(cur_target_name)
+                            else:
+                                file_mentions.setdefault(mentioned_file, []).append({
+                                    'f': makefile_file_id,
+                                    'l': mention_pos,
+                                    'r': mention_pos + len(token),
+                                })
+                            option_with_untouchable_arg = False
+                        elif i > 0 and not option_with_untouchable_arg and \
+                                token not in ('-c', '-nostdinc++', '-nostdlib++', '-fno-crash-diagnostics', '-ferror-limit=0', '-w', '-Wno-error', '-Xclang=-emit-module', '-xc++', '-fmodules', '-fno-implicit-modules', '-fno-implicit-module-maps', '-Xclang=-fno-cxx-modules', '-Xclang=-fmodule-map-file-home-is-cwd') and \
+                                not token.startswith('-fmodule-name=') and not token.startswith('-std=') and not token.startswith('--sysroot='):
+                            if token in ('-o', '-iquote', '-isystem', '-I'):
                                 option_with_untouchable_arg = True
-                        if not option_with_untouchable_arg:
-                            token_to_locs.setdefault(token, []).append({
-                                'f': makefile_file_id,
-                                'l': mention_pos,
-                                'r': mention_pos + len(token),
-                            })
-                    else:
-                        option_with_untouchable_arg = False
+                            if token == '-Xclang':
+                                next_tokens = line[token_search_pos:].split(maxsplit=2)
+                                if next_tokens and next_tokens[0] == '-fallow-pcm-with-compiler-errors':
+                                    option_with_untouchable_arg = True
+                            if not option_with_untouchable_arg:
+                                token_to_locs.setdefault(token, []).append({
+                                    'f': makefile_file_id,
+                                    'l': mention_pos,
+                                    'r': mention_pos + len(token),
+                                })
+                        else:
+                            option_with_untouchable_arg = False
             else:
                 cur_target = None
                 cur_target_name = None
@@ -610,7 +620,7 @@ def parse_cppmap(test_case, cppmap_path, files, file_to_id):
 def generate_line_hints(test_case, files, file_to_id):
     hints = []
     for file_id, file in enumerate(files):
-        if not file.is_symlink() and file.suffix not in ('.makefile', '.cppmap'):
+        if not file.is_symlink() and file.suffix not in ('.makefile', '.cppmap') and file.name not in ('Makefile',):
             with open(file) as f:
                 line_start_pos = 0
                 try:
@@ -628,13 +638,16 @@ def generate_line_hints(test_case, files, file_to_id):
     return hints
 
 def generate_topformflat_hints(test_case, files, file_to_id):
+    MAX_CURLY_DEPTH = 10
     hints = []
     for file_id, file in enumerate(files):
-        if not file.is_symlink() and file.suffix not in ('.makefile', '.cppmap'):
+        if not file.is_symlink() and file.suffix not in ('.makefile', '.cppmap') and file.name not in ('Makefile',):
             hints_at_prev_depth = None
-            for depth in range(10):
-                command = [TOPFORMFLAT_TOOL, str(depth), file.relative_to(test_case)]
-                out = subprocess.check_output(command, cwd=test_case, stderr=subprocess.DEVNULL, encoding='utf-8')
+            for depth in range(MAX_CURLY_DEPTH):
+                command = [str(TOPFORMFLAT_TOOL), str(depth), str(file)]
+                if logging.getLogger().isEnabledFor(logging.DEBUG):
+                    logging.debug(f'generate_topformflat_hints: running: {shlex.join(command)}')
+                out = subprocess.check_output(command, stderr=subprocess.DEVNULL, encoding='utf-8')
                 current_hints = []
                 for line in out.splitlines():
                     if line.strip():
@@ -654,14 +667,9 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id):
     if not test_case.is_dir():
         return []
 
-    with open(test_case / 'target.makefile') as f:
-        lines = f.readlines()
-        for i, l in enumerate(lines):
-            if '.o:' in l and i+1 < len(lines):
-                orig_command = lines[i+1].strip()
-                break
-        else:
-            return []
+    orig_command = get_root_compile_command(test_case)
+    if not orig_command:
+        return []
 
     root_file_candidates = list(test_case.rglob('*.cc'))
     if not root_file_candidates:
@@ -683,10 +691,11 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id):
 
     orig_command = re.sub(r'\S*-fmodule\S*', '', orig_command).split()
     command = [
-        INCLUSION_GRAPH_TOOL,
-        root_file,
+        str(INCLUSION_GRAPH_TOOL),
+        str(root_file),
         '--',
         '-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk'] + orig_command
+    logging.debug(f'generate_inclusion_directive_hints: running: {shlex.join(command)}')
     path_and_depth = []
     out = subprocess.check_output(command, cwd=test_case, stderr=subprocess.DEVNULL, encoding='utf-8')
     hints = []
@@ -716,22 +725,43 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
     if not orig_command:
         return []
 
-    subprocess.run(['make', '-f', 'target.makefile', '-j64'], cwd=Path(test_case), stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
-
     with tempfile.NamedTemporaryFile() as tmp:
-        orig_command = re.sub(r'\s-o\s\S+', ' ', orig_command).split()
-        command = copy.copy(orig_command)
-        command.append('-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk')
-        command.append('-Xclang')
-        command.append(f'-print-deserialized-declarations-to-file={tmp.name}')
-        proc = subprocess.run(command, cwd=test_case, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
+        # Hack to avoid rebuilding PCMs
+        always_hack = test_case / '.ALWAYS'
+        always_hack.touch()
+
+        command = ['make']
+        if not logging.getLogger().isEnabledFor(logging.DEBUG):
+            command += ['-j64']
+        extra_env = {
+            'EXTRA_CFLAGS': '-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk -fno-crash-diagnostics -Xclang -fallow-pcm-with-compiler-errors -ferror-limit=0',
+            'CLANG': '/usr/local/google/home/emaxx/clang-toys/clang-fprint-deserialized-declarations',
+        }
         if logging.getLogger().isEnabledFor(logging.DEBUG):
-            logging.debug(f'stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
-        subprocess.run(['make', '-f', 'target.makefile', 'clean'], cwd=Path(test_case), stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
-        path_to_used = {}
+            logging.debug(f'generate_clang_pcm_lazy_load_hints: running: {shlex.join(command)}\nenv: {extra_env}')
+        proc = subprocess.run(command, cwd=test_case, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', env=os.environ.copy() | extra_env)
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f'generate_clang_pcm_lazy_load_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
+
+        extra_env['EXTRA_CFLAGS'] += f' -Xclang -print-deserialized-declarations-to-file={tmp.name}'
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f'generate_clang_pcm_lazy_load_hints: running: {shlex.join(command)}\nenv: {extra_env}')
+        proc = subprocess.run(command, cwd=test_case, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', env=os.environ.copy() | extra_env)
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f'generate_clang_pcm_lazy_load_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
+
+        always_hack.unlink()
+        command = ['make', 'clean']
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f'generate_clang_pcm_lazy_load_hints: running: {shlex.join(command)}')
+        subprocess.run(command, cwd=test_case, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
+
         if not Path(tmp.name).exists():
-            # Likely an old Clang version, before the switch was introduced.
-            return None
+            # Likely an old version of Clang, before the switch was introduced.
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f'generate_clang_pcm_lazy_load_hints: no out file created, exiting')
+            return []
+        path_to_used = {}
         with open(tmp.name) as f:
             file = None
             seg_from = None
@@ -740,7 +770,7 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
                     logging.debug(f'LINE {line.strip()}')
                 match = re.match(r'required lines in file: (.*)', line)
                 if match:
-                    file = Path(test_case) / match[1]
+                    file = test_case / match[1]
                     seg_from = None
                     seg_to = None
                 match = re.match(r'\s*from: (\d+)', line)
@@ -774,11 +804,14 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
     return hints
 
 def get_root_compile_command(test_case):
-    with open(Path(test_case) / 'target.makefile') as f:
+    with open(Path(test_case) / 'Makefile') as f:
         lines = f.readlines()
         for i, l in enumerate(lines):
             if '.o:' in l:
-                return lines[i+1].strip().lstrip('@').lstrip()
+                p = i + 1
+                while lines[p].strip().lstrip('@').lstrip().split()[0] in ('mkdir',):
+                    p += 1
+                return lines[p].strip().lstrip('@').lstrip()
         else:
             return None
 
@@ -790,14 +823,9 @@ def get_ordered_files_list(test_case, strategy):
     if strategy == 'size':
         return files, {}
 
-    with open(test_case / 'target.makefile') as f:
-        lines = f.readlines()
-        for i, l in enumerate(lines):
-            if '.o:' in l and i+1 < len(lines):
-                orig_command = lines[i+1].strip()
-                break
-        else:
-            orig_command = None
+    orig_command = get_root_compile_command(test_case)
+    if not orig_command:
+        return []
 
     root_file_candidates = list(test_case.rglob('*.cc'))
     root_file = root_file_candidates[0] if root_file_candidates else None
@@ -811,6 +839,8 @@ def get_ordered_files_list(test_case, strategy):
             '--',
             '-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk'] + orig_command
         path_and_depth = []
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f'get_ordered_files_list: running: {shlex.join(command)}')
         out = subprocess.check_output(command, cwd=test_case, stderr=subprocess.DEVNULL, encoding='utf-8')
         for line in out.splitlines():
             if not line.strip():
