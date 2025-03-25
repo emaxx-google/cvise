@@ -346,6 +346,8 @@ class GenericPass(AbstractPass):
 
 
 def append_unused_file_removal_hints(test_case, hints, files, file_to_id):
+    if not test_case.is_dir():
+        return
     mentioned_files = set(h['n'] for h in hints if h['t'].startswith('delfile::'))
     for file in files:
         if not file.is_dir() and not file.is_symlink() and (file_to_id[file] not in mentioned_files):
@@ -380,6 +382,8 @@ def generate_makefile_hints(test_case, files, file_to_id):
     token_to_locs = {}
 
     makefile_path = test_case / 'Makefile'
+    if not makefile_path.exists():
+        return []
     makefile_file_id = file_to_id[makefile_path]
     with open(makefile_path) as f:
         line_start_pos = 0
@@ -804,7 +808,10 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
     return hints
 
 def get_root_compile_command(test_case):
-    with open(Path(test_case) / 'Makefile') as f:
+    makefile_path = test_case / 'Makefile'
+    if not makefile_path.exists():
+        return None
+    with open(makefile_path) as f:
         lines = f.readlines()
         for i, l in enumerate(lines):
             if '.o:' in l:

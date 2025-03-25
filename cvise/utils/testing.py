@@ -142,7 +142,10 @@ class TestEnvironment:
             src = self.test_case_full_path[0] if isinstance(self.test_case_full_path, list) else self.test_case_full_path
             dest = self.folder / test_case.parent / os.path.basename(test_case)
             logging.debug(f'TestEnvironment.run: copy from {src} to {dest}')
-            shutil.copytree(src, dest, symlinks=True)
+            if src.is_dir():
+                shutil.copytree(src, dest, symlinks=True)
+            else:
+                shutil.copy2(src, dest)
             for origin in self.test_case_full_path if isinstance(self.test_case_full_path, list) else [self.test_case_full_path]:
                 for extra in self.extra_file_paths(origin):
                     logging.debug(f'TestEnvironment.run: copy from {extra} to {dest.parent}')
@@ -1181,7 +1184,10 @@ class TestManager:
             with tempfile.TemporaryDirectory(dir=self.current_test_case.parent) as tmp_dest:
                 tmp_dest_subdir = Path(tmp_dest) / self.current_test_case.name
                 logging.debug(f'process_result: copy from {test_env.test_case_path} to {tmp_dest_subdir}')
-                shutil.copytree(test_env.test_case_path, tmp_dest_subdir, symlinks=True)
+                if test_env.test_case_path.is_dir():
+                    shutil.copytree(test_env.test_case_path, tmp_dest_subdir, symlinks=True)
+                else:
+                    shutil.copy2(test_env.test_case_path, tmp_dest_subdir)
                 os.replace(self.current_test_case, Path(tmp_dest) / 'tmp_old')
                 os.replace(tmp_dest_subdir, self.current_test_case)
         except FileNotFoundError:
@@ -1226,7 +1232,10 @@ class SetupEnvironment:
 
     def execute(self):
         logging.debug(f'SetupEnvironment.execute: copy from {self.current_test_case_origin} to {self.test_case}')
-        shutil.copytree(self.current_test_case_origin, self.test_case, symlinks=True)
+        if self.current_test_case_origin.is_dir():
+            shutil.copytree(self.current_test_case_origin, self.test_case, symlinks=True)
+        else:
+            shutil.copy2(self.current_test_case_origin, self.test_case)
         return self.pass_.new(self.test_case, self.check_sanity, last_state_hint=self.last_state_hint, strategy=self.strategy)
 
     def check_sanity(self, verbose=False):
