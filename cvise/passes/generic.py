@@ -695,8 +695,14 @@ def generate_clang_delta_hints(test_case, files, file_to_id, transformation):
         str(test_case),
         '--warn-on-counter-out-of-bounds',
     ]
-    logging.debug(f'generate_clang_delta_hints: running: {shlex.join(command)}')
-    out = subprocess.check_output(command, stderr=subprocess.DEVNULL, encoding='utf-8')
+    if logging.getLogger().isEnabledFor(logging.DEBUG):
+        logging.debug(f'generate_clang_delta_hints: running: {shlex.join(command)}')
+    try:
+        out = subprocess.check_output(command, stderr=subprocess.DEVNULL, encoding='utf-8')
+    except subprocess.CalledProcessError:
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f'generate_clang_delta_hints: failed: stdout={out}')
+        return []
     hints = []
     file_id = file_to_id[test_case]
     for line in out.splitlines():
