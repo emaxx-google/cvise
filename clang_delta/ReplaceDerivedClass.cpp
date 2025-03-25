@@ -31,7 +31,7 @@ they require the same number of arguments for instantiation. \n";
 static RegisterTransformation<ReplaceDerivedClass>
          Trans("replace-derived-class", DescriptionMsg);
 
-class ReplaceDerivedClassASTVisitor : public 
+class ReplaceDerivedClassASTVisitor : public
   RecursiveASTVisitor<ReplaceDerivedClassASTVisitor> {
 
 public:
@@ -45,12 +45,12 @@ private:
   ReplaceDerivedClass *ConsumerInstance;
 };
 
-class ReplaceDerivedClassRewriteVisitor : public 
-  CommonRenameClassRewriteVisitor<ReplaceDerivedClassRewriteVisitor> 
+class ReplaceDerivedClassRewriteVisitor : public
+  CommonRenameClassRewriteVisitor<ReplaceDerivedClassRewriteVisitor>
 {
 public:
   ReplaceDerivedClassRewriteVisitor(Transformation *Instance,
-                                    Rewriter *RT,
+                                    CustomRewriter *RT,
                                     RewriteUtils *Helper,
                                     const CXXRecordDecl *CXXRD,
                                     const std::string &Name)
@@ -65,7 +65,7 @@ bool ReplaceDerivedClassASTVisitor::VisitCXXRecordDecl(CXXRecordDecl *CXXRD)
   return true;
 }
 
-void ReplaceDerivedClass::Initialize(ASTContext &context) 
+void ReplaceDerivedClass::Initialize(ASTContext &context)
 {
   Transformation::Initialize(context);
   CollectionVisitor = new ReplaceDerivedClassASTVisitor(this);
@@ -93,14 +93,14 @@ void ReplaceDerivedClass::HandleTranslationUnit(ASTContext &Ctx)
   TransAssert(TheBaseClass && "TheBaseClass is NULL!");
   Ctx.getDiagnostics().setSuppressAllDiagnostics(false);
 
-  RewriteVisitor = 
-    new ReplaceDerivedClassRewriteVisitor(this, &TheRewriter, RewriteHelper, 
+  RewriteVisitor =
+    new ReplaceDerivedClassRewriteVisitor(this, &TheRewriter, RewriteHelper,
                                           TheDerivedClass->getCanonicalDecl(),
                                           TheBaseClass->getNameAsString());
   TransAssert(RewriteVisitor && "NULL RewriteVisitor!");
   RewriteVisitor->TraverseDecl(Ctx.getTranslationUnitDecl());
   doRewrite();
- 
+
   if (Ctx.getDiagnostics().hasErrorOccurred() ||
       Ctx.getDiagnostics().hasFatalErrorOccurred())
     TransError = TransInternalError;
@@ -125,7 +125,7 @@ bool ReplaceDerivedClass::isValidBaseDerivedPair(const CXXRecordDecl *Base,
 
 bool ReplaceDerivedClass::isEmptyClass(const CXXRecordDecl *CXXDef)
 {
-  TransAssert(CXXDef->isThisDeclarationADefinition() && 
+  TransAssert(CXXDef->isThisDeclarationADefinition() &&
               "CXXDef must be a definition!");
   const DeclContext *Ctx = dyn_cast<DeclContext>(CXXDef);
   TransAssert(Ctx && "Invalid DeclContext!");
@@ -155,7 +155,7 @@ void ReplaceDerivedClass::handleOneCXXRecordDecl(const CXXRecordDecl *CXXRD)
     return;
 
   VisitedCXXRecordDecls.insert(CanonicalRD);
-  for (CXXRecordDecl::base_class_const_iterator I = 
+  for (CXXRecordDecl::base_class_const_iterator I =
        CanonicalRD->bases_begin(), E = CanonicalRD->bases_end(); I != E; ++I) {
     const CXXBaseSpecifier *BS = I;
     const Type *Ty = BS->getType().getTypePtr();
@@ -173,7 +173,7 @@ void ReplaceDerivedClass::handleOneCXXRecordDecl(const CXXRecordDecl *CXXRD)
 
 void ReplaceDerivedClass::doRewrite(void)
 {
-  if (const ClassTemplateDecl *TmplD = 
+  if (const ClassTemplateDecl *TmplD =
       TheDerivedClass->getDescribedClassTemplate()) {
     RewriteHelper->removeClassTemplateDecls(TmplD);
   }

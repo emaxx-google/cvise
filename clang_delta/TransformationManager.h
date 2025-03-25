@@ -31,9 +31,9 @@ public:
 
   static void Finalize();
 
-  static void registerTransformation(const char *TransName, 
+  static void registerTransformation(const char *TransName,
                                      Transformation *TransImpl);
-  
+
   static bool isCXXLangOpt();
 
   static bool isCLangOpt();
@@ -98,6 +98,10 @@ public:
     return QueryInstanceOnly;
   }
 
+  void setGenerateHintsFlag(bool Flag) {
+    GenerateHints = Flag;
+  }
+
   void setCXXStandard(const std::string &Str) {
     CXXStandard = Str;
     SetCXXStandard = true;
@@ -126,7 +130,7 @@ public:
   void printTransformationNames();
 
 private:
-  
+
   TransformationManager();
 
   ~TransformationManager();
@@ -156,6 +160,8 @@ private:
   clang::CompilerInstance *ClangInstance;
 
   bool QueryInstanceOnly;
+
+  bool GenerateHints = false;
 
   bool DoReplacement;
 
@@ -191,7 +197,7 @@ public:
   RegisterTransformation(const char *TransName, const char *Desc, Args... args) {
     Transformation *TransImpl = new TransformationClass(TransName, Desc, args...);
     assert(TransImpl && "Fail to create TransformationClass");
- 
+
     TransformationManager::registerTransformation(TransName, TransImpl);
   }
 

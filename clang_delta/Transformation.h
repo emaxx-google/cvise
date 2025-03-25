@@ -17,7 +17,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "clang/AST/ASTConsumer.h"
 #include "clang/AST/PrettyPrinter.h"
-#include "clang/Rewrite/Core/Rewriter.h"
+#include "CustomRewriter.h"
 #include "RewriteUtils.h"
 
 namespace clang {
@@ -92,8 +92,8 @@ public:
     // Nothing to do
   }
 
-  Transformation(const char *TransName, 
-                 const char *Desc, 
+  Transformation(const char *TransName,
+                 const char *Desc,
                  bool MultipleRewritesFlag)
     : Name(TransName),
       TransformationCounter(-1),
@@ -146,6 +146,11 @@ public:
     QueryInstanceOnly = Flag;
   }
 
+  void setGenerateHintsFlag(bool Flag) {
+    GenerateHints = Flag;
+    TheRewriter.setGenerateHintsFlag(GenerateHints);
+  }
+
   void setReplacement(const std::string &Str) {
     Replacement = Str;
     DoReplacement = true;
@@ -164,7 +169,7 @@ public:
   bool transSuccess() {
     return (TransError == TransSuccess);
   }
-  
+
   bool transMaxInstanceError() {
     return (TransError == TransMaxInstanceError);
   }
@@ -223,7 +228,7 @@ protected:
   const clang::Expr *getMemberExprElem(const clang::MemberExpr *ME);
 
   const clang::Expr *
-    getArrayBaseExprAndIdxs(const clang::ArraySubscriptExpr *ASE, 
+    getArrayBaseExprAndIdxs(const clang::ArraySubscriptExpr *ASE,
                             IndexVector &Idxs);
 
   const clang::Expr *getBaseExprAndIdxExprs(
@@ -252,17 +257,17 @@ protected:
   bool isCXXMemberExpr(const clang::MemberExpr *ME);
 
   const clang::FunctionDecl *lookupFunctionDecl(
-          clang::DeclarationName &DName, 
+          clang::DeclarationName &DName,
           const clang::DeclContext *Ctx,
           DeclContextSet &VisitedCtxs);
 
   const clang::FunctionDecl *lookupFunctionDeclFromCtx(
-          clang::DeclarationName &DName, 
+          clang::DeclarationName &DName,
           const clang::DeclContext *Ctx,
           DeclContextSet &VisitedCtxs);
 
   const clang::FunctionDecl *lookupFunctionDeclFromBases(
-          clang::DeclarationName &DName, 
+          clang::DeclarationName &DName,
           const clang::CXXRecordDecl *CXXRD,
           DeclContextSet &VisitedCtxs);
 
@@ -285,7 +290,7 @@ protected:
 
   bool isBeforeColonColon(clang::TypeLoc &Loc);
 
-  bool getTypeString(const clang::QualType &QT, 
+  bool getTypeString(const clang::QualType &QT,
                      std::string &Str,
                      bool &Typename);
 
@@ -340,16 +345,18 @@ protected:
 
   bool QueryInstanceOnly;
 
+  bool GenerateHints = false;
+
   clang::ASTContext *Context;
 
   clang::SourceManager *SrcManager;
 
   clang::Preprocessor *PP;
 
-  clang::Rewriter TheRewriter;
+  CustomRewriter TheRewriter;
 
   TransformationError TransError;
-  
+
   std::string DescriptionString;
 
   RewriteUtils *RewriteHelper;

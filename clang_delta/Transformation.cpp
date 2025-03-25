@@ -97,6 +97,14 @@ void Transformation::Initialize(ASTContext &context)
 
 void Transformation::outputTransformedSource(llvm::raw_ostream &OutStream)
 {
+  if (GenerateHints) {
+    for (const auto& hint : TheRewriter.GetHints()) {
+      OutStream << hint << "\n";
+    }
+    OutStream.flush();
+    return;
+  }
+
   FileID MainFileID = SrcManager->getMainFileID();
 #if LLVM_VERSION_MAJOR >= 20
   const llvm::RewriteBuffer
@@ -113,6 +121,9 @@ void Transformation::outputTransformedSource(llvm::raw_ostream &OutStream)
 
 void Transformation::outputOriginalSource(llvm::raw_ostream &OutStream)
 {
+  if (GenerateHints)
+    return;
+
   FileID MainFileID = SrcManager->getMainFileID();
 #if LLVM_VERSION_MAJOR >= 16
   std::optional<llvm::MemoryBufferRef> MainBuf =
@@ -478,7 +489,7 @@ const Type *Transformation::getBasePointerElemType(const Type *Ty)
 
 int Transformation::getIndexAsInteger(const Expr *E)
 {
-  Expr::EvalResult Result; 
+  Expr::EvalResult Result;
   if (!E->EvaluateAsInt(Result, *Context))
     TransAssert(0 && "Failed to Evaluate index!");
 

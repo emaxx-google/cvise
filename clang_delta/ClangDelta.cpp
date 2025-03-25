@@ -154,6 +154,14 @@ static void HandleOneArgValue(const std::string &ArgValueStr, size_t SepPos)
     TransMgr->setQueryInstanceFlag(true);
     TransMgr->setTransformationCounter(1);
   }
+  else if (!ArgName.compare("generate-hints")) {
+    if (TransMgr->setTransformation(ArgValue)) {
+      Die("Invalid transformation[" + ArgValue + "]");
+    }
+    TransMgr->setGenerateHintsFlag(true);
+    TransMgr->setTransformationCounter(1);
+    TransMgr->setToCounter(std::numeric_limits<int>::max());
+  }
   else if (!ArgName.compare("counter")) {
     int Val;
     std::stringstream TmpSS(ArgValue);
@@ -267,7 +275,7 @@ int main(int argc, char **argv)
     Die(ErrorMsg);
   }
 
-  if (TransMgr->getQueryInstanceFlag()) 
+  if (TransMgr->getQueryInstanceFlag())
     TransMgr->outputNumTransformationInstances();
   if (TransMgr->getReportInstancesCount())
     TransMgr->outputNumTransformationInstancesToStderr();

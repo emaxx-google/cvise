@@ -35,7 +35,7 @@ code shown as below: \n\
 static RegisterTransformation<RenameClass>
          Trans("rename-class", DescriptionMsg);
 
-class RenameClassASTVisitor : public 
+class RenameClassASTVisitor : public
   RecursiveASTVisitor<RenameClassASTVisitor> {
 
 public:
@@ -50,12 +50,12 @@ private:
 
 };
 
-class RenameClassRewriteVisitor : public 
+class RenameClassRewriteVisitor : public
   CommonRenameClassRewriteVisitor<RenameClassRewriteVisitor>
 {
 public:
   RenameClassRewriteVisitor(Transformation *Instance,
-                            Rewriter *RT,
+                            CustomRewriter *RT,
                             RewriteUtils *Helper,
                             const CXXRecordDecl *CXXRD,
                             const std::string &Name)
@@ -70,7 +70,7 @@ bool RenameClassASTVisitor::VisitCXXRecordDecl(CXXRecordDecl *CXXRD)
   return true;
 }
 
-void RenameClass::Initialize(ASTContext &context) 
+void RenameClass::Initialize(ASTContext &context)
 {
   Transformation::Initialize(context);
   CollectionVisitor = new RenameClassASTVisitor(this);
@@ -101,7 +101,7 @@ void RenameClass::HandleTranslationUnit(ASTContext &Ctx)
 
   Ctx.getDiagnostics().setSuppressAllDiagnostics(false);
 
-  RewriteVisitor = 
+  RewriteVisitor =
     new RenameClassRewriteVisitor(this, &TheRewriter, RewriteHelper,
                                   TheCXXRecordDecl, NewNameStr);
 
@@ -223,7 +223,7 @@ void RenameClass::analyzeOneRecordDecl(const CXXRecordDecl *CXXRD)
   }
 
   unsigned Level = 0;
-  for (CXXRecordDecl::base_class_const_iterator I = 
+  for (CXXRecordDecl::base_class_const_iterator I =
        CanonicalRD->bases_begin(), E = CanonicalRD->bases_end(); I != E; ++I) {
 
     const CXXBaseSpecifier *BS = I;
@@ -239,7 +239,7 @@ void RenameClass::analyzeOneRecordDecl(const CXXRecordDecl *CXXRD)
       continue;
 
     unsigned BaseLevel;
-    RecordToInheritanceLevelMap::iterator LI = 
+    RecordToInheritanceLevelMap::iterator LI =
       RecordToLevel.find(CanonicalBase);
 
     if (LI == RecordToLevel.end()) {

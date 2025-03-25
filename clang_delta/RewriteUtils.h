@@ -15,6 +15,7 @@
 #include "clang/Basic/SourceLocation.h"
 #include "clang/AST/NestedNameSpecifier.h"
 #include "clang/AST/DeclTemplate.h"
+#include "CustomRewriter.h"
 
 #ifndef ENABLE_TRANS_ASSERT
   #define TransAssert(x) {if (!(x)) exit(-1);}
@@ -27,7 +28,6 @@ namespace clang {
   class VarDecl;
   class Decl;
   class DeclStmt;
-  class Rewriter;
   class SourceManager;
   class CallExpr;
   class Expr;
@@ -55,7 +55,7 @@ namespace clang {
 
 class RewriteUtils {
 public:
-  static RewriteUtils *GetInstance(clang::Rewriter *RW);
+  static RewriteUtils *GetInstance(CustomRewriter *RW);
 
   static void Finalize(void);
 
@@ -67,31 +67,31 @@ public:
 
   bool removeArgFromCallExpr(const clang::CallExpr *CallE,
                              int ParamPos);
-                                    
+
   bool removeArgFromCXXConstructExpr(const clang::CXXConstructExpr *CE,
                                      int ParamPos);
-                                    
+
   bool removeVarFromDeclStmt(clang::DeclStmt *DS,
                                     const clang::VarDecl *VD,
                                     clang::Decl *PrevDecl,
                                     bool IsFirstDecl,
                                     bool *StmtRemoved);
 
-  bool getExprString(const clang::Expr *E, 
+  bool getExprString(const clang::Expr *E,
                             std::string &ES);
 
-  bool getStmtString(const clang::Stmt *S, 
+  bool getStmtString(const clang::Stmt *S,
                             std::string &Str);
 
-  bool replaceExpr(const clang::Expr *E, 
+  bool replaceExpr(const clang::Expr *E,
                           const std::string &ES);
 
-  bool replaceExprNotInclude(const clang::Expr *E, 
+  bool replaceExprNotInclude(const clang::Expr *E,
                           const std::string &ES);
 
   bool addLocalVarToFunc(const std::string &VarStr,
                                 clang::FunctionDecl *FD);
-                                 
+
   std::string getStmtIndentString(clang::Stmt *S,
                                          clang::SourceManager *SrcManager);
 
@@ -110,7 +110,7 @@ public:
                                   const std::string &ExprStr,
                                   bool NeedParen);
 
-  bool addStringAfterStmt(clang::Stmt *AfterStmt, 
+  bool addStringAfterStmt(clang::Stmt *AfterStmt,
                                  const std::string &Str);
 
   bool addStringAfterVarDecl(const clang::VarDecl *VD,
@@ -136,15 +136,15 @@ public:
 
   const char *getTmpVarNamePrefix(void);
 
-  void getStringBetweenLocs(std::string &Str, 
+  void getStringBetweenLocs(std::string &Str,
                             clang::SourceLocation LocStart,
                             clang::SourceLocation LocEnd);
 
-  void getStringBetweenLocsAfterStart(std::string &Str, 
+  void getStringBetweenLocsAfterStart(std::string &Str,
                                       clang::SourceLocation LocStart,
                                       clang::SourceLocation LocEnd);
 
-  bool getDeclGroupStrAndRemove(clang::DeclGroupRef DGR, 
+  bool getDeclGroupStrAndRemove(clang::DeclGroupRef DGR,
                                        std::string &Str);
 
   bool getEntireDeclGroupStrAndRemove(clang::DeclGroupRef DGR,
@@ -152,7 +152,7 @@ public:
 
   clang::SourceLocation getDeclGroupRefEndLoc(clang::DeclGroupRef DGR);
 
-  bool getDeclStmtStrAndRemove(clang::DeclStmt *DS, 
+  bool getDeclStmtStrAndRemove(clang::DeclStmt *DS,
                                       std::string &Str);
 
   clang::SourceLocation getDeclStmtEndLoc(clang::DeclStmt *DS);
@@ -233,7 +233,7 @@ public:
 
   bool removeSpecifier(clang::NestedNameSpecifierLoc Loc);
 
-  bool replaceSpecifier(clang::NestedNameSpecifierLoc Loc, 
+  bool replaceSpecifier(clang::NestedNameSpecifierLoc Loc,
                         const std::string &Name);
 
   void getQualifierAsString(clang::NestedNameSpecifierLoc Loc,
@@ -256,7 +256,7 @@ public:
 
   bool removeTextUntil(clang::SourceRange Range, char C);
 
-  bool replaceCXXDestructorDeclName(const clang::CXXDestructorDecl *DtorDecl, 
+  bool replaceCXXDestructorDeclName(const clang::CXXDestructorDecl *DtorDecl,
                                     const std::string &Name);
 
   bool removeCXXCtorInitializer(const clang::CXXCtorInitializer *Init,
@@ -290,7 +290,7 @@ private:
 
   static const char *TmpVarNamePrefix;
 
-  clang::Rewriter *TheRewriter;
+  CustomRewriter *TheRewriter;
 
   clang::SourceManager *SrcManager;
 
@@ -316,8 +316,8 @@ private:
 
   clang::SourceLocation getVarDeclTypeLocBegin(const clang::VarDecl *VD);
 
-  clang::SourceLocation 
-    getParamSubstringLocation(clang::SourceLocation StartLoc, size_t Size, 
+  clang::SourceLocation
+    getParamSubstringLocation(clang::SourceLocation StartLoc, size_t Size,
                          const std::string &Substr);
 
   void indentAfterNewLine(llvm::StringRef Str,
@@ -338,7 +338,7 @@ private:
                                            clang::SourceLocation OrigEndLoc,
                                            clang::SourceLocation VarStartLoc);
 
-  void skipRangeByType(const std::string &BufStr, 
+  void skipRangeByType(const std::string &BufStr,
                        const clang::Type *Ty, int &Offset);
 
   bool removeArgFromExpr(const clang::Expr *E, int ParamPos);

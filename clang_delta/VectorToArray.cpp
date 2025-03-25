@@ -120,7 +120,7 @@ public:
     if (VD != Consumer->TheVarDecl)
       return true;
 
-    Rewriter &TheRewriter = Consumer->TheRewriter;
+    CustomRewriter &TheRewriter = Consumer->TheRewriter;
     const SourceManager &SM = TheRewriter.getSourceMgr();
 
     SourceLocation NameLoc = VD->getLocation();

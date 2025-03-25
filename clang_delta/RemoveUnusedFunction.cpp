@@ -288,6 +288,8 @@ void RemoveUnusedFunction::HandleTranslationUnit(ASTContext &Ctx)
 
   if (!checkCounterValidity())
     return;
+  if (!ValidInstanceNum)
+    return;
 
   Ctx.getDiagnostics().setSuppressAllDiagnostics(false);
 
@@ -656,6 +658,8 @@ void RemoveUnusedFunction::removeMemberSpecializations(const FunctionDecl *FD)
 
 void RemoveUnusedFunction::removeOneFunctionDeclGroup(const FunctionDecl *FD)
 {
+  TheRewriter.StartNewHintGroup();
+
   for (FunctionDecl::redecl_iterator RI = FD->redecls_begin(),
        RE = FD->redecls_end(); RI != RE; ++RI) {
     const FunctionDecl *FDecl = (*RI);

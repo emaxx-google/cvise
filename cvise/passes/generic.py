@@ -20,6 +20,12 @@ import pebble
 INCLUDE_DEPTH_TOOL = Path(__file__).resolve().parent.parent / 'calc-include-depth/calc-include-depth'
 INCLUSION_GRAPH_TOOL = Path(__file__).resolve().parent.parent / 'inclusion-graph/inclusion-graph'
 TOPFORMFLAT_TOOL = Path(__file__).resolve().parent.parent.parent / 'delta/topformflat'
+CLANG_DELTA_TOOL = Path(__file__).resolve().parent.parent.parent / 'clang_delta/clang_delta'
+
+CLANG_DELTA_TRANSFORMATIONS = (
+    'replace-function-def-with-decl',
+    'remove-unused-function',
+)
 
 success_histories = {}
 type_to_successes_gen = None
@@ -157,6 +163,8 @@ class GenericPass(AbstractPass):
             futures.append(pool.schedule(functools.partial(generate_clang_pcm_lazy_load_hints, test_case, files, file_to_id)))
             futures.append(pool.schedule(functools.partial(generate_line_hints, test_case, files, file_to_id)))
             futures.append(pool.schedule(functools.partial(generate_topformflat_hints, test_case, files, file_to_id)))
+            for transformation in CLANG_DELTA_TRANSFORMATIONS:
+                futures.append(pool.schedule(functools.partial(generate_clang_delta_hints, test_case, files, file_to_id, transformation)))
             for f in futures:
                 hints += f.result()
 
@@ -199,8 +207,14 @@ class GenericPass(AbstractPass):
                     logging.debug(f'    in {files[c["f"]]}:')
                     with open(files[c["f"]]) as f:
                         contents = f.read()
-                    dbg = contents[c['l']:c['r']].replace('\n', '\\n')
-                    logging.debug(f'       {c["l"]}..{c["r"]}: "{dbg}"')
+                    if 'v' in c:
+                        dbg1 = contents[max(0, c['l'] - 10): c['l']].replace('\n', '\\n')
+                        dbg2 = contents[c['l']:c['r']].replace('\n', '\\n')
+                        dbg3 = contents[c['r']: min(len(contents), c['r'] + 10)].replace('\n', '\\n')
+                        logging.debug(f'       REP {c["l"]}..{c["r"]} with "{c["v"]}": "{dbg1}" >>> "{dbg2}" <<< "{dbg3}"')
+                    else:
+                        dbg = contents[c['l']:c['r']].replace('\n', '\\n')
+                        logging.debug(f'       DEL {c["l"]}..{c["r"]}: "{dbg}"')
 
         with gzip.open(self.extra_file_path, 'wt') as f:
             f.write(dump_json([str(f.relative_to(test_case)) for f in files]))
@@ -342,6 +356,8 @@ class GenericPass(AbstractPass):
         for chunks in file_to_edits.values():
             for s in merge_chunks(chunks):
                 improv += s['r'] - s['l']
+                if 'v' in s:
+                    improv -= len(s['v'])
         return improv, len(files_for_deletion)
 
 
@@ -359,21 +375,23 @@ def append_unused_file_removal_hints(test_case, hints, files, file_to_id):
                     'multi': [],
                 })
 
-def edit_file(file, chunks_to_delete):
+def edit_file(file, chunks):
     with open(file) as f:
         data = f.read()
-    merged = merge_chunks(chunks_to_delete)
+    merged = merge_chunks(chunks)
     new_data = ''
     ptr = 0
     for c in merged:
         new_data += data[ptr:c['l']]
+        if 'v' in c:
+            new_data += c['v']
         ptr = c['r']
     new_data += data[ptr:]
     if logging.getLogger().isEnabledFor(logging.DEBUG):
         logging.debug(f'file={file} before:\n{data}\nafter:\n{new_data}')
     with open(file, 'w') as f:
         f.write(new_data)
-    return sum(c['r'] - c['l'] for c in merged)
+    return len(data) - len(new_data)
 
 def generate_makefile_hints(test_case, files, file_to_id):
     targets = {}
@@ -667,6 +685,33 @@ def generate_topformflat_hints(test_case, files, file_to_id):
                 hints_at_prev_depth = len(current_hints)
     return hints
 
+def generate_clang_delta_hints(test_case, files, file_to_id, transformation):
+    if test_case.is_dir():
+        return []
+
+    command = [
+        str(CLANG_DELTA_TOOL),
+        f'--generate-hints={transformation}',
+        str(test_case),
+        '--warn-on-counter-out-of-bounds',
+    ]
+    logging.debug(f'generate_clang_delta_hints: running: {shlex.join(command)}')
+    out = subprocess.check_output(command, stderr=subprocess.DEVNULL, encoding='utf-8')
+    hints = []
+    file_id = file_to_id[test_case]
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        h = json.loads(line)
+        h['t'] = f'clang::{transformation}'
+        if 'multi' in h:
+            for l in h['multi']:
+                l['f'] = file_id
+        else:
+            h['f'] = file_id
+        hints.append(h)
+    return hints
+
 def generate_inclusion_directive_hints(test_case, files, file_to_id):
     if not test_case.is_dir():
         return []
@@ -700,7 +745,6 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id):
         '--',
         '-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk'] + orig_command
     logging.debug(f'generate_inclusion_directive_hints: running: {shlex.join(command)}')
-    path_and_depth = []
     out = subprocess.check_output(command, cwd=test_case, stderr=subprocess.DEVNULL, encoding='utf-8')
     hints = []
     for line in out.splitlines():
@@ -876,34 +920,50 @@ def assert_valid_hint(h, files):
         assert h['t'] != 'fileref'
         if h['t'].startswith('delfile::'):
             assert isinstance(h['n'], int)
-        if 'l' in h or 'r' in h or 'f' in h:
+        if 'l' in h or 'r' in h or 'v' in h:
             assert 'multi' not in h
+            assert 'f' in h
             assert isinstance(h['f'], int)
             assert 0 <= h['f'] < len(files)
+            assert 'l' in h
             assert isinstance(h['l'], int)
             assert 0 <= h['l']
+            assert 'r' in h
             assert isinstance(h['r'], int)
-            assert h['l'] < h['r']
-        else:
+            assert h['l'] <= h['r']
+            if 'v' in h:
+                assert isinstance(h['v'], str)
+        elif 'multi' in h:
             for l in h['multi']:
                 assert isinstance(l, dict)
+                assert 'multi' not in l
+                assert 'f' in l
                 assert isinstance(l['f'], int)
                 assert 0 <= l['f'] < len(files)
+                assert 'l' in l
                 assert isinstance(l['l'], int)
                 assert 0 <= l['l']
+                assert 'r' in l
                 assert isinstance(l['r'], int)
-                assert l['l'] < l['r']
+                assert l['l'] <= l['r']
+                if 'v' in l:
+                    assert isinstance(l['v'], str)
+        else:
+            assert False
     except AssertionError as e:
         raise RuntimeError(f'Invalid hint: {h}')
 
 def get_hint_locs(hint):
     if 'multi' in hint:
         return hint['multi']
-    return [{
+    l = {
         'f': hint['f'],
         'l': hint['l'],
         'r': hint['r'],
-    }]
+    }
+    if 'v' in hint:
+        l['v'] = hint['v']
+    return [l]
 
 def set_hint_locs(hint, locs):
     if len(locs) == 1:
@@ -916,8 +976,8 @@ def set_hint_locs(hint, locs):
 
 def merge_chunks(chunks):
     result = []
-    for c in sorted(chunks, key=lambda c: c['l']):
-        if result and result[-1]['r'] >= c['l']:
+    for c in sorted(chunks, key=lambda c: (c['l'], 'v' in c)):
+        if result and result[-1]['r'] > c['l']:
             result[-1]['r'] = max(result[-1]['r'], c['r'])
         else:
             result.append(c)
