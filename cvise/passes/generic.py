@@ -9,6 +9,7 @@ from pathlib import Path
 import random
 import re
 import shlex
+import shutil
 import subprocess
 import tempfile
 import types
@@ -468,9 +469,7 @@ def generate_makefile_hints(test_case, files, file_to_id):
         full_path = test_case / path
         if not full_path.exists() or full_path.suffix in ('.cc',):
             continue
-        if full_path.suffix in ('.pcm', '.o', '.tmp'):
-            continue  # TODO: solve concurrency
-        assert full_path.suffix != '.pcm', f'path={path} full_path={full_path} full_path.exists()={full_path.exists()}'
+        assert full_path.suffix not in ('.pcm', '.o', '.tmp', '.ALWAYS')
         chunks = []
         chunks += file_mentions.get(path, [])
         for target_name in file_to_generating_targets.get(path, []):
@@ -763,63 +762,61 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
     if not orig_command:
         return []
 
-    with tempfile.NamedTemporaryFile() as tmp:
-        # Hack to avoid rebuilding PCMs
-        always_hack = test_case / '.ALWAYS'
-        always_hack.touch()
+    with tempfile.NamedTemporaryFile() as tmp_dump:
+        with tempfile.TemporaryDirectory(prefix='cvise-clanglazypcm') as tmp_for_copy:
+            tmp_copy = Path(tmp_for_copy) / test_case.name
+            shutil.copytree(test_case, tmp_copy, symlinks=True)
 
-        command = ['make']
-        if not logging.getLogger().isEnabledFor(logging.DEBUG):
-            command += ['-j64']
-        extra_env = {
-            'EXTRA_CFLAGS': '-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk -fno-crash-diagnostics -Xclang -fallow-pcm-with-compiler-errors -ferror-limit=0',
-            'CLANG': '/usr/local/google/home/emaxx/clang-toys/clang-fprint-deserialized-declarations',
-        }
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            logging.debug(f'generate_clang_pcm_lazy_load_hints: running: {shlex.join(command)}\nenv: {extra_env}')
-        proc = subprocess.run(command, cwd=test_case, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', env=os.environ.copy() | extra_env)
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            logging.debug(f'generate_clang_pcm_lazy_load_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
+            # Hack to avoid rebuilding PCMs
+            (tmp_copy / '.ALWAYS').touch()
 
-        extra_env['EXTRA_CFLAGS'] += f' -Xclang -print-deserialized-declarations-to-file={tmp.name}'
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            logging.debug(f'generate_clang_pcm_lazy_load_hints: running: {shlex.join(command)}\nenv: {extra_env}')
-        proc = subprocess.run(command, cwd=test_case, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', env=os.environ.copy() | extra_env)
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            logging.debug(f'generate_clang_pcm_lazy_load_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
-
-        always_hack.unlink()
-        command = ['make', 'clean']
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            logging.debug(f'generate_clang_pcm_lazy_load_hints: running: {shlex.join(command)}')
-        subprocess.run(command, cwd=test_case, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
-
-        if not Path(tmp.name).exists():
-            # Likely an old version of Clang, before the switch was introduced.
+            command = ['make']
+            if not logging.getLogger().isEnabledFor(logging.DEBUG):
+                command += ['-j64']
+            extra_env = {
+                'EXTRA_CFLAGS': '-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk -fno-crash-diagnostics -Xclang -fallow-pcm-with-compiler-errors -ferror-limit=0',
+                'CLANG': '/usr/local/google/home/emaxx/clang-toys/clang-fprint-deserialized-declarations',
+            }
             if logging.getLogger().isEnabledFor(logging.DEBUG):
-                logging.debug(f'generate_clang_pcm_lazy_load_hints: no out file created, exiting')
-            return []
-        path_to_used = {}
-        with open(tmp.name) as f:
-            file = None
-            seg_from = None
-            for line in f:
+                logging.debug(f'generate_clang_pcm_lazy_load_hints: running: {shlex.join(command)}\nenv: {extra_env}')
+            proc = subprocess.run(command, cwd=tmp_copy, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', env=os.environ.copy() | extra_env)
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f'generate_clang_pcm_lazy_load_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
+
+            extra_env['EXTRA_CFLAGS'] += f' -Xclang -print-deserialized-declarations-to-file={tmp_dump.name}'
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f'generate_clang_pcm_lazy_load_hints: running: {shlex.join(command)}\nenv: {extra_env}')
+            proc = subprocess.run(command, cwd=tmp_copy, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', env=os.environ.copy() | extra_env)
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f'generate_clang_pcm_lazy_load_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
+
+            if not Path(tmp_dump.name).exists():
+                # Likely an old version of Clang, before the switch was introduced.
                 if logging.getLogger().isEnabledFor(logging.DEBUG):
-                    logging.debug(f'LINE {line.strip()}')
-                match = re.match(r'required lines in file: (.*)', line)
-                if match:
-                    file = test_case / match[1]
-                    seg_from = None
-                    seg_to = None
-                match = re.match(r'\s*from: (\d+)', line)
-                if match:
-                    seg_from = int(match[1])
-                    seg_to = None
-                match = re.match(r'\s*to: (\d+)', line)
-                if match:
-                    seg_to = int(match[1])
-                if file and seg_from and seg_to:
-                    path_to_used.setdefault(file, []).append((seg_from-1, seg_to-1))
+                    logging.debug(f'generate_clang_pcm_lazy_load_hints: no out file created, exiting')
+                return []
+            path_to_used = {}
+            with open(tmp_dump.name) as f:
+                file = None
+                seg_from = None
+                for line in f:
+                    if logging.getLogger().isEnabledFor(logging.DEBUG):
+                        logging.debug(f'LINE {line.strip()}')
+                    match = re.match(r'required lines in file: (.*)', line)
+                    if match:
+                        file_rel = (tmp_copy / match[1]).relative_to(tmp_copy)
+                        file = test_case / file_rel
+                        seg_from = None
+                        seg_to = None
+                    match = re.match(r'\s*from: (\d+)', line)
+                    if match:
+                        seg_from = int(match[1])
+                        seg_to = None
+                    match = re.match(r'\s*to: (\d+)', line)
+                    if match:
+                        seg_to = int(match[1])
+                    if file and seg_from and seg_to:
+                        path_to_used.setdefault(file, []).append((seg_from-1, seg_to-1))
 
     hints = []
     for file, segs in path_to_used.items():
@@ -940,6 +937,7 @@ def get_ordered_files_list(test_case, strategy):
         return [test_case], {test_case: 0}
 
     files = [f for f in Path(test_case).rglob('*') if not f.is_dir() and not f.is_symlink()]
+    assert all(f.suffix not in ('.pcm', '.o', '.tmp') and f.name != '.ALWAYS' for f in files), f'{files}'
     if strategy == 'size':
         return files, {}
 
