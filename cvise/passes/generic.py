@@ -24,8 +24,15 @@ TOPFORMFLAT_TOOL = Path(__file__).resolve().parent.parent.parent / 'delta/topfor
 CLANG_DELTA_TOOL = Path(__file__).resolve().parent.parent.parent / 'clang_delta/clang_delta'
 
 success_histories = {}
-type_to_successes_gen = None
 type_to_successes = {}
+
+
+def get_type_to_successes(pass_repr, generation):
+    d = type_to_successes.setdefault(pass_repr, {})
+    if d.get('gen') != generation:
+        d['gen'] = generation
+        d['value'] = {}
+    return d['value']
 
 
 class PolyState(dict):
@@ -35,6 +42,7 @@ class PolyState(dict):
     @staticmethod
     def create(instances, strategy, depth_to_instances, pass_repr):
         self = PolyState()
+        self.pass_repr = pass_repr
         self.types = list(sorted(instances.keys()))
         self.instances = instances
         for k, i in instances.items():
@@ -49,6 +57,7 @@ class PolyState(dict):
     @staticmethod
     def create_from_hint(instances, strategy, last_state_hint, depth_to_instances, pass_repr):
         self = PolyState()
+        self.pass_repr = pass_repr
         self.types = list(instances.keys())
         self.instances = instances
         for k, i in instances.items():
@@ -64,11 +73,7 @@ class PolyState(dict):
         return self
 
     def advance(self, success_histories):
-        global type_to_successes_gen
-        global type_to_successes
-        if type_to_successes_gen != self.generation:
-            type_to_successes_gen = self.generation
-            type_to_successes = {}
+        type_to_successes = get_type_to_successes(self.pass_repr, self.generation)
 
         new = copy.copy(self)
         while True:
@@ -94,11 +99,7 @@ class PolyState(dict):
         history = self[self.types[self.ptr]].get_success_history(success_histories)
         history.append(self.end() - self.begin())
 
-        global type_to_successes_gen
-        global type_to_successes
-        if type_to_successes_gen != self.generation:
-            type_to_successes_gen = self.generation
-            type_to_successes = {}
+        type_to_successes = get_type_to_successes(self.pass_repr, self.generation)
         type_to_successes.setdefault(self.types[self.ptr], []).append((
             self[self.types[self.ptr]].begin(),
             self[self.types[self.ptr]].end()))
