@@ -320,6 +320,7 @@ class TestManager:
         self.cache = {}
         self.roots = []
         self.states = []
+        self.init_states = []
         if not self.is_valid_test(self.test_script):
             raise InvalidInterestingnessTestError(self.test_script)
 
@@ -576,6 +577,7 @@ class TestManager:
                     p = self.current_passes[pass_id]
                     logging.debug(f'Init completed for {p}')
                     self.states[pass_id] = state
+                    self.init_states[pass_id] = state
                 else:
                     test_env = future.result()
                     opass = self.current_pass
@@ -810,12 +812,28 @@ class TestManager:
                         self.terminate_all(pool)
                         return best_success_env
 
-                if any(s == 'needinit' for s in self.states):
-                    pass_id = self.states.index('needinit')
+                pass_id_to_init = None
+                meta_pass_id_to_init = None
+                all_non_meta_passes_inited = True
+                for i, s in enumerate(self.states):
+                    is_meta_pass = passes[i].arg and passes[i].arg.startswith('meta::')
+                    if not is_meta_pass and s in ('needinit', 'initializing'):
+                        all_non_meta_passes_inited = False
+                    if s == 'needinit':
+                        if is_meta_pass and meta_pass_id_to_init is None:
+                            meta_pass_id_to_init = i
+                        if not is_meta_pass and pass_id_to_init is None:
+                            pass_id_to_init = i
+                if logging.getLogger().isEnabledFor(logging.DEBUG):
+                    logging.debug(f'pass_id_to_init={pass_id_to_init} meta_pass_id_to_init={meta_pass_id_to_init} all_non_meta_passes_inited={all_non_meta_passes_inited} states={self.states}')
+                if pass_id_to_init is None and meta_pass_id_to_init is not None and all_non_meta_passes_inited:
+                    pass_id_to_init = meta_pass_id_to_init
+                if pass_id_to_init is not None:
+                    pass_id = pass_id_to_init
                     pass_ = passes[pass_id]
                     logging.debug(f'Going to init pass {pass_}')
                     self.states[pass_id] = 'initializing'
-                    env = SetupEnvironment(pass_, self.current_test_case, self.test_cases, self.save_temps, self.last_state_hint[pass_id], strategy=self.strategy)
+                    env = SetupEnvironment(pass_, self.current_test_case, self.test_cases, self.save_temps, self.last_state_hint[pass_id], strategy=self.strategy, other_init_states=self.init_states)
                     future = pool.schedule(env.execute, timeout=self.timeout)
                     future.is_init = True
                     future.pass_id = pass_id
@@ -1175,6 +1193,7 @@ class TestManager:
     def init_all_passes(self, passes):
         self.states = ['needinit' if not p.strategy or p.strategy == self.strategy else None
                        for p in passes]
+        self.init_states = [None] * len(passes)
 
     def process_result(self, test_env):
         if self.print_diff:
@@ -1223,13 +1242,14 @@ class TestManager:
 
 
 class SetupEnvironment:
-    def __init__(self, pass_, test_case, test_cases, save_temps, last_state_hint, strategy):
+    def __init__(self, pass_, test_case, test_cases, save_temps, last_state_hint, strategy, other_init_states):
         self.pass_ = pass_
         self.test_case = test_case
         self.test_cases = test_cases
         self.save_temps = save_temps
         self.last_state_hint = last_state_hint
         self.strategy = strategy
+        self.other_init_states = other_init_states
 
     def execute(self):
-        return self.pass_.new(self.test_case, last_state_hint=self.last_state_hint, strategy=self.strategy)
+        return self.pass_.new(self.test_case, last_state_hint=self.last_state_hint, strategy=self.strategy, other_init_states=self.other_init_states)

@@ -140,7 +140,7 @@ class GenericPass(AbstractPass):
     def supports_merging(self):
         return True
 
-    def new(self, test_case, check_sanity=None, last_state_hint=None, strategy=None):
+    def new(self, test_case, check_sanity=None, last_state_hint=None, strategy=None, other_init_states=None):
         test_case = Path(test_case)
 
         files, path_to_depth = get_ordered_files_list(test_case, strategy)
@@ -167,6 +167,8 @@ class GenericPass(AbstractPass):
             hints = generate_clang_delta_hints(test_case, files, file_to_id, self.arg.partition('::')[2])
         elif self.arg == 'line_markers':
             hints = generate_line_markers_hints(test_case, files, file_to_id)
+        elif self.arg == 'meta::delete-file':
+            hints = generate_delete_file_hints(test_case, files, file_to_id, other_init_states)
         else:
             raise RuntimeError(f'Unknown hint source: arg={self.arg}')
 
@@ -181,8 +183,6 @@ class GenericPass(AbstractPass):
             d = path_to_depth.get(hint_main_file(h), max_depth + 1) if strategy == 'topo' else 0
             return h['t'], d, file
 
-        # hints = regroup_hints(hints)
-        # append_unused_file_removal_hints(test_case, hints, files, file_to_id)
         for h in hints:
             assert_valid_hint(h, files)
         hints.sort(key=hint_comparison_key)
@@ -200,7 +200,7 @@ class GenericPass(AbstractPass):
         for h in hints:
             d = path_to_depth.get(hint_main_file(h), max_depth + 1)
             depth_to_instances[d] += 1
-        logging.info(f'Generated hints for arg={self.arg}: len(hints)={instances}')
+        logging.info(f'Generated hints for arg={self.arg}: {instances}')
 
         if logging.getLogger().isEnabledFor(logging.DEBUG) and False:
             for hint in hints:
@@ -250,45 +250,13 @@ class GenericPass(AbstractPass):
         if not isinstance(state, list):
             state.on_success_observed()
 
-    @staticmethod
-    def load_hints(state_list, test_case):
-        hints_to_load = {}
-        for s in state_list:
-            set_for_file = hints_to_load.setdefault(s.extra_file_path, set())
-            set_for_file |= set(range(s.begin(), s.end()))
-
-        hints = []
-        for extra_file_path, hint_ids in hints_to_load.items():
-            min_hint_id = min(hint_ids)
-            max_hint_id = max(hint_ids)
-            with gzip.open(extra_file_path, 'rt') as f:
-                files = json.loads(next(f))
-                files = [test_case / f for f in files]
-                path_to_depth = json.loads(next(f))
-                path_to_depth = dict((test_case / s, v) for s, v in path_to_depth.items())
-                for i, line in enumerate(f):
-                    if i < min_hint_id:
-                        continue
-                    if i > max_hint_id:
-                        break
-                    if i in hint_ids:
-                        hints.append(json.loads(line))
-        return files, path_to_depth, hints
-
     def transform(self, test_case, state, process_event_notifier):
         test_case = Path(test_case)
         state_list = state if isinstance(state, list) else [state]
         if logging.getLogger().isEnabledFor(logging.DEBUG):
             logging.debug(f'{self}.transform: state={state}')
 
-        files, path_to_depth, hints = self.load_hints(state_list, test_case)
-        if isinstance(state, list):
-            want_types = set(s.get_type() for s in state)
-            got_types = set(h['t'] for h in hints)
-            assert want_types == got_types, f'want_types={want_types} got_types={got_types}'
-        else:
-            for h in hints:
-                assert state.types[state.ptr] == h['t']
+        files, path_to_depth, hints = load_hints(state_list, test_case)
         max_depth = max(path_to_depth.values()) if path_to_depth else 0
 
         files_for_deletion = set(h['n'] for h in hints if h['t'].startswith('delfile::'))
@@ -298,8 +266,8 @@ class GenericPass(AbstractPass):
                 if l['f'] not in files_for_deletion:
                     file_to_edits.setdefault(l['f'], []).append(l)
 
-        if logging.getLogger().isEnabledFor(logging.DEBUG) and False:
-            logging.debug(f'files_for_deletion={files_for_deletion} file_to_edits={file_to_edits}')
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f'files_for_deletion={len(files_for_deletion)} file_to_edits={len(file_to_edits)}')
 
         improv_per_depth = [0] * (2 + max_depth)
         for file_id, chunks in file_to_edits.items():
@@ -324,8 +292,10 @@ class GenericPass(AbstractPass):
             s.improv_per_depth = []
             s.set_dbg(None)
         state_list[0].improv_per_depth = improv_per_depth
-        state_list[0].set_dbg('HINTS=' + ','.join(sorted(set(h['t'] for h in hints))) +
-                              ';DEL=' + ','.join(sorted(str(files[f].relative_to(test_case)) for f in files_for_deletion)))
+        dbg = 'HINTS=' + ','.join(sorted(set(h['t'] for h in hints)))
+        if files_for_deletion:
+            dbg += ';DEL=' + ','.join(sorted(str(files[f].relative_to(test_case)) for f in files_for_deletion))
+        state_list[0].set_dbg(dbg)
 
         if logging.getLogger().isEnabledFor(logging.DEBUG):
             logging.debug(f'{self}.transform: END: state={state}')
@@ -335,14 +305,7 @@ class GenericPass(AbstractPass):
         test_case = Path(test_case)
         state_list = state if isinstance(state, list) else [state]
 
-        files, path_to_depth, hints = self.load_hints(state_list, test_case)
-        if isinstance(state, list):
-            want_types = set(s.get_type() for s in state)
-            got_types = set(h['t'] for h in hints)
-            assert want_types == got_types, f'want_types={want_types} got_types={got_types}'
-        else:
-            for h in hints:
-                assert state.types[state.ptr] == h['t']
+        files, path_to_depth, hints = load_hints(state_list, test_case)
 
         files_for_deletion = set(h['n'] for h in hints if h['t'].startswith('delfile::'))
         file_to_edits = {}
@@ -361,21 +324,35 @@ class GenericPass(AbstractPass):
                     improv -= len(s['v'])
         return improv, len(files_for_deletion)
 
+def load_hints(state_list, test_case, load_all=False):
+    hints_to_load = {}
+    for s in state_list:
+        set_for_file = hints_to_load.setdefault(s.extra_file_path, set())
+        if not load_all:
+            set_for_file |= set(range(s.begin(), s.end()))
 
-def append_unused_file_removal_hints(test_case, hints, files, file_to_id):
-    if not test_case.is_dir():
-        return
-    mentioned_files = set(h['n'] for h in hints if h['t'].startswith('delfile::'))
-    for file in files:
-        if not file.is_dir() and not file.is_symlink() and (file_to_id[file] not in mentioned_files):
-            if file.suffix not in ('.makefile',) and file.name not in ('Makefile',):
-                if logging.getLogger().isEnabledFor(logging.DEBUG):
-                    logging.debug(f'APPENDING: {file} {file_to_id[file]}')
-                hints.append({
-                    't': 'delfile::0',
-                    'n': file_to_id[file],
-                    'multi': [],
-                })
+    hints = []
+    for extra_file_path, hint_ids in hints_to_load.items():
+        min_hint_id = None if load_all else min(hint_ids)
+        max_hint_id = None if load_all else max(hint_ids)
+        with gzip.open(extra_file_path, 'rt') as f:
+            files = json.loads(next(f))
+            files = [test_case / f for f in files]
+            path_to_depth = json.loads(next(f))
+            path_to_depth = dict((test_case / s, v) for s, v in path_to_depth.items())
+            for i, line in enumerate(f):
+                should_load = False
+                if load_all:
+                    should_load = True
+                else:
+                    if i < min_hint_id:
+                        continue
+                    if i > max_hint_id:
+                        break
+                    should_load = i in hint_ids
+                if should_load:
+                    hints.append(json.loads(line))
+    return files, path_to_depth, hints
 
 def edit_file(file, chunks):
     with open(file) as f:
@@ -389,6 +366,7 @@ def edit_file(file, chunks):
             new_data += c['v']
         ptr = c['r']
     new_data += data[ptr:]
+    assert len(new_data) <= len(data), f'file={file} chunks={chunks}'
     if logging.getLogger().isEnabledFor(logging.DEBUG) and False:
         logging.debug(f'file={file} before:\n{data}\nafter:\n{new_data}')
     with open(file, 'w') as f:
@@ -898,6 +876,40 @@ def generate_blank_hints(test_case, files, file_to_id):
             line_start_pos = line_end_pos
     return hints
 
+def generate_delete_file_hints(test_case, files, file_to_id, other_init_states):
+    assert other_init_states
+    states_to_load = [s for s in other_init_states if s]
+    if not states_to_load:
+        return []
+    files, path_to_depth, old_hints = load_hints(states_to_load, test_case, load_all=True)
+
+    file_to_locs = {}
+    for h in old_hints:
+        if h['t'] == 'fileref':
+            file_to_locs.setdefault(h['n'], []).extend(get_hint_locs(h))
+
+    hints = []
+    for file_id, locs in file_to_locs.items():
+        c = min(5, len(locs))
+        h = {
+            't': f'delfile::{c}',
+            'n': file_id,
+        }
+        set_hint_locs(h, locs)
+        hints.append(h)
+
+    if test_case.is_dir():
+        for file_id, file in enumerate(files):
+            if file_to_id[file] not in file_to_locs:
+                if file.suffix not in ('.makefile',) and file.name not in ('Makefile',):  # Hack
+                    hints.append({
+                        't': 'delfile::0',
+                        'n': file_to_id[file],
+                        'multi': [],
+                    })
+
+    return hints
+
 def get_root_compile_command(test_case):
     makefile_path = test_case / 'Makefile'
     if not makefile_path.exists():
@@ -964,7 +976,6 @@ def assert_valid_hint(h, files):
         assert isinstance(h, dict)
         assert 't' in h
         assert isinstance(h['t'], str)
-        assert h['t'] != 'fileref'
         if h['t'].startswith('delfile::'):
             assert isinstance(h['n'], int)
         if 'l' in h or 'r' in h or 'v' in h:
@@ -1029,21 +1040,3 @@ def merge_chunks(chunks):
         else:
             result.append(c)
     return result
-
-def regroup_hints(hints):
-    file_to_locs = {}
-    new_hints = []
-    for h in hints:
-        if h['t'] == 'fileref':
-            file_to_locs.setdefault(h['n'], []).extend(get_hint_locs(h))
-        else:
-            new_hints.append(h)
-    for file, locs in file_to_locs.items():
-        c = min(5, len(locs))
-        h = {
-            't': f'delfile::{c}',
-            'n': file,
-        }
-        set_hint_locs(h, locs)
-        new_hints.append(h)
-    return new_hints
