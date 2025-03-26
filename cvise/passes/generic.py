@@ -940,6 +940,7 @@ def get_ordered_files_list(test_case, strategy):
     files = [f for f in Path(test_case).rglob('*') if not f.is_dir() and not f.is_symlink()]
     assert all(f.suffix not in ('.pcm', '.o', '.tmp') and f.name != '.ALWAYS' for f in files), f'{files}'
     if strategy == 'size':
+        files.sort()
         return files, {}
 
     orig_command = get_root_compile_command(test_case)
