@@ -953,8 +953,8 @@ def get_ordered_files_list(test_case, strategy):
     if root_file and orig_command:
         orig_command = re.sub(r'\S*-fmodule\S*', '', orig_command).split()
         command = [
-            INCLUDE_DEPTH_TOOL,
-            root_file,
+            str(INCLUDE_DEPTH_TOOL),
+            str(root_file),
             '--',
             '-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk'] + orig_command
         path_and_depth = []
