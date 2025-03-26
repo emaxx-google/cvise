@@ -22,11 +22,6 @@ INCLUSION_GRAPH_TOOL = Path(__file__).resolve().parent.parent / 'inclusion-graph
 TOPFORMFLAT_TOOL = Path(__file__).resolve().parent.parent.parent / 'delta/topformflat'
 CLANG_DELTA_TOOL = Path(__file__).resolve().parent.parent.parent / 'clang_delta/clang_delta'
 
-CLANG_DELTA_TRANSFORMATIONS = (
-    'replace-function-def-with-decl',
-    'remove-unused-function',
-)
-
 success_histories = {}
 type_to_successes_gen = None
 type_to_successes = {}
@@ -151,22 +146,22 @@ class GenericPass(AbstractPass):
         max_depth = max(path_to_depth.values()) if path_to_depth else 0
         file_to_id = dict((f, i) for i, f in enumerate(files))
 
-        hints = []
-        args = {}
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            args['max_workers'] = 1
-        with pebble.ProcessPool(**args) as pool:
-            futures = []
-            futures.append(pool.schedule(functools.partial(generate_makefile_hints, test_case, files, file_to_id)))
-            futures.append(pool.schedule(functools.partial(generate_cppmaps_hints, test_case, files, file_to_id)))
-            futures.append(pool.schedule(functools.partial(generate_inclusion_directive_hints, test_case, files, file_to_id)))
-            futures.append(pool.schedule(functools.partial(generate_clang_pcm_lazy_load_hints, test_case, files, file_to_id)))
-            futures.append(pool.schedule(functools.partial(generate_line_hints, test_case, files, file_to_id)))
-            futures.append(pool.schedule(functools.partial(generate_topformflat_hints, test_case, files, file_to_id)))
-            for transformation in CLANG_DELTA_TRANSFORMATIONS:
-                futures.append(pool.schedule(functools.partial(generate_clang_delta_hints, test_case, files, file_to_id, transformation)))
-            for f in futures:
-                hints += f.result()
+        if self.arg == 'makefile':
+            hints = generate_makefile_hints(test_case, files, file_to_id)
+        elif self.arg == 'cppmaps':
+            hints = generate_cppmaps_hints(test_case, files, file_to_id)
+        elif self.arg == 'inclusion_directives':
+            hints = generate_inclusion_directive_hints(test_case, files, file_to_id)
+        elif self.arg == 'clang_pcm_lazy_load':
+            hints = generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id)
+        elif self.arg == 'lines':
+            hints = generate_line_hints(test_case, files, file_to_id)
+        elif self.arg == 'topformflat':
+            hints = generate_topformflat_hints(test_case, files, file_to_id)
+        elif self.arg.startswith('clang_delta::'):
+            hints = generate_clang_delta_hints(test_case, files, file_to_id, self.arg.partition('::')[2])
+        else:
+            raise RuntimeError(f'Unknown hint source: arg={self.arg}')
 
         def hint_main_file(h):
             if h['t'].startswith('delfile::'):
@@ -179,8 +174,8 @@ class GenericPass(AbstractPass):
             d = path_to_depth.get(hint_main_file(h), max_depth + 1) if strategy == 'topo' else 0
             return h['t'], d, file
 
-        hints = regroup_hints(hints)
-        append_unused_file_removal_hints(test_case, hints, files, file_to_id)
+        # hints = regroup_hints(hints)
+        # append_unused_file_removal_hints(test_case, hints, files, file_to_id)
         for h in hints:
             assert_valid_hint(h, files)
         hints.sort(key=hint_comparison_key)
@@ -198,7 +193,7 @@ class GenericPass(AbstractPass):
         for h in hints:
             d = path_to_depth.get(hint_main_file(h), max_depth + 1)
             depth_to_instances[d] += 1
-        logging.info(f'Generated hints: len(hints)={instances}')
+        logging.info(f'Generated hints for arg={self.arg}: len(hints)={instances}')
 
         if logging.getLogger().isEnabledFor(logging.DEBUG) and False:  # TEMP!
             for hint in hints:
@@ -695,6 +690,7 @@ def generate_clang_delta_hints(test_case, files, file_to_id, transformation):
         f'--generate-hints={transformation}',
         str(test_case),
         '--warn-on-counter-out-of-bounds',
+        '--std=c++2b',
     ]
     if logging.getLogger().isEnabledFor(logging.DEBUG):
         logging.debug(f'generate_clang_delta_hints: running: {shlex.join(command)}')

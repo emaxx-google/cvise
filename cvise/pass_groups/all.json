@@ -9,8 +9,14 @@
    {"pass": "lines", "arg": "10"}
 ],
  "paced": [
-   {"pass": "generic", "strategy": "size"},
-   {"pass": "generic", "strategy": "topo"}
+   {"pass": "generic", "arg": "makefile"},
+   {"pass": "generic", "arg": "cppmaps"},
+   {"pass": "generic", "arg": "inclusion_directives"},
+   {"pass": "generic", "arg": "clang_pcm_lazy_load"},
+   {"pass": "generic", "arg": "lines"},
+   {"pass": "generic", "arg": "topformflat"},
+   {"pass": "generic", "arg": "clang_delta::replace-function-def-with-decl"},
+   {"pass": "generic", "arg": "clang_delta::remove-unused-function"}
  ],
  "main": [
     {"pass": "clangbinarysearch", "arg": "replace-function-def-with-decl", "c": true },

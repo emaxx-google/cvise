@@ -524,15 +524,16 @@ class TestManager:
     def release_future(self, future):
         self.futures.remove(future)
 
-        pass_ = self.future_to_pass[future]
-        assert pass_
-        if not isinstance(pass_, list):
-            pass_id = self.current_passes.index(pass_)
-            self.last_finished_order[pass_id] = future.order
+        if not future.is_init:
+            pass_ = self.future_to_pass[future]
+            assert pass_
+            if not isinstance(pass_, list):
+                pass_id = self.current_passes.index(pass_)
+                self.last_finished_order[pass_id] = future.order
 
-        self.future_to_pass.pop(future)
+            self.future_to_pass.pop(future)
 
-        self.release_folder(future)
+            self.release_folder(future)
 
     def save_extra_dir(self, test_case_path):
         extra_dir = self.get_extra_dir('cvise_extra_', self.MAX_EXTRA_DIRS)
@@ -569,32 +570,39 @@ class TestManager:
                     else:
                         raise future.exception()
 
-                test_env = future.result()
-                opass = self.current_pass
-                self.current_pass = self.future_to_pass[future]
-                assert self.current_pass
-                outcome = self.check_pass_result(test_env)
-                self.current_pass = opass
-                if outcome == PassCheckingOutcome.ACCEPT:
-                    new_futures.add(future)
-                elif outcome == PassCheckingOutcome.IGNORE:
-                    if isinstance(test_env.state, list):
-                        self.failed_merges.append(test_env.state)
-                        self.failed_merge_comparison_keys.append(self.get_state_comparison_key(test_env.state, test_env.size_improvement, test_env.file_count_improvement))
-                elif outcome == PassCheckingOutcome.QUIT_LOOP:
-                    quit_loop = True
-                    p = self.future_to_pass[future]
-                    self.states[self.current_passes.index(p)] = None
+                if future.is_init:
+                    state = future.result()
+                    pass_id = future.pass_id
+                    p = self.current_passes[pass_id]
+                    logging.debug(f'Init completed for {p}')
+                    self.states[pass_id] = state
+                else:
+                    test_env = future.result()
+                    opass = self.current_pass
+                    self.current_pass = self.future_to_pass[future]
+                    assert self.current_pass
+                    outcome = self.check_pass_result(test_env)
+                    self.current_pass = opass
+                    if outcome == PassCheckingOutcome.ACCEPT:
+                        new_futures.add(future)
+                    elif outcome == PassCheckingOutcome.IGNORE:
+                        if isinstance(test_env.state, list):
+                            self.failed_merges.append(test_env.state)
+                            self.failed_merge_comparison_keys.append(self.get_state_comparison_key(test_env.state, test_env.size_improvement, test_env.file_count_improvement))
+                    elif outcome == PassCheckingOutcome.QUIT_LOOP:
+                        quit_loop = True
+                        p = self.future_to_pass[future]
+                        self.states[self.current_passes.index(p)] = None
 
-                # pass_id = self.current_passes.index(self.future_to_pass[future])
-                # if hasattr(test_env.state, 'instances') and self.states[pass_id] and test_env.state.instances != self.states[pass_id].instances:
-                #     logging.info(f'Adjusting instances for {self.future_to_pass[future]} from {self.states[pass_id].instances} to {test_env.state.instances}')
-                #     # assert test_env.state.instances < self.states[pass_id].instances
-                #     self.states[pass_id].instances = test_env.state.instances
-                #     if self.states[pass_id].chunk > self.states[pass_id].instances:
-                #         self.states[pass_id].chunk = self.states[pass_id].instances
-                #     if self.states[pass_id].index >= self.states[pass_id].instances:
-                #         self.states[pass_id].index = self.states[pass_id].instances - 1
+                    # pass_id = self.current_passes.index(self.future_to_pass[future])
+                    # if hasattr(test_env.state, 'instances') and self.states[pass_id] and test_env.state.instances != self.states[pass_id].instances:
+                    #     logging.info(f'Adjusting instances for {self.future_to_pass[future]} from {self.states[pass_id].instances} to {test_env.state.instances}')
+                    #     # assert test_env.state.instances < self.states[pass_id].instances
+                    #     self.states[pass_id].instances = test_env.state.instances
+                    #     if self.states[pass_id].chunk > self.states[pass_id].instances:
+                    #         self.states[pass_id].chunk = self.states[pass_id].instances
+                    #     if self.states[pass_id].index >= self.states[pass_id].instances:
+                    #         self.states[pass_id].index = self.states[pass_id].instances - 1
 
             else:
                 new_futures.add(future)
@@ -735,7 +743,7 @@ class TestManager:
 
                 tmp_futures = copy.copy(self.futures)
                 for future in tmp_futures:
-                    if future.done() and not future.exception():
+                    if future.done() and not future.exception() and not future.is_init:
                         env = future.result()
                         assert env
                         pass_ = self.future_to_pass[future]
@@ -802,6 +810,21 @@ class TestManager:
                         self.terminate_all(pool)
                         return best_success_env
 
+                if any(s == 'needinit' for s in self.states):
+                    pass_id = self.states.index('needinit')
+                    pass_ = passes[pass_id]
+                    logging.debug(f'Going to init pass {pass_}')
+                    self.states[pass_id] = 'initializing'
+                    env = SetupEnvironment(pass_, self.current_test_case, self.test_cases, self.save_temps, self.last_state_hint[pass_id], strategy=self.strategy)
+                    future = pool.schedule(env.execute, timeout=self.timeout)
+                    future.is_init = True
+                    future.pass_id = pass_id
+                    self.futures.append(future)
+                    order += 1
+                    continue
+                if not any(s not in ('needinit', 'initializing', None) for s in self.states):
+                    continue
+
                 state = None
                 if finished_jobs % 5 == 0 and len(self.next_successes_hint) >= 2:
                     for attempt in range(10):
@@ -839,7 +862,7 @@ class TestManager:
 
                 if not state and any(self.states):
                     pass_job_index += 1
-                    while pass_job_index >= passes[next_pass_to_schedule].jobs or not self.states[next_pass_to_schedule] or passes[next_pass_to_schedule].strategy and passes[next_pass_to_schedule].strategy != self.strategy:
+                    while pass_job_index >= passes[next_pass_to_schedule].jobs or self.states[next_pass_to_schedule] in ('needinit', 'initializing', None) or passes[next_pass_to_schedule].strategy and passes[next_pass_to_schedule].strategy != self.strategy:
                         pass_job_index = 0
                         if next_pass_to_schedule + 1 < len(passes):
                             next_pass_to_schedule += 1
@@ -869,6 +892,7 @@ class TestManager:
                     if isinstance(state, list):
                         test_env.predicted_improv = merge_improv
                     future = pool.schedule(test_env.run, timeout=self.timeout)
+                    future.is_init = False
                     future.order = order
                     future.pass_id = pass_id
                     future.state = state
@@ -1149,13 +1173,8 @@ class TestManager:
             sys.exit(1)
 
     def init_all_passes(self, passes):
-        self.states = []
-        for i, p in enumerate(passes):
-            state = None
-            if not p.strategy or p.strategy == self.strategy:
-                state = p.new(self.current_test_case, last_state_hint=self.last_state_hint[i], strategy=self.strategy)
-                self.last_state_hint[i] = state
-            self.states.append(state)
+        self.states = ['needinit' if not p.strategy or p.strategy == self.strategy else None
+                       for p in passes]
 
     def process_result(self, test_env):
         if self.print_diff:
@@ -1204,36 +1223,13 @@ class TestManager:
 
 
 class SetupEnvironment:
-    def __init__(self, pass_, test_script, test_case, test_cases, save_temps, last_state_hint, strategy, current_test_case_origin):
+    def __init__(self, pass_, test_case, test_cases, save_temps, last_state_hint, strategy):
         self.pass_ = pass_
-        self.test_script = test_script
         self.test_case = test_case
         self.test_cases = test_cases
         self.save_temps = save_temps
         self.last_state_hint = last_state_hint
         self.strategy = strategy
-        self.current_test_case_origin = current_test_case_origin
 
     def execute(self):
-        logging.debug(f'SetupEnvironment.execute: copy from {self.current_test_case_origin} to {self.test_case}')
-        if self.current_test_case_origin.is_dir():
-            shutil.copytree(self.current_test_case_origin, self.test_case, symlinks=True)
-        else:
-            shutil.copy2(self.current_test_case_origin, self.test_case)
-        return self.pass_.new(self.test_case, self.check_sanity, last_state_hint=self.last_state_hint, strategy=self.strategy)
-
-    def check_sanity(self, verbose=False):
-        logging.debug('perform sanity check... ')
-
-        folder = Path(tempfile.mkdtemp(prefix=f'{TestManager.TEMP_PREFIX}sanity-'))
-        test_env = TestEnvironment(None, 0, self.test_script, folder, list(self.test_cases)[0], self.test_cases, None)
-        logging.debug(f'sanity check tmpdir = {test_env.folder}')
-
-        returncode = test_env.run_test(verbose)
-        if returncode == 0:
-            rmfolder(folder)
-            logging.debug('sanity check successful')
-        else:
-            if not self.save_temps:
-                rmfolder(folder)
-            raise InsaneTestCaseError(self.test_cases, self.test_script)
+        return self.pass_.new(self.test_case, last_state_hint=self.last_state_hint, strategy=self.strategy)
