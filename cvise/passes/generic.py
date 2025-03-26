@@ -702,7 +702,7 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id):
     root_file_candidates = list(test_case.rglob('*.cc'))
     if not root_file_candidates:
         return []
-    root_file = root_file_candidates[0]
+    root_file = root_file_candidates[0].relative_to(test_case)
 
     file_to_line_pos = {}
     def get_line_pos_in_file(file, idx):
@@ -725,19 +725,27 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id):
         '-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk'] + orig_command
     if logging.getLogger().isEnabledFor(logging.DEBUG):
         logging.debug(f'generate_inclusion_directive_hints: running: {shlex.join(command)}')
-    out = subprocess.check_output(command, cwd=test_case, stderr=subprocess.DEVNULL, encoding='utf-8')
+    proc = subprocess.run(command, cwd=test_case, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
+    if proc.returncode:
+        logging.debug(f'generate_inclusion_directive_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
+        return []
     hints = []
-    for line in out.splitlines():
+    abs_test_case = test_case.resolve()
+    for line in proc.stdout.splitlines():
         if not line.strip():
             continue
         from_file, from_line, to_file = line.split(' ')
         from_file = Path(from_file)
         if not from_file.is_absolute():
-            from_file = test_case / from_file
+            from_file = abs_test_case / from_file
+        from_file = test_case / from_file.relative_to(abs_test_case)
+        assert from_file in file_to_id, f'from_file={from_file} file_to_id={file_to_id}'
         from_line = int(from_line) - 1
         to_file = Path(to_file)
         if not to_file.is_absolute():
-            to_file = test_case / to_file
+            to_file = abs_test_case / to_file
+        to_file = test_case / to_file.relative_to(abs_test_case)
+        assert to_file in file_to_id, f'to_file={to_file} file_to_id={file_to_id}'
         start_pos, end_pos = get_line_pos_in_file(from_file, from_line)
         hints.append({
             't': 'fileref',
@@ -746,6 +754,8 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id):
             'l': start_pos,
             'r': end_pos,
         })
+    if not hints:
+        logging.debug(f'generate_inclusion_directive_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
     return hints
 
 def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
