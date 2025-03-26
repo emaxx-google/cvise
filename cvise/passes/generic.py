@@ -161,8 +161,8 @@ class GenericPass(AbstractPass):
             hints = generate_blank_hints(test_case, files, file_to_id)
         elif self.arg == 'lines':
             hints = generate_line_hints(test_case, files, file_to_id)
-        elif self.arg == 'topformflat':
-            hints = generate_topformflat_hints(test_case, files, file_to_id)
+        elif self.arg.startswith('topformflat::'):
+            hints = generate_topformflat_hints(test_case, files, file_to_id, int(self.arg.partition('::')[2]))
         elif self.arg.startswith('clang_delta::'):
             hints = generate_clang_delta_hints(test_case, files, file_to_id, self.arg.partition('::')[2])
         elif self.arg == 'line_markers':
@@ -661,30 +661,22 @@ def generate_line_hints(test_case, files, file_to_id):
                     raise RuntimeError(f'Failure while parsing {file}: {e}')
     return hints
 
-def generate_topformflat_hints(test_case, files, file_to_id):
-    MAX_CURLY_DEPTH = 10
+def generate_topformflat_hints(test_case, files, file_to_id, depth):
     hints = []
     for file_id, file in enumerate(files):
         if not file.is_symlink() and file.suffix not in ('.makefile', '.cppmap') and file.name not in ('Makefile',):
-            hints_at_prev_depth = None
-            for depth in range(MAX_CURLY_DEPTH):
-                command = [str(TOPFORMFLAT_TOOL), str(depth), str(file)]
-                if logging.getLogger().isEnabledFor(logging.DEBUG):
-                    logging.debug(f'generate_topformflat_hints: running: {shlex.join(command)}')
-                out = subprocess.check_output(command, stderr=subprocess.DEVNULL, encoding='utf-8')
-                current_hints = []
-                for line in out.splitlines():
-                    if line.strip():
-                        try:
-                            h = json.loads(line)
-                            h['f'] = file_id
-                            current_hints.append(h)
-                        except json.decoder.JSONDecodeError as e:
-                            raise RuntimeError(f'Error while processing {file}: JSON line "{line}": {e}')
-                if len(current_hints) == hints_at_prev_depth:
-                    break
-                hints += current_hints
-                hints_at_prev_depth = len(current_hints)
+            command = [str(TOPFORMFLAT_TOOL), str(depth), str(file)]
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f'generate_topformflat_hints: running: {shlex.join(command)}')
+            out = subprocess.check_output(command, stderr=subprocess.DEVNULL, encoding='utf-8')
+            for line in out.splitlines():
+                if line.strip():
+                    try:
+                        h = json.loads(line)
+                        h['f'] = file_id
+                        hints.append(h)
+                    except json.decoder.JSONDecodeError as e:
+                        raise RuntimeError(f'Error while processing {file}: JSON line "{line}": {e}')
     return hints
 
 def generate_clang_delta_hints(test_case, files, file_to_id, transformation):
