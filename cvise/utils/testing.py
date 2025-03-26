@@ -583,6 +583,8 @@ class TestManager:
                     opass = self.current_pass
                     self.current_pass = self.future_to_pass[future]
                     assert self.current_pass
+                    if isinstance(test_env.state, list):
+                        self.any_merge_completed = True
                     outcome = self.check_pass_result(test_env)
                     self.current_pass = opass
                     if outcome == PassCheckingOutcome.ACCEPT:
@@ -642,7 +644,7 @@ class TestManager:
 
         # self.pass_statistic.add_failure(self.current_pass)
         if test_env.result == PassResult.OK:
-            assert test_env.exitcode
+            assert test_env.exitcode, f'test_env={vars(test_env)}'
             if self.also_interesting is not None and test_env.exitcode == self.also_interesting:
                 self.save_extra_dir(test_env.test_case_path)
         elif test_env.result == PassResult.STOP:
@@ -665,7 +667,7 @@ class TestManager:
         pool.join()
 
     def get_state_comparison_key(self, state, improv, improv_file_count):
-        if self.strategy == 'size' or True:  # TEMP!
+        if self.strategy == 'size' or True:
             return -improv, -improv_file_count
         elif self.strategy == 'topo':
             if isinstance(state, list):
@@ -708,7 +710,11 @@ class TestManager:
             finished_job_improves = []
             recent_success_job_counter = None
             best_success_job_counter = None
-            start_time = time.monotonic()
+            measure_start_time = time.monotonic() if self.last_job_update is None else self.last_job_update
+            best_improv_speed = None
+            best_file_count_improv_speed = None
+            any_merge_started = False
+            self.any_merge_completed = False
 
             successes = [(s, p, i, ifc) for s, p, i, ifc in self.next_successes_hint if not isinstance(s, list)] + self.successes_hint
             successes.sort(key=lambda i: (-i[2], -i[3]))
@@ -743,6 +749,9 @@ class TestManager:
                         self.terminate_all(pool)
                         return success
 
+                now = time.monotonic()
+                self.last_job_update = now
+
                 tmp_futures = copy.copy(self.futures)
                 for future in tmp_futures:
                     if future.done() and not future.exception() and not future.is_init:
@@ -751,6 +760,8 @@ class TestManager:
                         pass_ = self.future_to_pass[future]
                         assert pass_
                         self.current_pass = pass_
+                        if isinstance(env.state, list):
+                            self.any_merge_completed = True
                         outcome = self.check_pass_result(env)
                         if outcome == PassCheckingOutcome.ACCEPT:
                             success_cnt += 1
@@ -761,7 +772,6 @@ class TestManager:
                             # assert improv == self.run_test_case_size - get_file_size(env.test_case_path), f'improv={improv} run_test_case_size={self.run_test_case_size} get_file_size(env.test_case_path)={get_file_size(env.test_case_path)} files={list(env.test_case_path.rglob('*'))}'
                             finished_job_improves.append(improv)
                             assert len(finished_job_improves) == finished_jobs
-                            logging.info(f'observed success success_cnt={success_cnt} improv={improv} improv_file_count={improv_file_count} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={finished_jobs} failed_merges={len(self.failed_merges)} comparison_key={self.get_state_comparison_key(env.state, improv, improv_file_count)}')
                             if hasattr(pass_, 'on_success_observed'):
                                 pass_.on_success_observed(env.state)
                             # if isinstance(env.state, list):
@@ -784,25 +794,30 @@ class TestManager:
                                 os.rename(future.result().test_case_path, pa)
                                 best_success_env.test_case = pa
                             self.release_future(future)
+                            improv_speed = best_success_improv / (now - measure_start_time)
+                            file_count_improv_speed = best_success_improv_file_count / (now - measure_start_time)
+                            logging.info(f'observed success success_cnt={success_cnt} improv={improv} improv_file_count={improv_file_count} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={finished_jobs} failed_merges={len(self.failed_merges)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed} comparison_key={comparison_key}')
                         elif outcome == PassCheckingOutcome.IGNORE:
                             if isinstance(env.state, list):
                                 self.failed_merges.append(env.state)
                                 self.failed_merge_comparison_keys.append(self.get_state_comparison_key(env.state, env.size_improvement, env.file_count_improvement))
                         self.current_pass = None
 
-                if success_cnt > 0 and (finished_jobs >= self.parallel_tests or not self.futures):
-                    mean = statistics.mean(finished_job_improves)
-                    sigma = statistics.stdev(finished_job_improves) if min(finished_job_improves) != max(finished_job_improves) else None
-                    time_now = time.monotonic()
-                    duration_till_now = time_now - start_time
-                    duration_till_best = best_success_when - start_time
-                    k = (duration_till_now / duration_till_best * best_success_improv - mean) / sigma if sigma else None
-                    prob = math.floor(((finished_jobs - 1) / k**2 + 1) * (finished_jobs + 1) / finished_jobs) / (finished_jobs + 1) if sigma and k > 1 else None
-                    # logging.info(f'run_parallel_tests: prob={prob} finished_jobs={finished_jobs} max={best_success_improv} mean={mean} sigma={sigma} duration_till_now={duration_till_now} duration_till_best={duration_till_best} k={k}')
-                    # if (k > 1 and prob < 0.01 and finished_jobs - best_success_job_counter >= 2 * self.parallel_tests or
-                    #     order > self.parallel_tests * 10):
-                    if finished_jobs > self.parallel_tests * 10 or not self.futures:
-                        logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} failed_merges={len(self.failed_merges)} best_success_job_counter={best_success_job_counter} order={order} improv={best_success_improv} improv_file_count={best_success_improv_file_count} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} strategy={self.strategy} comparison_key={self.get_state_comparison_key(best_success_env.state, best_success_improv, best_success_improv_file_count)}')
+                if success_cnt > 0:
+                    improv_speed = best_success_improv / (now - measure_start_time)
+                    file_count_improv_speed = best_success_improv_file_count / (now - measure_start_time)
+                    should_proceed = not self.futures
+                    if finished_jobs > self.parallel_tests * 5 and (not any_merge_started or self.any_merge_completed):
+                        if best_improv_speed is None or improv_speed > best_improv_speed:
+                            logging.info(f'run_parallel_tests: new best_improv_speed={improv_speed} old={best_improv_speed}')
+                            best_improv_speed = improv_speed
+                        if best_file_count_improv_speed is None or file_count_improv_speed > best_file_count_improv_speed:
+                            best_file_count_improv_speed = file_count_improv_speed
+                        if improv_speed < best_improv_speed * 0.8 and (improv_speed > 0 or file_count_improv_speed < best_file_count_improv_speed * 0.8):
+                            should_proceed = True
+
+                    if should_proceed:
+                        logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} failed_merges={len(self.failed_merges)} best_success_job_counter={best_success_job_counter} order={order} improv={best_success_improv} improv_file_count={best_success_improv_file_count} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} strategy={self.strategy} comparison_key={self.get_state_comparison_key(best_success_env.state, best_success_improv, best_success_improv_file_count)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed}')
                         for pass_id, state in dict((fu.pass_id, fu.state)
                                                 for fu in sorted(self.futures, key=lambda fu: -fu.order)
                                                 if not isinstance(fu.pass_id, list) and
@@ -875,6 +890,7 @@ class TestManager:
                                     state = merged_state
                                     attempted_merges.add(merge_repr)
                                     should_advance = False
+                                    any_merge_started = True
                         if state or not self.failed_merges:
                             break
 
@@ -1125,6 +1141,7 @@ class TestManager:
                 self.strategy = 'size'
                 self.init_all_passes(passes)
                 self.skip = False
+                self.last_job_update = None
 
                 while any(self.states) and not self.skip:
                     # Ignore more key presses after skip has been detected
@@ -1167,7 +1184,6 @@ class TestManager:
                     #     logging.info(f'skipping after {self.success_count} successful transformations')
                     #     break
 
-                    # TEMP!
                     # self.strategy = 'topo' if self.strategy == 'size' else 'size'
                     self.init_all_passes(passes)
 
