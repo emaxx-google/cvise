@@ -24,11 +24,11 @@ TOPFORMFLAT_TOOL = Path(__file__).resolve().parent.parent.parent / 'delta/topfor
 CLANG_DELTA_TOOL = Path(__file__).resolve().parent.parent.parent / 'clang_delta/clang_delta'
 
 success_histories = {}
-type_to_successes = {}
+type_to_attempted = {}
 
 
-def get_type_to_successes(pass_repr, generation):
-    d = type_to_successes.setdefault(pass_repr, {})
+def get_type_to_attempted(pass_repr, generation):
+    d = type_to_attempted.setdefault(pass_repr, {})
     if d.get('gen') != generation:
         d['gen'] = generation
         d['value'] = {}
@@ -50,8 +50,9 @@ class PolyState(dict):
         if not any(self.values()):
             return None
         self.ptr = 0
-        while not self[self.types[self.ptr]]:
+        while not self[self.get_type()]:
             self.ptr += 1
+        self.mark_attempted('attempted')
         return self
 
     @staticmethod
@@ -68,57 +69,65 @@ class PolyState(dict):
         if not any(self.values()):
             return None
         self.ptr = 0
-        while not self[self.types[self.ptr]]:
+        while not self[self.get_type()]:
             self.ptr += 1
+        self.mark_attempted('attempted')
         return self
 
     def advance(self, success_histories):
-        type_to_successes = get_type_to_successes(self.pass_repr, self.generation)
+        tp = self.get_type()
+        type_to_attempted = get_type_to_attempted(self.pass_repr, self.generation)
+        previous_attempts = type_to_attempted.get(tp + '::attempted', [])
+        previous_successes = type_to_attempted.get(tp + '::success', [])
 
         new = copy.copy(self)
         while True:
-            tp = new.types[new.ptr]
             new[tp] = new[tp].advance(success_histories)
             if not new[tp]:
                 break
-            if not any(le <= new[tp].begin() and new[tp].end() <= ri
-                       for le, ri in type_to_successes.get(tp, [])):
+            already_attempted = any(le == new[tp].begin() and new[tp].end() == ri
+                                    for le, ri in previous_attempts)
+            subset_of_success = any(le <= new[tp].begin() and new[tp].end() <= ri
+                                    for le, ri in previous_successes)
+            if not already_attempted and not subset_of_success:
                 break
         if not any(new.values()):
             return None
         new.ptr += 1
         if new.ptr == len(new.types):
             new.ptr = 0
-        while not new[new.types[new.ptr]]:
+        while not new[new.get_type()]:
             new.ptr += 1
             if new.ptr == len(new.types):
                 new.ptr = 0
+        new.mark_attempted('attempted')
         return new
 
-    def on_success_observed(self):
-        history = self[self.types[self.ptr]].get_success_history(success_histories)
-        history.append(self.end() - self.begin())
+    def mark_attempted(self, tag):
+        get_type_to_attempted(self.pass_repr, self.generation).setdefault(self.get_type() + f'::{tag}', []).append((
+            self[self.get_type()].begin(),
+            self[self.get_type()].end()))
 
-        type_to_successes = get_type_to_successes(self.pass_repr, self.generation)
-        type_to_successes.setdefault(self.types[self.ptr], []).append((
-            self[self.types[self.ptr]].begin(),
-            self[self.types[self.ptr]].end()))
+    def on_success_observed(self):
+        history = self[self.get_type()].get_success_history(success_histories)
+        history.append(self.end() - self.begin())
+        self.mark_attempted('success')
 
     def begin(self):
-        return self.shift() + self[self.types[self.ptr]].begin()
+        return self.shift() + self[self.get_type()].begin()
 
     def end(self):
-        return self.shift() + self[self.types[self.ptr]].end()
+        return self.shift() + self[self.get_type()].end()
 
     def shift(self):
         return sum(self.instances[self.types[i]] for i in range(self.ptr))
 
     def __repr__(self):
-        t = self.types[self.ptr]
+        t = self.get_type()
         return t + '::' + repr(self[t])
 
     def set_dbg(self, data):
-        self[self.types[self.ptr]].dbg_file = data
+        self[self.get_type()].dbg_file = data
 
     def get_type(self):
         return self.types[self.ptr]
