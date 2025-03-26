@@ -853,7 +853,7 @@ class TestManager:
                 if state:
                     tmp_parent_dir = self.roots[pass_id]
                     folder = Path(tempfile.mkdtemp(f'{self.TEMP_PREFIX}job{order}', dir=tmp_parent_dir))
-                    test_case = self.roots[pass_id+len(passes)] / self.current_test_case.name
+                    test_case = self.current_test_case
                     transform = pass_.transform
                     test_env = TestEnvironment(
                         state,
@@ -882,8 +882,7 @@ class TestManager:
 
                     if should_advance:
                         old_state = copy.copy(state)
-                        new_path = os.path.join(self.roots[pass_id+len(passes)], os.path.basename(self.current_test_case))
-                        state = pass_.advance(new_path, state)
+                        state = pass_.advance(self.current_test_case, state)
                         # logging.info(f'advance: from {old_state} to {state} pass={pass_}')
                         self.states[pass_id] = state
                         self.last_state_hint[pass_id] = state
@@ -928,7 +927,6 @@ class TestManager:
         m = Manager()
         self.pid_queue = m.Queue()
         self.create_root()
-        self.create_root(suffix='init')
         pass_key = repr(self.current_pass)
         self.last_state_hint = [None]
         self.successes_hint = []
@@ -1043,9 +1041,8 @@ class TestManager:
         self.pid_queue = m.Queue()
         if not self.tmp_for_best:
             self.tmp_for_best = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}best-')
-        for i in range(2):
-            for p in passes:
-                self.create_root(p, 'init' if i > 0 else '')
+        for p in passes:
+            self.create_root(p)
         # pass_key = repr(self.current_pass)
 
         # logging.info(f'===< {self.current_pass} >===')
@@ -1153,25 +1150,12 @@ class TestManager:
 
     def init_all_passes(self, passes):
         self.states = []
-        with pebble.ProcessPool(max_workers=len(passes)) as pool:
-            futures = []
-            for i, p in enumerate(passes):
-                if not p.strategy or p.strategy == self.strategy:
-                    schedule_rmfolder(self.roots[i+len(passes)])
-                    self.recreate_root(i+len(passes), p=passes[i], suffix='init')
-                    new_path = os.path.join(self.roots[i+len(passes)], os.path.basename(self.current_test_case))
-                    env = SetupEnvironment(p, self.test_script, new_path, self.test_cases, self.save_temps,
-                                           self.last_state_hint[i], strategy=self.strategy, current_test_case_origin=self.current_test_case)
-                    futures.append(pool.schedule(env.execute))
-                else:
-                    futures.append(None)
-            for i, fu in enumerate(futures):
-                if fu is None:
-                    self.states.append(None)
-                else:
-                    state = fu.result()
-                    self.states.append(state)
-                    self.last_state_hint[i] = state
+        for i, p in enumerate(passes):
+            state = None
+            if not p.strategy or p.strategy == self.strategy:
+                state = p.new(self.current_test_case, last_state_hint=self.last_state_hint[i], strategy=self.strategy)
+                self.last_state_hint[i] = state
+            self.states.append(state)
 
     def process_result(self, test_env):
         if self.print_diff:

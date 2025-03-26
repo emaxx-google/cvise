@@ -200,7 +200,7 @@ class GenericPass(AbstractPass):
             depth_to_instances[d] += 1
         logging.info(f'Generated hints: len(hints)={instances}')
 
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
+        if logging.getLogger().isEnabledFor(logging.DEBUG) and False:  # TEMP!
             for hint in hints:
                 logging.debug(f'*** {hint["t"]}')
                 for c in get_hint_locs(hint):
@@ -287,7 +287,7 @@ class GenericPass(AbstractPass):
         # if isinstance(state, list) or state.end() - state.begin() > 1 or not files_for_deletion:
         #     return (PassResult.INVALID, state)  # TEMP!!
 
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
+        if logging.getLogger().isEnabledFor(logging.DEBUG) and False:  # TEMP!
             logging.debug(f'files_for_deletion={files_for_deletion} file_to_edits={file_to_edits}')
 
         improv_per_depth = [0] * (2 + max_depth)
@@ -368,7 +368,8 @@ def append_unused_file_removal_hints(test_case, hints, files, file_to_id):
     for file in files:
         if not file.is_dir() and not file.is_symlink() and (file_to_id[file] not in mentioned_files):
             if file.suffix not in ('.makefile',) and file.name not in ('Makefile',):
-                logging.debug(f'APPENDING: {file} {file_to_id[file]}')
+                if logging.getLogger().isEnabledFor(logging.DEBUG):
+                    logging.debug(f'APPENDING: {file} {file_to_id[file]}')
                 hints.append({
                     't': 'delfile::0',
                     'n': file_to_id[file],
@@ -387,7 +388,7 @@ def edit_file(file, chunks):
             new_data += c['v']
         ptr = c['r']
     new_data += data[ptr:]
-    if logging.getLogger().isEnabledFor(logging.DEBUG):
+    if logging.getLogger().isEnabledFor(logging.DEBUG) and False:  # TEMP!
         logging.debug(f'file={file} before:\n{data}\nafter:\n{new_data}')
     with open(file, 'w') as f:
         f.write(new_data)
@@ -750,7 +751,8 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id):
         str(root_file),
         '--',
         '-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk'] + orig_command
-    logging.debug(f'generate_inclusion_directive_hints: running: {shlex.join(command)}')
+    if logging.getLogger().isEnabledFor(logging.DEBUG):
+        logging.debug(f'generate_inclusion_directive_hints: running: {shlex.join(command)}')
     out = subprocess.check_output(command, cwd=test_case, stderr=subprocess.DEVNULL, encoding='utf-8')
     hints = []
     for line in out.splitlines():
