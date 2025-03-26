@@ -157,12 +157,16 @@ class GenericPass(AbstractPass):
             hints = generate_inclusion_directive_hints(test_case, files, file_to_id)
         elif self.arg == 'clang_pcm_lazy_load':
             hints = generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id)
+        elif self.arg == 'blank':
+            hints = generate_blank_hints(test_case, files, file_to_id)
         elif self.arg == 'lines':
             hints = generate_line_hints(test_case, files, file_to_id)
         elif self.arg == 'topformflat':
             hints = generate_topformflat_hints(test_case, files, file_to_id)
         elif self.arg.startswith('clang_delta::'):
             hints = generate_clang_delta_hints(test_case, files, file_to_id, self.arg.partition('::')[2])
+        elif self.arg == 'line_markers':
+            hints = generate_line_markers_hints(test_case, files, file_to_id)
         else:
             raise RuntimeError(f'Unknown hint source: arg={self.arg}')
 
@@ -855,6 +859,51 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
                         'r': line_end_pos,
                     })
                 line_start_pos = line_end_pos
+    return hints
+
+def generate_line_markers_hints(test_case, files, file_to_id):
+    if test_case.is_dir():
+        return []
+
+    line_regex = re.compile('^\\s*#\\s*[0-9]+')
+    path = files[0]
+    file_id = file_to_id[path]
+    hints = []
+    with open(path) as f:
+        line_start_pos = 0
+        for line in f:
+            line_end_pos = line_start_pos + len(line)
+            if line_regex.search(line):
+                hints.append({
+                    't': 'line_marker',
+                    'f': file_id,
+                    'l': line_start_pos,
+                    'r': line_end_pos,
+                })
+            line_start_pos = line_end_pos
+    return hints
+
+def generate_blank_hints(test_case, files, file_to_id):
+    if test_case.is_dir():
+        return []
+
+    patterns = [r'^\s*$', r'^#']
+    path = files[0]
+    file_id = file_to_id[path]
+    hints = []
+    with open(path) as f:
+        line_start_pos = 0
+        for line in f:
+            line_end_pos = line_start_pos + len(line)
+            for i, pattern in enumerate(patterns):
+                if re.match(pattern, line):
+                    hints.append({
+                        't': f'blank::{i}',
+                        'f': file_id,
+                        'l': line_start_pos,
+                        'r': line_end_pos,
+                    })
+            line_start_pos = line_end_pos
     return hints
 
 def get_root_compile_command(test_case):
