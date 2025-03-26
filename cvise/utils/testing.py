@@ -847,7 +847,7 @@ class TestManager:
                         if len(merge_train) >= 2:
                             merged_state = [sta for sta, pa, imp, imp_fc in merge_train]
                             merge_improv, merge_improv_file_count = merge_cands[0][1].predict_improv(self.current_test_case, merged_state)
-                            # logging.debug(f'run_parallel_tests: merge_train={merge_train} merge_improv={merge_improv} in_attempted={merge_improv in attempted_merges}')
+                            # logging.info(f'run_parallel_tests: merge_train={merge_train} merge_improv={merge_improv} in_attempted={merge_improv in attempted_merges}')
                             merge_repr = self.get_state_compact_repr([sta for sta, pa, imp, imp_fc in merge_train])
                             if (merge_improv > 0 or merge_improv_file_count > 0) and (merge_repr not in attempted_merges):
                                 pass_id = passes.index(merge_train[0][1])

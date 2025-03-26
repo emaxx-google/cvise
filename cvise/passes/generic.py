@@ -118,6 +118,9 @@ class PolyState(dict):
     def set_dbg(self, data):
         self[self.types[self.ptr]].dbg_file = data
 
+    def get_type(self):
+        return self.types[self.ptr]
+
 
 class GenericPass(AbstractPass):
     def __init__(self, arg=None, external_programs=None):
@@ -195,7 +198,7 @@ class GenericPass(AbstractPass):
             depth_to_instances[d] += 1
         logging.info(f'Generated hints for arg={self.arg}: len(hints)={instances}')
 
-        if logging.getLogger().isEnabledFor(logging.DEBUG) and False:  # TEMP!
+        if logging.getLogger().isEnabledFor(logging.DEBUG) and False:
             for hint in hints:
                 logging.debug(f'*** {hint["t"]}')
                 for c in get_hint_locs(hint):
@@ -227,6 +230,8 @@ class GenericPass(AbstractPass):
             state = PolyState.create_from_hint(instances, strategy, last_state_hint, depth_to_instances, repr(self))
         else:
             state = PolyState.create(instances, strategy, depth_to_instances, repr(self))
+        if state:
+            state.extra_file_path = self.extra_file_path
         # while state and strategy == 'topo' and state.tp == 0:
         #     state = state.advance(success_histories)
         return state
@@ -241,48 +246,55 @@ class GenericPass(AbstractPass):
         if not isinstance(state, list):
             state.on_success_observed()
 
+    @staticmethod
+    def load_hints(state_list, test_case):
+        hints_to_load = {}
+        for s in state_list:
+            set_for_file = hints_to_load.setdefault(s.extra_file_path, set())
+            set_for_file |= set(range(s.begin(), s.end()))
+
+        hints = []
+        for extra_file_path, hint_ids in hints_to_load.items():
+            min_hint_id = min(hint_ids)
+            max_hint_id = max(hint_ids)
+            with gzip.open(extra_file_path, 'rt') as f:
+                files = json.loads(next(f))
+                files = [test_case / f for f in files]
+                path_to_depth = json.loads(next(f))
+                path_to_depth = dict((test_case / s, v) for s, v in path_to_depth.items())
+                for i, line in enumerate(f):
+                    if i < min_hint_id:
+                        continue
+                    if i > max_hint_id:
+                        break
+                    if i in hint_ids:
+                        hints.append(json.loads(line))
+        return files, path_to_depth, hints
+
     def transform(self, test_case, state, process_event_notifier):
         test_case = Path(test_case)
         state_list = state if isinstance(state, list) else [state]
         if logging.getLogger().isEnabledFor(logging.DEBUG):
             logging.debug(f'{self}.transform: state={state}')
 
-        hints_to_load = set()
-        for s in state_list:
-            hints_to_load |= set(range(s.begin(), s.end()))
-
-        hints = {}
-        min_hint_id = min(hints_to_load)
-        max_hint_id = max(hints_to_load)
-        with gzip.open(self.extra_file_path, 'rt') as f:
-            files = json.loads(next(f))
-            files = [test_case / f for f in files]
-            path_to_depth = json.loads(next(f))
-            path_to_depth = dict((test_case / s, v) for s, v in path_to_depth.items())
-            for i, line in enumerate(f):
-                if i < min_hint_id:
-                    continue
-                if i > max_hint_id:
-                    break
-                if i in hints_to_load:
-                    hints[i] = json.loads(line)
+        files, path_to_depth, hints = self.load_hints(state_list, test_case)
+        if isinstance(state, list):
+            want_types = set(s.get_type() for s in state)
+            got_types = set(h['t'] for h in hints)
+            assert want_types == got_types, f'want_types={want_types} got_types={got_types}'
+        else:
+            for h in hints:
+                assert state.types[state.ptr] == h['t']
         max_depth = max(path_to_depth.values()) if path_to_depth else 0
 
-        if not isinstance(state, list):
-            for h in hints.values():
-                assert state.types[state.ptr] == h['t']
-
-        files_for_deletion = set(h['n'] for h in hints.values() if h['t'].startswith('delfile::'))
+        files_for_deletion = set(h['n'] for h in hints if h['t'].startswith('delfile::'))
         file_to_edits = {}
-        for i, h in hints.items():
+        for h in hints:
             for l in get_hint_locs(h):
                 if l['f'] not in files_for_deletion:
                     file_to_edits.setdefault(l['f'], []).append(l)
 
-        # if isinstance(state, list) or state.end() - state.begin() > 1 or not files_for_deletion:
-        #     return (PassResult.INVALID, state)  # TEMP!!
-
-        if logging.getLogger().isEnabledFor(logging.DEBUG) and False:  # TEMP!
+        if logging.getLogger().isEnabledFor(logging.DEBUG) and False:
             logging.debug(f'files_for_deletion={files_for_deletion} file_to_edits={file_to_edits}')
 
         improv_per_depth = [0] * (2 + max_depth)
@@ -308,7 +320,7 @@ class GenericPass(AbstractPass):
             s.improv_per_depth = []
             s.set_dbg(None)
         state_list[0].improv_per_depth = improv_per_depth
-        state_list[0].set_dbg('HINTS=' + ','.join(sorted(set(h['t'] for h in hints.values()))) +
+        state_list[0].set_dbg('HINTS=' + ','.join(sorted(set(h['t'] for h in hints))) +
                               ';DEL=' + ','.join(sorted(str(files[f].relative_to(test_case)) for f in files_for_deletion)))
 
         if logging.getLogger().isEnabledFor(logging.DEBUG):
@@ -319,28 +331,18 @@ class GenericPass(AbstractPass):
         test_case = Path(test_case)
         state_list = state if isinstance(state, list) else [state]
 
-        hints_to_load = set()
-        for s in state_list:
-            hints_to_load |= set(range(s.begin(), s.end()))
+        files, path_to_depth, hints = self.load_hints(state_list, test_case)
+        if isinstance(state, list):
+            want_types = set(s.get_type() for s in state)
+            got_types = set(h['t'] for h in hints)
+            assert want_types == got_types, f'want_types={want_types} got_types={got_types}'
+        else:
+            for h in hints:
+                assert state.types[state.ptr] == h['t']
 
-        hints = {}
-        min_hint_id = min(hints_to_load)
-        max_hint_id = max(hints_to_load)
-        with gzip.open(self.extra_file_path, 'rt') as f:
-            files = json.loads(next(f))
-            files = [test_case / f for f in files]
-            next(f)  # path_to_depth
-            for i, line in enumerate(f):
-                if i < min_hint_id:
-                    continue
-                if i > max_hint_id:
-                    break
-                if i in hints_to_load:
-                    hints[i] = json.loads(line)
-
-        files_for_deletion = set(h['n'] for h in hints.values() if h['t'].startswith('delfile::'))
+        files_for_deletion = set(h['n'] for h in hints if h['t'].startswith('delfile::'))
         file_to_edits = {}
-        for i, h in hints.items():
+        for h in hints:
             for l in get_hint_locs(h):
                 if l['f'] not in files_for_deletion:
                     file_to_edits.setdefault(l['f'], []).append(l)
@@ -383,7 +385,7 @@ def edit_file(file, chunks):
             new_data += c['v']
         ptr = c['r']
     new_data += data[ptr:]
-    if logging.getLogger().isEnabledFor(logging.DEBUG) and False:  # TEMP!
+    if logging.getLogger().isEnabledFor(logging.DEBUG) and False:
         logging.debug(f'file={file} before:\n{data}\nafter:\n{new_data}')
     with open(file, 'w') as f:
         f.write(new_data)
