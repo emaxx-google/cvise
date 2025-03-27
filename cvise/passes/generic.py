@@ -4,6 +4,7 @@ import functools
 import gzip
 import json
 import logging
+import math
 import os
 from pathlib import Path
 import random
@@ -192,7 +193,7 @@ class GenericPass(AbstractPass):
         def hint_comparison_key(h):
             file = hint_main_file(h)
             d = path_to_depth.get(hint_main_file(h), max_depth + 1) if strategy == 'topo' else 0
-            return h['t'], d, file
+            return h['t'], h.get('w', 1), d, file
 
         for h in hints:
             assert_valid_hint(h, files)
@@ -513,6 +514,7 @@ def generate_cppmaps_hints(test_case, files, file_to_id):
             h = {
                 't': 'fileref',
                 'n': file_to_id[test_case / header_path],
+                'w': 0.1,
             }
             set_hint_locs(h, chunks)
             hints.append(h)
@@ -901,15 +903,22 @@ def generate_delete_file_hints(test_case, files, file_to_id, other_init_states):
     files, path_to_depth, old_hints = load_hints(states_to_load, test_case, load_all=True)
 
     file_to_locs = {}
+    file_to_weight = {}
     for h in old_hints:
         if h['t'] == 'fileref':
-            file_to_locs.setdefault(h['n'], []).extend(get_hint_locs(h))
+            file_id = h['n']
+            file_to_locs.setdefault(file_id, []).extend(get_hint_locs(h))
+            file_to_weight[file_id] = file_to_weight.get(file_id, 0) + h.get('w', 1)
 
     hints = []
     for file_id, locs in file_to_locs.items():
-        c = min(5, len(locs))
+        w = file_to_weight[file_id]
+        if 0 < w < 1 and not w.is_integer():
+            w = 1
+        else:
+            w = 2 if int(w) > 0 else 0
         h = {
-            't': f'delfile::{c}',
+            't': f'delfile::{w}',
             'n': file_id,
         }
         set_hint_locs(h, locs)
@@ -995,8 +1004,10 @@ def assert_valid_hint(h, files):
         assert isinstance(h, dict)
         assert 't' in h
         assert isinstance(h['t'], str)
-        if h['t'].startswith('delfile::'):
+        if h['t'].startswith('delfile::') or h['t'] == 'fileref':
+            assert 'n' in h
             assert isinstance(h['n'], int)
+            assert 0 <= h['n'] < len(files)
         if 'l' in h or 'r' in h or 'v' in h:
             assert 'multi' not in h
             assert 'f' in h
