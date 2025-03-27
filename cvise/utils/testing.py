@@ -809,7 +809,8 @@ class TestManager:
                     should_proceed = not self.futures
                     if finished_jobs > self.parallel_tests * 5 and (not any_merge_started or self.any_merge_completed):
                         if best_improv_speed is None or improv_speed > best_improv_speed:
-                            logging.info(f'run_parallel_tests: new best_improv_speed={improv_speed} old={best_improv_speed}')
+                            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                                logging.debug(f'run_parallel_tests: new best_improv_speed={improv_speed} old={best_improv_speed}')
                             best_improv_speed = improv_speed
                         if best_file_count_improv_speed is None or file_count_improv_speed > best_file_count_improv_speed:
                             best_file_count_improv_speed = file_count_improv_speed

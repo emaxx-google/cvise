@@ -161,6 +161,7 @@ class FuzzyBinaryState(BinaryState):
         self.depth_to_instances = depth_to_instances
         self.strategy = strategy
         self.pass_repr = pass_repr
+        self.prepare_permut()
         return self
 
     @staticmethod
@@ -187,23 +188,28 @@ class FuzzyBinaryState(BinaryState):
         self.rnd_depth = None
         self.depth_to_instances = depth_to_instances
         self.strategy = strategy
+        self.prepare_permut()
         return self
+
+    def prepare_permut(self):
+        self.permut = list(range(0, self.instances, self.chunk))
+        random.shuffle(self.permut)
 
     def begin(self):
         if self.tp == 0:
-            return super().begin()
+            return self.permut[self.index // self.chunk]
         else:
             return self.rnd_index
 
     def end(self):
         if self.tp == 0:
-            return super().end()
+            return min(self.begin() + self.chunk, self.instances)
         else:
             return self.rnd_index + self.rnd_chunk
 
     def real_chunk(self):
         if self.tp == 0:
-            return super().real_chunk()
+            return self.end() - self.begin()
         else:
             return self.rnd_chunk
 
@@ -224,11 +230,14 @@ class FuzzyBinaryState(BinaryState):
             if not bi:
                 return None
             state.index = bi.index
+            chunk_changed = state.chunk != bi.chunk
             state.chunk = bi.chunk
             state.tp = 0
             state.rnd_index = None
             state.rnd_chunk = None
             state.rnd_depth = None
+            if chunk_changed:
+                state.prepare_permut()
         self.get_success_history(success_histories).append(0)
         # logging.debug(f'***ADVANCE*** to {state}')
         return state
