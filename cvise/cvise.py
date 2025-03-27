@@ -112,9 +112,9 @@ class CVise:
                 ('exclude' not in pass_dict) or not bool(parse_options(pass_dict['exclude']) & options)
             )
 
-        for category in ['first', 'main', 'last', 'paced']:
+        for category in ['first', 'main', 'last', 'parallel']:
             if category not in pass_group_dict:
-                if category != 'paced':
+                if category != 'parallel':
                     raise CViseError(f'Missing category {category}')
                 continue
 
@@ -173,24 +173,21 @@ class CVise:
         if not self.tidy:
             self.test_manager.backup_test_cases()
 
-        if not skip_initial:
-            logging.info('INITIAL PASSES')
-            self._run_additional_passes(pass_group['first'])
-        # logging.info('EXIT')
-        # sys.exit(-1)
+        if pass_group.get('parallel'):
+            logging.info('PARALLEL PASSES')
+            self._run_main_passes(pass_group['parallel'], True)
 
-        if pass_group.get('paced'):
-            logging.info('PACED PASSES')
-            self._run_main_passes(pass_group['paced'], True)
-            logging.info('PACED FINISHED, KILLING')
-            sys.exit(-1)
+        if all(not t.is_dir() for t in self.test_manager.test_cases):
+            if not skip_initial:
+                logging.info('INITIAL PASSES')
+                self._run_additional_passes(pass_group['first'])
 
-        self.test_manager.set_desired_pace(None)
-        logging.info('MAIN PASSES')
-        self._run_main_passes(pass_group['main'])
+            self.test_manager.set_desired_pace(None)
+            logging.info('MAIN PASSES')
+            self._run_main_passes(pass_group['main'])
 
-        logging.info('CLEANUP PASSES')
-        self._run_additional_passes(pass_group['last'])
+            logging.info('CLEANUP PASSES')
+            self._run_additional_passes(pass_group['last'])
 
         logging.info('===================== done ====================')
         return True
@@ -209,13 +206,13 @@ class CVise:
             else:
                 self.test_manager.run_pass(p)
 
-    def _run_main_passes(self, passes, paced=False):
+    def _run_main_passes(self, passes, parallel=False):
         while True:
             total_file_size = self.test_manager.total_file_size
             total_file_count = self.test_manager.total_file_count
 
             met_stopping_threshold = False
-            if paced:
+            if parallel:
                 self.test_manager.run_concurrent_passes(passes)
             else:
                 for p in passes:

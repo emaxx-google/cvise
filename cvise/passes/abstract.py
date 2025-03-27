@@ -146,7 +146,7 @@ class FuzzyBinaryState(BinaryState):
         return f'FuzzyBinaryState(chunk={self.chunk} index={self.index} instances={self.instances} tp={self.tp} rnd_index={self.rnd_index} rnd_chunk={self.rnd_chunk} dbg_file={self.dbg_file} strategy={self.strategy if hasattr(self, "strategy") else None} improv_per_depth={self.improv_per_depth if hasattr(self, "improv_per_depth") else None})'
 
     @staticmethod
-    def create(instances, strategy, depth_to_instances=None, pass_repr=''):
+    def create(instances, strategy=None, depth_to_instances=None, pass_repr=''):
         if not instances:
             return None
         self = FuzzyBinaryState()
@@ -171,7 +171,7 @@ class FuzzyBinaryState(BinaryState):
         elif strategy == 'size':
             return max(1, instances)
         else:
-            assert False
+            return instances
 
     @staticmethod
     def create_from_hint(instances, strategy, last_state_hint, depth_to_instances=None):

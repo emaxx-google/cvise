@@ -473,12 +473,13 @@ if __name__ == '__main__':
             if not args.no_timing:
                 fs.write(f'Runtime: {round(time_stop - time_start)} seconds\n')
 
-            fs.write('Reduced test-cases:\n\n')
-            for test_case in sorted(test_manager.test_cases):
-                if misc.is_readable_file(test_case):
-                    print(f'--- {test_case} ---')
-                    with open(test_case) as test_case_file:
-                        fs.write(test_case_file.read() + '\n')
+            if all(not t.is_dir() for t in test_manager.test_cases):
+                fs.write('Reduced test-cases:\n\n')
+                for test_case in sorted(test_manager.test_cases):
+                    if misc.is_readable_file(test_case):
+                        print(f'--- {test_case} ---')
+                        with open(test_case) as test_case_file:
+                            fs.write(test_case_file.read() + '\n')
             if script:
                 os.unlink(script.name)
 

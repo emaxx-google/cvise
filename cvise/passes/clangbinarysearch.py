@@ -1,4 +1,3 @@
-import copy
 import logging
 import os
 import re
@@ -6,20 +5,12 @@ import shutil
 import subprocess
 import time
 
-from cvise.passes.abstract import AbstractPass, FuzzyBinaryState, PassResult
+from cvise.passes.abstract import AbstractPass, BinaryState, PassResult
 from cvise.utils.misc import CloseableTemporaryFile
 
 
-previous_clang_delta_std = None
-
-
 class ClangBinarySearchPass(AbstractPass):
-    QUERY_TIMEOUT = 100
-
-    def __init__(self, arg=None, external_programs=None):
-        super().__init__(arg, external_programs)
-        self.previous_clang_delta_std = previous_clang_delta_std
-        self.clang_delta_std = None
+    QUERY_TIMEOUT = 10
 
     def check_prerequisites(self):
         return self.check_external_program('clang_delta')
@@ -42,51 +33,21 @@ class ClangBinarySearchPass(AbstractPass):
         # Use the best standard option
         self.clang_delta_std = best
 
-    def new(self, test_case, _=None, last_state_hint=None):
-        global previous_clang_delta_std
-        if self.user_clang_delta_std:
-            self.clang_delta_std = self.user_clang_delta_std
-        elif previous_clang_delta_std is not None:
-            self.clang_delta_std = previous_clang_delta_std
-        elif self.previous_clang_delta_std is not None:
-            self.clang_delta_std = self.previous_clang_delta_std
-        else:
+    def new(self, test_case, _=None):
+        if not self.user_clang_delta_std:
             self.detect_best_standard(test_case)
-            previous_clang_delta_std = self.clang_delta_std
-            self.previous_clang_delta_std = self.clang_delta_std
-
-        state = None
-        if last_state_hint:
-            state = FuzzyBinaryState.create_from_hint(None, last_state_hint)
-            if state:
-                logging.info(f'ClangBinarySearchPass.new: arg={self.arg} hint to start from chunk={state.chunk} index={state.index}')
-        if not state:
-            instances = self.count_instances(test_case)
-            state = FuzzyBinaryState.create(instances)
-        if state and last_state_hint:
-            state.success_history = last_state_hint.success_history
-        if state:
-            state.clang_delta_std = self.clang_delta_std
-        return state
+        else:
+            self.clang_delta_std = self.user_clang_delta_std
+        return BinaryState.create(self.count_instances(test_case))
 
     def advance(self, test_case, state):
-        if not self.previous_clang_delta_std:
-            self.previous_clang_delta_std = state.clang_delta_std
-        if not self.clang_delta_std:
-            self.clang_delta_std = state.clang_delta_std
-        global previous_clang_delta_std
-        if not previous_clang_delta_std:
-            previous_clang_delta_std = state.clang_delta_std
-
         return state.advance()
 
     def advance_on_success(self, test_case, state):
-        old = copy.copy(state)
         instances = state.real_num_instances - state.real_chunk()
         state = state.advance_on_success(instances)
         if state:
             state.real_num_instances = None
-        logging.info(f'ClangBinarySearchPass.advance_on_success: delta_instances={old.instances-state.instances} chunk={old.chunk if old.tp==0 else old.rnd_chunk} tp={old.tp}')
         return state
 
     def count_instances(self, test_case):
@@ -133,17 +94,13 @@ class ClangBinarySearchPass(AbstractPass):
                 pass
 
     def transform(self, test_case, state, process_event_notifier):
-        # logging.info(f'transform: arg={self.arg} state={state}')
-        old_state = copy.copy(state)
-
-        if not self.clang_delta_std:
-            self.clang_delta_std = state.clang_delta_std
+        logging.debug(f'TRANSFORM: {state}')
 
         tmp = os.path.dirname(test_case)
         with CloseableTemporaryFile(mode='w', dir=tmp) as tmp_file:
             args = [
                 f'--transformation={self.arg}',
-                f'--counter={state.begin() + 1}',
+                f'--counter={state.index + 1}',
                 f'--to-counter={state.end()}',
                 '--warn-on-counter-out-of-bounds',
                 '--report-instances-count',
@@ -161,17 +118,7 @@ class ClangBinarySearchPass(AbstractPass):
             tmp_file.close()
             if returncode == 0:
                 shutil.copy(tmp_file.name, test_case)
-                assert old_state.instances == state.instances
-                # logging.info(f'transform: arg={self.arg} returning OK: instances={state.instances} old_state.instances={old_state.instances}')
                 return (PassResult.OK, state)
-            elif returncode == -11:
-                instances = self.count_instances(test_case)
-                logging.info(f'transform: arg={self.arg} recalculated instance from {state.instances} to {instances}')
-                if instances == 0:
-                    return (PassResult.STOP, None)
-                else:
-                    state.instances = instances
-                    return (PassResult.INVALID, state)
             else:
                 return (
                     PassResult.STOP if returncode == 255 else PassResult.ERROR,

@@ -212,7 +212,7 @@ class GenericPass(AbstractPass):
         for h in hints:
             d = path_to_depth.get(hint_main_file(h), max_depth + 1)
             depth_to_instances[d] += 1
-        logging.info(f'Generated hints for arg={self.arg}: {instances}')
+        logging.debug(f'Generated hints for arg={self.arg}: {instances}')
 
         if logging.getLogger().isEnabledFor(logging.DEBUG) and False:
             for hint in hints:

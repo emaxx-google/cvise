@@ -112,3 +112,4 @@ class BalancedPass(AbstractPass):
                     return (PassResult.OK, state)
                 else:
                     state = self.advance(test_case, state)
+    

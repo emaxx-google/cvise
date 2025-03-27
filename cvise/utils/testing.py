@@ -83,6 +83,7 @@ class TestEnvironment:
     ):
         self.state = state
         self.folder = folder
+        assert folder.exists(), f'{folder}'
         self.base_size = None
         self.new_size = None
         self.test_script = test_script
@@ -127,29 +128,7 @@ class TestEnvironment:
             self.base_size = get_file_size(self.test_case_full_path[0] if isinstance(self.test_case_full_path, list) else self.test_case_full_path)
             self.initial_file_count = get_file_count(self.test_case_full_path[0] if isinstance(self.test_case_full_path, list) else self.test_case_full_path)
 
-            # Copy files to the created folder
-            for test_case in self.all_test_cases:
-                if os.path.basename(test_case) == self.test_case:
-                    continue
-                (self.folder / test_case.parent).mkdir(parents=True, exist_ok=True)
-                dest = self.folder / test_case.parent / os.path.basename(test_case)
-                logging.debug(f'TestEnvironment.run: copy from {test_case} to {dest}')
-                shutil.copytree(test_case, dest, symlinks=True)
-                for extra in self.extra_file_paths(test_case):
-                    logging.debug(f'TestEnvironment.run: copy from {extra} to {dest.parent}')
-                    shutil.copy(extra, dest.parent)
-
-            src = self.test_case_full_path[0] if isinstance(self.test_case_full_path, list) else self.test_case_full_path
-            dest = self.folder / test_case.parent / os.path.basename(test_case)
-            logging.debug(f'TestEnvironment.run: copy from {src} to {dest}')
-            if src.is_dir():
-                shutil.copytree(src, dest, symlinks=True)
-            else:
-                shutil.copy2(src, dest)
-            for origin in self.test_case_full_path if isinstance(self.test_case_full_path, list) else [self.test_case_full_path]:
-                for extra in self.extra_file_paths(origin):
-                    logging.debug(f'TestEnvironment.run: copy from {extra} to {dest.parent}')
-                    shutil.copy(extra, dest.parent)
+            self.copy_inputs()
 
             # transform by state
             (result, self.state) = self.transform(
@@ -187,6 +166,33 @@ class TestEnvironment:
         finally:
             os.chdir(self.pwd)
         return returncode
+
+    def copy_inputs(self):
+        assert self.folder.exists(), f'{self.folder}'
+
+        # Copy files to the created folder
+        for test_case in self.all_test_cases:
+            if os.path.basename(test_case) == self.test_case:
+                continue
+            (self.folder / test_case.parent).mkdir(parents=True, exist_ok=True)
+            dest = self.folder / test_case.parent / os.path.basename(test_case)
+            logging.debug(f'TestEnvironment.run: copy from {test_case} to {dest}')
+            shutil.copytree(test_case, dest, symlinks=True)
+            for extra in self.extra_file_paths(test_case):
+                logging.debug(f'TestEnvironment.run: copy from {extra} to {dest.parent}')
+                shutil.copy(extra, dest.parent)
+
+        src = self.test_case_full_path[0] if isinstance(self.test_case_full_path, list) else self.test_case_full_path
+        dest = self.folder / os.path.basename(self.test_case)
+        logging.debug(f'TestEnvironment.run: copy from {src} to {dest}')
+        if src.is_dir():
+            shutil.copytree(src, dest, symlinks=True)
+        else:
+            shutil.copy2(src, dest)
+        for origin in self.test_case_full_path if isinstance(self.test_case_full_path, list) else [self.test_case_full_path]:
+            for extra in self.extra_file_paths(origin):
+                logging.debug(f'TestEnvironment.run: copy from {extra} to {dest.parent}')
+                shutil.copy(extra, dest.parent)
 
 def get_available_cores():
     try:
@@ -477,6 +483,8 @@ class TestManager:
         test_env = TestEnvironment(None, 0, self.test_script, folder, list(self.test_cases)[0], self.test_cases, None)
         logging.debug(f'sanity check tmpdir = {test_env.folder}')
 
+        test_env.copy_inputs()
+
         returncode = test_env.run_test(verbose)
         if returncode == 0:
             rmfolder(folder)
@@ -621,6 +629,7 @@ class TestManager:
         for future in self.futures:
             try:
                 test_env = future.result()
+                self.current_pass = self.future_to_pass[future]
                 outcome = self.check_pass_result(test_env)
                 if outcome == PassCheckingOutcome.ACCEPT:
                     return test_env
@@ -637,6 +646,7 @@ class TestManager:
             # Report bug if transform did not change the file
             if filecmp.cmp(self.current_test_case, test_env.test_case_path):
                 if not self.silent_pass_bug:
+                    raise RuntimeError(f'pass failed to modify the variant: compared {self.current_test_case} and {test_env.test_case_path} (cwd={os.getcwd()})')
                     if not self.report_pass_bug(test_env, 'pass failed to modify the variant'):
                         return PassCheckingOutcome.QUIT_LOOP
                 return PassCheckingOutcome.IGNORE
@@ -740,12 +750,15 @@ class TestManager:
                 if quit_loop and len(self.current_passes) == 1:
                     if success_cnt > 0:
                         self.current_pass = best_success_pass
-                        logging.info(f'run_parallel_tests: proceeding on quit_loop: best improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state}')
+                        logging.debug(f'run_parallel_tests: proceeding on quit_loop: best improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state}')
+                        self.states[0] = best_success_env.state
                         self.terminate_all(pool)
                         return best_success_env
                     else:
                         success = self.wait_for_first_success()
-                        logging.info(f'run_parallel_tests: wait_for_first_success returned {success.state if success else None}')
+                        logging.debug(f'run_parallel_tests: wait_for_first_success returned {success.state if success else None}')
+                        if success:
+                            self.states[0] = success.state
                         self.terminate_all(pool)
                         return success
 
@@ -796,7 +809,7 @@ class TestManager:
                             self.release_future(future)
                             improv_speed = best_success_improv / (now - measure_start_time)
                             file_count_improv_speed = best_success_improv_file_count / (now - measure_start_time)
-                            logging.info(f'observed success success_cnt={success_cnt} improv={improv} improv_file_count={improv_file_count} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={finished_jobs} failed_merges={len(self.failed_merges)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed} comparison_key={comparison_key}')
+                            logging.debug(f'observed success success_cnt={success_cnt} improv={improv} improv_file_count={improv_file_count} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={finished_jobs} failed_merges={len(self.failed_merges)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed} comparison_key={comparison_key}')
                         elif outcome == PassCheckingOutcome.IGNORE:
                             if isinstance(env.state, list):
                                 self.failed_merges.append(env.state)
@@ -818,12 +831,12 @@ class TestManager:
                             should_proceed = True
 
                     if should_proceed:
-                        logging.info(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} failed_merges={len(self.failed_merges)} best_success_job_counter={best_success_job_counter} order={order} improv={best_success_improv} improv_file_count={best_success_improv_file_count} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} strategy={self.strategy} comparison_key={self.get_state_comparison_key(best_success_env.state, best_success_improv, best_success_improv_file_count)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed}')
+                        logging.debug(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} failed_merges={len(self.failed_merges)} best_success_job_counter={best_success_job_counter} order={order} improv={best_success_improv} improv_file_count={best_success_improv_file_count} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} strategy={self.strategy} comparison_key={self.get_state_comparison_key(best_success_env.state, best_success_improv, best_success_improv_file_count)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed}')
                         for pass_id, state in dict((fu.pass_id, fu.state)
                                                 for fu in sorted(self.futures, key=lambda fu: -fu.order)
                                                 if not isinstance(fu.pass_id, list) and
                                                    fu.order > (self.last_finished_order[fu.pass_id] or 0)).items():
-                            # logging.info(f'run_parallel_tests: rewinding {passes[pass_id]} from {self.states[pass_id]} to {state}')
+                            logging.debug(f'run_parallel_tests: rewinding {passes[pass_id]} from {self.states[pass_id]} to {state}')
                             self.states[pass_id] = state
                         self.terminate_all(pool)
                         return best_success_env
@@ -948,12 +961,15 @@ class TestManager:
                         if state is None and len(passes) == 1:
                             if success_cnt > 0:
                                 self.current_pass = best_success_pass
-                                logging.info(f'run_parallel_tests: proceeding on end state with best: improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={self.current_pass} state={best_success_env.state}')
+                                logging.debug(f'run_parallel_tests: proceeding on end state with best: improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={self.current_pass} state={best_success_env.state}')
+                                self.states[0] = best_success_env.state
                                 self.terminate_all(pool)
                                 return best_success_env
                             else:
                                 success = self.wait_for_first_success()
-                                logging.info(f'run_parallel_tests: proceeding on end after wait_for_first_success: state={success.state if success else None}')
+                                logging.debug(f'run_parallel_tests: proceeding on end after wait_for_first_success: state={success.state if success else None}')
+                                if success:
+                                    self.states[0] = success.state
                                 self.terminate_all(pool)
                                 return success
 
@@ -1023,11 +1039,9 @@ class TestManager:
                             continue
 
                 # create initial state
-                new_path = os.path.join(self.roots[1], os.path.basename(self.current_test_case))
-                logging.debug(f'run_pass: copy from {self.current_test_case} to {new_path}')
-                shutil.copytree(self.current_test_case, new_path, symlinks=True)
-                self.states = [self.current_pass.new(new_path, self.check_sanity)]
+                self.states = [self.current_pass.new(self.current_test_case, self.check_sanity)]
                 self.skip = False
+                self.last_job_update = None
 
                 self.timeout_count = 0
                 while self.states[0] is not None and not self.skip:
@@ -1220,30 +1234,22 @@ class TestManager:
             logging.info(diff_str)
 
         try:
-            with tempfile.TemporaryDirectory(dir=self.current_test_case.parent) as tmp_dest:
-                tmp_dest_subdir = Path(tmp_dest) / self.current_test_case.name
-                logging.debug(f'process_result: copy from {test_env.test_case_path} to {tmp_dest_subdir}')
-                if test_env.test_case_path.is_dir():
-                    shutil.copytree(test_env.test_case_path, tmp_dest_subdir, symlinks=True)
-                else:
-                    shutil.copy2(test_env.test_case_path, tmp_dest_subdir)
-                os.replace(self.current_test_case, Path(tmp_dest) / 'tmp_old')
-                os.replace(tmp_dest_subdir, self.current_test_case)
+            logging.debug(f'process_result: copy from {test_env.test_case_path} to {self.current_test_case}')
+            if test_env.test_case_path.is_dir():
+                shutil.rmtree(self.current_test_case, ignore_errors=True)
+                shutil.copytree(test_env.test_case_path, self.current_test_case, symlinks=True)
+            else:
+                shutil.copy(test_env.test_case_path, self.current_test_case)
         except FileNotFoundError:
             raise RuntimeError(
                 f"Can't find {self.current_test_case} -- did your interestingness test move it?"
             ) from None
-
-        if len(self.states) == 1:
-            self.states = [self.current_pass.advance_on_success(test_env.test_case_path, test_env.state)]
-            new_path = os.path.join(self.roots[1], os.path.basename(self.current_test_case))
-            logging.info(f'process_result: after advance_on_success: copy_from={test_env.test_case_path} copy_to={new_path}')
-            logging.debug(f'process_result: rmtree {new_path}')
-            shutil.rmtree(new_path, ignore_errors=True)
-            logging.debug(f'process_result: copy from {test_env.test_case_path} to {new_path}')
-            shutil.copytree(test_env.test_case_path, new_path, symlinks=True)
-        # self.pass_statistic.add_success(self.current_pass)
         on_succeeded(self.current_pass, self.total_file_size)
+
+        if len(self.current_passes) == 1:
+            assert self.states[0]
+            self.states[0] = self.current_pass.advance_on_success(test_env.test_case_path, self.states[0])
+            # self.pass_statistic.add_success(self.current_pass)
 
         pct = 100 - (self.total_file_size * 100.0 / self.orig_total_file_size)
         notes = []
