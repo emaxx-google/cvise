@@ -490,7 +490,11 @@ class TestManager:
                 if future.exception():
                     # starting with Python 3.11: concurrent.futures.TimeoutError == TimeoutError
                     if type(future.exception()) in (TimeoutError, concurrent.futures.TimeoutError):
-                        logging.warning(f'Test timed out: pass={self.future_to_pass[future]} state={future.state}')
+                        if future.is_init:
+                            logging.warning(f'Heuristic initialization timed out: pass={self.current_passes[future.pass_id]}')
+                            self.states[future.pass_id] = None
+                        else:
+                            logging.warning(f'Test timed out: pass={self.future_to_pass[future]} state={future.state}')
                         self.timeout_count += 1
                         if self.timeout_count < self.MAX_TIMEOUTS or False:  # DISABLED
                             self.save_extra_dir(self.temporary_folders[future])
@@ -635,6 +639,7 @@ class TestManager:
             best_file_count_improv_speed = None
             any_merge_started = False
             self.any_merge_completed = False
+            job_counter_when_init_finished = None
 
             successes = [(s, p, i, ifc) for s, p, i, ifc in self.next_successes_hint if not isinstance(s, list)] + self.successes_hint
             successes.sort(key=lambda i: (-i[2], -i[3]))
@@ -729,7 +734,9 @@ class TestManager:
                     improv_speed = best_success_improv / (now - measure_start_time)
                     file_count_improv_speed = best_success_improv_file_count / (now - measure_start_time)
                     should_proceed = not self.futures or len(self.current_passes) == 1
-                    if not should_proceed and finished_jobs > self.parallel_tests * 5 and (not any_merge_started or self.any_merge_completed) and now - measure_start_time >= 10:
+                    if not should_proceed and job_counter_when_init_finished is not None and \
+                        finished_jobs - job_counter_when_init_finished > max(self.parallel_tests, len(self.current_passes)) * 5 and \
+                            (not any_merge_started or self.any_merge_completed) and now - measure_start_time >= 10:
                         if best_improv_speed is None or improv_speed > best_improv_speed:
                             if logging.getLogger().isEnabledFor(logging.DEBUG):
                                 logging.debug(f'run_parallel_tests: new best_improv_speed={improv_speed} old={best_improv_speed}')
@@ -778,8 +785,10 @@ class TestManager:
                     self.futures.append(future)
                     order += 1
                     continue
-                if not any(s not in ('needinit', 'initializing', None) for s in self.states):
+                if all(s in ('needinit', 'initializing', None) for s in self.states):
                     continue
+                if job_counter_when_init_finished is None and all(s not in ('needinit', 'initializing') for s in self.states):
+                    job_counter_when_init_finished = finished_jobs
 
                 state = None
                 if finished_jobs % 5 == 0 and len(self.next_successes_hint) >= 2:
