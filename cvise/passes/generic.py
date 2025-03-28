@@ -790,7 +790,7 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
                 command += ['-j64']
             extra_env = {
                 'EXTRA_CFLAGS': '-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk -fno-crash-diagnostics -Xclang -fallow-pcm-with-compiler-errors -ferror-limit=0',
-                'CLANG': '/usr/local/google/home/emaxx/clang-toys/clang-fprint-deserialized-declarations',
+                'CLANG': str(Path.home() / 'clang-toys/clang-fprint-deserialized-declarations'), # TODO: this should land to upstream Clang
             }
             if logging.getLogger().isEnabledFor(logging.DEBUG):
                 logging.debug(f'generate_clang_pcm_lazy_load_hints: running: {shlex.join(command)}\nenv: {extra_env}')

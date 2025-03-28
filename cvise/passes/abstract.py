@@ -117,29 +117,6 @@ class AbstractPass:
     def transform(self, test_case, state, process_event_notifier):
         raise NotImplementedError(f"Class {type(self).__name__} has not implemented 'transform'!")
 
-def get_available_cores():
-    try:
-        # try to detect only physical cores, ignore HyperThreading
-        # in order to speed up parallel execution
-        core_count = psutil.cpu_count(logical=False)
-        if not core_count:
-            core_count = psutil.cpu_count(logical=True)
-        # respect affinity
-        try:
-            affinity = len(psutil.Process().cpu_affinity())
-            assert affinity >= 1
-        except AttributeError:
-            return core_count
-
-        if core_count:
-            core_count = min(core_count, affinity)
-        else:
-            core_count = affinity
-        return core_count
-    except NotImplementedError:
-        return 1
-
-CORES = get_available_cores()
 
 class FuzzyBinaryState(BinaryState):
     def __repr__(self):
@@ -282,55 +259,6 @@ class FuzzyBinaryState(BinaryState):
             pos_le = 0
             pos_ri = self.instances - self.rnd_chunk
         self.rnd_index = random.randint(pos_le, pos_ri)
-
-class MultiFileFuzzyBinaryState(FuzzyBinaryState):
-    def __repr__(self):
-        return f'MultiFileFuzzyBinaryState(file_id={self.file_id} chunk={self.chunk} index={self.index} instances={self.instances} tp={self.tp} rnd_index={self.rnd_index} rnd_chunk={self.rnd_chunk} dbg_file={self.dbg_file})'
-
-    @staticmethod
-    def create(files, instances0):
-        if not files:
-            return None
-        zigote = FuzzyBinaryState.create(instances0)
-        self = MultiFileFuzzyBinaryState()
-        self.__dict__.update(zigote.__dict__)
-        self.file_id = 0
-        return self
-
-    def advance(self, all_files):
-        in_file = super().advance()
-        new = MultiFileFuzzyBinaryState()
-        new.file_id = self.file_id
-        while in_file is None:
-            new.file_id += 1
-            if new.file_id >= len(all_files):
-                return None
-            with open(all_files[new.file_id]) as f:
-                instances = len(f.readlines())
-            in_file = FuzzyBinaryState.create(instances)
-        new.__dict__.update(in_file.__dict__)
-        return new
-
-    def advance_on_success(self, all_files):
-        with open(all_files[self.file_id]) as f:
-            instances = len(f.readlines())
-        in_file = super().advance_on_success(instances)
-        new = MultiFileFuzzyBinaryState()
-        new.file_id = self.file_id
-        if in_file is None:
-            new.file_id += 1
-            with open(all_files[new.file_id]) as f:
-                instances = len(f.readlines())
-            in_file = FuzzyBinaryState.create(instances)
-        new.__dict__.update(in_file.__dict__)
-        return new
-
-
-class MergedState:
-    def __init__(self, path_pass_state_tuples):
-        self.path_pass_state_tuples = path_pass_state_tuples
-    def __repr__(self):
-        return f'MergedState({self.path_pass_state_tuples})'
 
 
 @unique
