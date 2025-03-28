@@ -168,8 +168,6 @@ class TestEnvironment:
         return returncode
 
     def copy_inputs(self):
-        assert self.folder.exists(), f'{self.folder}'
-
         # Copy files to the created folder
         for test_case in self.all_test_cases:
             if os.path.basename(test_case) == self.test_case:
@@ -832,7 +830,7 @@ class TestManager:
                     improv_speed = best_success_improv / (now - measure_start_time)
                     file_count_improv_speed = best_success_improv_file_count / (now - measure_start_time)
                     should_proceed = not self.futures
-                    if finished_jobs > self.parallel_tests * 5 and (not any_merge_started or self.any_merge_completed):
+                    if finished_jobs > self.parallel_tests * 5 and (not any_merge_started or self.any_merge_completed) and now - measure_start_time >= 10:
                         if best_improv_speed is None or improv_speed > best_improv_speed:
                             if logging.getLogger().isEnabledFor(logging.DEBUG):
                                 logging.debug(f'run_parallel_tests: new best_improv_speed={improv_speed} old={best_improv_speed}')
