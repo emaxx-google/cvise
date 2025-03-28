@@ -713,7 +713,8 @@ class TestManager:
                                     dbg.append(f'-{improv} bytes')
                                 if improv_file_count:
                                     dbg.append(f'-{improv_file_count} files')
-                                logging.info(f'candidate: {", ".join(dbg)} ({get_heuristic_names_for_log(env.state, pass_)})')
+                                if len(self.current_passes) > 1:
+                                    logging.info(f'candidate: {", ".join(dbg)} ({get_heuristic_names_for_log(env.state, pass_)})')
                             self.release_future(future)
                             improv_speed = best_success_improv / (now - measure_start_time)
                             file_count_improv_speed = best_success_improv_file_count / (now - measure_start_time)
