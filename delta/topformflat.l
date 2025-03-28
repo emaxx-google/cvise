@@ -148,7 +148,7 @@ void diag(char const *str)
 void possibleNewline(void)
 {
   if (nesting <= threshold && chunk_start < pos) {
-    printf("{\"t\":\"curly::%d\",\"l\":%d,\"r\":%d}\n", threshold, chunk_start, pos);
+    printf("{\"t\":\"topformflat%d\",\"l\":%d,\"r\":%d}\n", threshold, chunk_start, pos);
     chunk_start = pos;
   }
 }

@@ -133,6 +133,9 @@ class PolyState(dict):
     def get_type(self):
         return self.types[self.ptr]
 
+    def get_improv(self):
+        return sum(self.improv_per_depth)
+
 
 class GenericPass(AbstractPass):
     def __init__(self, arg=None, external_programs=None):
@@ -693,7 +696,7 @@ def generate_clang_delta_hints(test_case, files, file_to_id, transformation):
         if not line.strip():
             continue
         h = json.loads(line)
-        h['t'] = f'clang::{transformation}'
+        h['t'] = transformation
         if 'multi' in h:
             for l in h['multi']:
                 l['f'] = file_id
@@ -864,7 +867,7 @@ def generate_line_markers_hints(test_case, files, file_to_id):
             line_end_pos = line_start_pos + len(line)
             if line_regex.search(line):
                 hints.append({
-                    't': 'line_marker',
+                    't': 'linemarker',
                     'f': file_id,
                     'l': line_start_pos,
                     'r': line_end_pos,
@@ -887,7 +890,7 @@ def generate_blank_hints(test_case, files, file_to_id):
             for i, pattern in enumerate(patterns):
                 if re.match(pattern, line):
                     hints.append({
-                        't': f'blank::{i}',
+                        't': f'blank{i}',
                         'f': file_id,
                         'l': line_start_pos,
                         'r': line_end_pos,

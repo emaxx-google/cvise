@@ -263,6 +263,17 @@ def is_pace_good(current_pass, desired):
     logging.info(f'is_pace_good: len={len(size_history)} conf=0..{round(conf_r,1)} mean={round(ME,1)} desired={round(desired,1)}')
     return desired <= conf_r
 
+def get_heuristic_names_for_log(state, pass_):
+    if isinstance(state, list) and hasattr(state[0], 'get_type'):
+        improves = collections.defaultdict(int)
+        for s in state:
+            improves[s.get_type()] += s.get_improv()
+        order = sorted([(v, k) for k, v in improves.items()], reverse=True)
+        return ' + '.join(n for _, n in order)
+    if hasattr(state, 'get_type'):
+        return state.get_type()
+    return str(pass_)
+
 class TestManager:
     GIVEUP_CONSTANT = 50000
     MAX_TIMEOUTS = 0  # TODO: 20
@@ -806,6 +817,7 @@ class TestManager:
                                 logging.debug(f'run_parallel_tests: rename from {future.result().test_case_path} to {pa}')
                                 os.rename(future.result().test_case_path, pa)
                                 best_success_env.test_case = pa
+                                logging.info(f'candidate: -{best_success_improv} bytes ({get_heuristic_names_for_log(env.state, pass_)})')
                             self.release_future(future)
                             improv_speed = best_success_improv / (now - measure_start_time)
                             file_count_improv_speed = best_success_improv_file_count / (now - measure_start_time)
@@ -1255,7 +1267,8 @@ class TestManager:
         notes = []
         notes.append(f'{round(pct, 1)}%')
         notes.append(f'{self.total_file_size} bytes')
-        notes.append(f'{self.total_file_count} files')
+        c = self.total_file_count
+        notes.append(f'{c} file{"s" if c > 1 else ""}')
         if self.total_line_count:
             notes.append(f'{self.total_line_count} lines')
         if len(self.test_cases) > 1:
