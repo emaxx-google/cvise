@@ -215,7 +215,7 @@ class GenericPass(AbstractPass):
         for h in hints:
             d = path_to_depth.get(hint_main_file(h), max_depth + 1)
             depth_to_instances[d] += 1
-        logging.debug(f'Generated hints for arg={self.arg}: {instances}')
+        logging.info(f'Generated hints for arg={self.arg}: {instances}')
 
         if logging.getLogger().isEnabledFor(logging.DEBUG) and False:
             for hint in hints:
@@ -785,9 +785,7 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
             # Hack to avoid rebuilding PCMs
             (tmp_copy / '.ALWAYS').touch()
 
-            command = ['make']
-            if not logging.getLogger().isEnabledFor(logging.DEBUG):
-                command += ['-j64']
+            command = ['make', '-j64']
             extra_env = {
                 'EXTRA_CFLAGS': '-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk -fno-crash-diagnostics -Xclang -fallow-pcm-with-compiler-errors -ferror-limit=0',
                 'CLANG': str(Path.home() / 'clang-toys/clang-fprint-deserialized-declarations'), # TODO: this should land to upstream Clang
@@ -797,6 +795,9 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
             proc = subprocess.run(command, cwd=tmp_copy, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', env=os.environ.copy() | extra_env)
             if logging.getLogger().isEnabledFor(logging.DEBUG):
                 logging.debug(f'generate_clang_pcm_lazy_load_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
+
+            for f in tmp_copy.rglob('*.o'):
+                f.unlink()
 
             extra_env['EXTRA_CFLAGS'] += f' -Xclang -print-deserialized-declarations-to-file={tmp_dump.name}'
             if logging.getLogger().isEnabledFor(logging.DEBUG):
@@ -834,9 +835,13 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
                         path_to_used.setdefault(file, []).append((seg_from-1, seg_to-1))
 
     hints = []
-    for file, segs in path_to_used.items():
+    for file in files:
+        if file.is_symlink() or file.suffix in ('.makefile', '.cppmap') or file.name in ('Makefile',):
+            continue
+        segs = path_to_used.get(file, [])
         file_id = file_to_id[file]
         segptr = 0
+        hint_type = 'lazypcm' if segs else 'lazypcmwhole'
         with open(file) as f:
             line_start_pos = 0
             for i, line in enumerate(f):
@@ -845,7 +850,7 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
                     segptr += 1
                 if segptr >= len(segs) or not (segs[segptr][0] <= i <= segs[segptr][1]):
                     hints.append({
-                        't': 'lazypcm',
+                        't': hint_type,
                         'f': file_id,
                         'l': line_start_pos,
                         'r': line_end_pos,
