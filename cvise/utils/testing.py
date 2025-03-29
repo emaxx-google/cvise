@@ -727,7 +727,8 @@ class TestManager:
                         elif outcome == PassCheckingOutcome.IGNORE:
                             if isinstance(env.state, list):
                                 self.failed_merges.append(env.state)
-                                self.failed_merge_comparison_keys.append(self.get_state_comparison_key(env.state, env.size_improvement, env.file_count_improvement))
+                                if env.new_size is not None:
+                                    self.failed_merge_comparison_keys.append(self.get_state_comparison_key(env.state, env.size_improvement, env.file_count_improvement))
                         self.current_pass = None
 
                 if success_cnt > 0:
