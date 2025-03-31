@@ -881,26 +881,26 @@ def generate_line_markers_hints(test_case, files, file_to_id):
     return hints
 
 def generate_blank_hints(test_case, files, file_to_id):
-    if test_case.is_dir():
-        return []
-
-    patterns = [r'^\s*$', r'^#']
-    path = files[0]
-    file_id = file_to_id[path]
+    generic_patterns = [r'^\s*\n$', r'[ \t]+(?=[ \t])', r'[ \t]+(?=\n)']
+    non_makefile_patterns = [r'^[ \t]+']
     hints = []
-    with open(path) as f:
-        line_start_pos = 0
-        for line in f:
-            line_end_pos = line_start_pos + len(line)
-            for i, pattern in enumerate(patterns):
-                if re.match(pattern, line):
-                    hints.append({
-                        't': f'blank{i}',
-                        'f': file_id,
-                        'l': line_start_pos,
-                        'r': line_end_pos,
-                    })
-            line_start_pos = line_end_pos
+    for file_id, path in enumerate(files):
+        patterns = copy.copy(generic_patterns)
+        if path.name != 'Makefile':
+            patterns += non_makefile_patterns
+        with open(path) as f:
+            line_start_pos = 0
+            for line in f:
+                line_end_pos = line_start_pos + len(line)
+                for i, pattern in enumerate(patterns):
+                    for match in re.finditer(pattern, line):
+                        hints.append({
+                            't': f'blank{i}',
+                            'f': file_id,
+                            'l': line_start_pos + match.start(),
+                            'r': line_start_pos + match.end(),
+                        })
+                line_start_pos = line_end_pos
     return hints
 
 def generate_delete_file_hints(test_case, files, file_to_id, other_init_states):
@@ -953,8 +953,10 @@ def get_root_compile_command(test_case):
         for i, l in enumerate(lines):
             if '.o:' in l:
                 p = i + 1
-                while lines[p].strip().lstrip('@').lstrip().split()[0] in ('mkdir',):
+                while p < len(lines) and lines[p].strip().lstrip('@').lstrip().split()[0] in ('mkdir',):
                     p += 1
+                if p >= len(lines):
+                    return None
                 return lines[p].strip().lstrip('@').lstrip()
         else:
             return None
