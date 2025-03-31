@@ -300,6 +300,11 @@ class TestManager:
                 rmfolder(r)
             self.roots = []
 
+    def flush_folder_tombstone(self):
+        for path in self.folder_tombstone:
+            rmfolder(path)
+        self.folder_tombstone = []
+
     def restore_mode(self):
         for test_case in self.test_cases:
             test_case.chmod(self.test_cases_modes[test_case])
@@ -442,14 +447,12 @@ class TestManager:
 
     def release_folders(self):
         for future in self.futures:
-            self.release_folder(future)
+            if future.job_type == JobType.PASS_TRANSFORM:
+                self.release_folder(future)
         assert not self.temporary_folders
         if self.tmp_for_best:
             self.folder_tombstone.append(self.tmp_for_best)
             self.tmp_for_best = None
-
-        for path in self.folder_tombstone:
-            rmfolder(path)
 
     @classmethod
     def log_key_event(cls, event):
@@ -622,6 +625,9 @@ class TestManager:
         return PassCheckingOutcome.IGNORE
 
     def terminate_all(self, pool):
+        for f in self.futures:
+            if f.job_type != JobType.RMFOLDER:
+                f.cancel()
         wait(f for f in self.futures if f.job_type == JobType.RMFOLDER)
         pool.stop()
         pool.join()
@@ -1040,10 +1046,12 @@ class TestManager:
             self.restore_mode()
             # self.pass_statistic.stop(self.current_pass)
             self.remove_root()
+            self.flush_folder_tombstone()
             self.current_passes = None
         except KeyboardInterrupt:
             logging.info('Exiting now ...')
             self.remove_root()
+            self.flush_folder_tombstone()
             sys.exit(1)
 
     def run_concurrent_passes(self, passes):
