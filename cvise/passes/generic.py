@@ -857,21 +857,27 @@ def generate_line_markers_hints(test_case, files, file_to_id):
     return hints
 
 def generate_blank_hints(test_case, files, file_to_id):
-    generic_patterns = [r'^\s*\n$', r'[ \t]+(?=[ \t])', r'[ \t]+(?=\n)']
-    non_makefile_patterns = [r'^[ \t]+']
+    generic_patterns = {
+        'blankline': r'^\s*\n$',
+        'blankconseq': r'[ \t]+(?=[ \t])',
+        'blanktrail': r'[ \t]+(?=\n)',
+    }
+    non_makefile_patterns = {
+        'blanklead': r'^[ \t]+',
+    }
     hints = []
     for file_id, path in enumerate(files):
         patterns = copy.copy(generic_patterns)
         if path.name != 'Makefile':
-            patterns += non_makefile_patterns
+            patterns.update(non_makefile_patterns)
         with open(path) as f:
             line_start_pos = 0
             for line in f:
                 line_end_pos = line_start_pos + len(line)
-                for i, pattern in enumerate(patterns):
+                for type, pattern in patterns.items():
                     for match in re.finditer(pattern, line):
                         hints.append({
-                            't': f'blank{i}',
+                            't': type,
                             'f': file_id,
                             'l': line_start_pos + match.start(),
                             'r': line_start_pos + match.end(),
