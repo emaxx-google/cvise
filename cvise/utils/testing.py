@@ -725,8 +725,6 @@ class TestManager:
                             # assert improv == self.run_test_case_size - get_file_size(env.test_case_path), f'improv={improv} run_test_case_size={self.run_test_case_size} get_file_size(env.test_case_path)={get_file_size(env.test_case_path)} files={list(env.test_case_path.rglob('*'))}'
                             if hasattr(pass_, 'on_success_observed'):
                                 pass_.on_success_observed(env.state)
-                            # if isinstance(env.state, list):
-                            #     assert env.predicted_improv == improv, f'improv={improv} predicted_improv={env.predicted_improv} state={env.state}'
                             self.next_successes_hint.append((env.state, pass_, improv, improv_file_count))
                             comparison_key = self.get_state_comparison_key(env.state, improv, improv_file_count)
                             if best_success_improv is None or comparison_key < best_success_comparison_key:
@@ -850,7 +848,8 @@ class TestManager:
                         merge_comparison_key = None
                         if len(merge_train) >= 2:
                             merged_state = [sta for sta, pa, imp, imp_fc in merge_train]
-                            merge_improv, merge_improv_file_count = merge_cands[0][1].predict_improv(self.current_test_case, merged_state)
+                            merge_improv = sum(imp for sta, pa, imp, imp_fc in merge_train)
+                            merge_improv_file_count = sum(imp_fc for sta, pa, imp, imp_fc in merge_train)
                             # logging.info(f'run_parallel_tests: merge_train={merge_train} merge_improv={merge_improv} in_attempted={merge_improv in attempted_merges}')
                             merge_repr = self.get_state_compact_repr([sta for sta, pa, imp, imp_fc in merge_train])
                             if (merge_improv > 0 or merge_improv_file_count > 0) and (merge_repr not in attempted_merges):
@@ -890,8 +889,6 @@ class TestManager:
                         self.pid_queue,
                     )
                     test_env.is_regular_iteration = should_advance
-                    if isinstance(state, list):
-                        test_env.predicted_improv = merge_improv
                     future = pool.schedule(test_env.run, timeout=self.timeout)
                     future.job_type = JobType.PASS_TRANSFORM
                     future.order = order

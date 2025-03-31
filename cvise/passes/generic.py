@@ -316,29 +316,6 @@ class GenericPass(AbstractPass):
             logging.debug(f'{self}.transform: END: state={state}')
         return (PassResult.OK, state)
 
-    def predict_improv(self, test_case, state):
-        test_case = Path(test_case)
-        state_list = state if isinstance(state, list) else [state]
-
-        files, path_to_depth, hints = load_hints(state_list, test_case)
-
-        files_for_deletion = set(h['n'] for h in hints if h['t'].startswith('delfile::'))
-        file_to_edits = {}
-        for h in hints:
-            for l in get_hint_locs(h):
-                if l['f'] not in files_for_deletion:
-                    file_to_edits.setdefault(l['f'], []).append(l)
-
-        improv = 0
-        for f in files_for_deletion:
-            improv += files[f].stat().st_size
-        for chunks in file_to_edits.values():
-            for s in merge_chunks(chunks):
-                improv += s['r'] - s['l']
-                if 'v' in s:
-                    improv -= len(s['v'])
-        return improv, len(files_for_deletion)
-
 def load_hints(state_list, test_case, load_all=False):
     hints_to_load = {}
     for s in state_list:
