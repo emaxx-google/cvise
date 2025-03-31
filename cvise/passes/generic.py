@@ -455,7 +455,7 @@ def generate_makefile_hints(test_case, files, file_to_id):
                                 })
                             option_with_untouchable_arg = False
                         elif i > 0 and not option_with_untouchable_arg and \
-                                token not in ('-c', '-nostdinc++', '-nostdlib++', '-fno-crash-diagnostics', '-ferror-limit=0', '-w', '-Wno-error', '-Xclang=-emit-module', '-xc++', '-fmodules', '-fno-implicit-modules', '-fno-implicit-module-maps', '-Xclang=-fno-cxx-modules', '-Xclang=-fmodule-map-file-home-is-cwd') and \
+                                token not in ('-c', '-cc1', '-nostdinc++', '-nostdlib++', '-fno-crash-diagnostics', '-ferror-limit=0', '-w', '-Wno-error', '-Xclang=-emit-module', '-xc++', '-fmodules', '-fno-implicit-modules', '-fno-implicit-module-maps', '-Xclang=-fno-cxx-modules', '-Xclang=-fmodule-map-file-home-is-cwd') and \
                                 not token.startswith('-fmodule-name=') and not token.startswith('-std=') and not token.startswith('--sysroot='):
                             if token in ('-o', '-iquote', '-isystem', '-I'):
                                 option_with_untouchable_arg = True
