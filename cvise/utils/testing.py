@@ -81,7 +81,6 @@ def rmfolder(name):
 class RmFolderEnvironment:
     def __init__(self, name):
         self.name = name
-
     def run(self):
         rmfolder(self.name)
 
@@ -445,6 +444,12 @@ class TestManager:
         for future in self.futures:
             self.release_folder(future)
         assert not self.temporary_folders
+        if self.tmp_for_best:
+            self.folder_tombstone.append(self.tmp_for_best)
+            self.tmp_for_best = None
+
+        for path in self.folder_tombstone:
+            rmfolder(path)
 
     @classmethod
     def log_key_event(cls, event):
@@ -616,8 +621,8 @@ class TestManager:
             return PassCheckingOutcome.QUIT_LOOP
         return PassCheckingOutcome.IGNORE
 
-    @classmethod
-    def terminate_all(cls, pool):
+    def terminate_all(self, pool):
+        wait(f for f in self.futures if f.job_type == JobType.RMFOLDER)
         pool.stop()
         pool.join()
 
@@ -730,7 +735,8 @@ class TestManager:
                                 best_success_improv = improv
                                 best_success_improv_file_count = improv_file_count
                                 best_success_comparison_key = self.get_state_comparison_key(best_success_env.state, best_success_improv, best_success_improv_file_count)
-                                self.folder_tombstone.append(self.tmp_for_best)
+                                if self.tmp_for_best:
+                                    self.folder_tombstone.append(self.tmp_for_best)
                                 self.tmp_for_best = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}best-')
                                 pa = os.path.join(self.tmp_for_best, os.path.basename(future.result().test_case_path))
                                 logging.debug(f'run_parallel_tests: rename from {future.result().test_case_path} to {pa}')
@@ -772,8 +778,9 @@ class TestManager:
 
                     if should_proceed:
                         logging.debug(f'run_parallel_tests: proceeding: finished_jobs={self.finished_transform_jobs} failed_merges={len(self.failed_merges)} order={order} improv={best_success_improv} improv_file_count={best_success_improv_file_count} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} strategy={self.strategy} comparison_key={self.get_state_comparison_key(best_success_env.state, best_success_improv, best_success_improv_file_count)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed}')
+                        transform_futures = list(f for f in self.futures if f.job_type == JobType.PASS_TRANSFORM)
                         for pass_id, state in dict((fu.pass_id, fu.state)
-                                                for fu in sorted(self.futures, key=lambda fu: -fu.order)
+                                                for fu in sorted(transform_futures, key=lambda fu: -fu.order)
                                                 if not isinstance(fu.pass_id, list) and
                                                    fu.order > (self.last_finished_order[fu.pass_id] or 0)).items():
                             logging.debug(f'run_parallel_tests: rewinding {passes[pass_id]} from {self.states[pass_id]} to {state}')
