@@ -298,18 +298,17 @@ class GenericPass(AbstractPass):
             os.unlink(path)
 
         # Sanity-check we don't start including files outside of bundle.
-        try:
-            get_ordered_files_list(test_case, self.strategy)
-        except AssertionError as e:
-            raise RuntimeError(f'Sanity check failed:\nfiles_for_deletion={files_for_deletion}\nfile_to_edit_hints={file_to_edits.keys()}\nstate={state}\n{e}')
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            try:
+                get_ordered_files_list(test_case, self.strategy)
+            except AssertionError as e:
+                raise RuntimeError(f'Sanity check failed:\nfiles_for_deletion={files_for_deletion}\nfile_to_edit_hints={file_to_edits.keys()}\nstate={state}\n{e}')
 
         for s in state_list:
             s.improv_per_depth = []
             s.set_dbg(None)
         state_list[0].improv_per_depth = improv_per_depth
         dbg = 'HINTS=' + ','.join(sorted(set(h['t'] for h in hints)))
-        if files_for_deletion:
-            dbg += ';DEL=' + ','.join(sorted(str(files[f].relative_to(test_case)) for f in files_for_deletion))
         state_list[0].set_dbg(dbg)
 
         if logging.getLogger().isEnabledFor(logging.DEBUG):
