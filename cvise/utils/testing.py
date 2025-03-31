@@ -17,8 +17,6 @@ import sys
 import tempfile
 import traceback
 import concurrent.futures
-import statistics
-import threading
 import time
 
 from cvise.cvise import CVise
@@ -56,18 +54,36 @@ class PassCheckingOutcome(Enum):
     IGNORE = auto()
     QUIT_LOOP = auto()
 
+@unique
+class JobType(Enum):
+    RMFOLDER = auto()
+    PASS_NEW = auto()
+    PASS_TRANSFORM = auto()
+
+
+def rmtree(name):
+    # Not using shutil.rmtree() as it's much slower when there are many
+    # files - it calls stat on every file.
+    for root, dirs, files in os.walk(name, topdown=False):
+        for file in files:
+            os.remove(os.path.join(root, file))
+        for dir in dirs:
+            os.rmdir(os.path.join(root, dir))
+    os.rmdir(name)
 
 def rmfolder(name):
     assert 'cvise' in str(name)
     try:
-        logging.debug(f'rmfolder {name}')
-        shutil.rmtree(name)
-    except OSError:
+        rmtree(name)
+    except OSError as e:
         pass
 
-def schedule_rmfolder(name):
-    threading.Thread(target=lambda: rmfolder(name)).start()
+class RmFolderEnvironment:
+    def __init__(self, name):
+        self.name = name
 
+    def run(self):
+        rmfolder(self.name)
 
 class TestEnvironment:
     def __init__(
@@ -423,7 +439,7 @@ class TestManager:
     def release_folder(self, future):
         name = self.temporary_folders.pop(future)
         if not self.save_temps:
-            schedule_rmfolder(name)
+            self.folder_tombstone.append(name)
 
     def release_folders(self):
         for future in self.futures:
@@ -459,7 +475,7 @@ class TestManager:
     def release_future(self, future):
         self.futures.remove(future)
 
-        if not future.is_init:
+        if future.job_type == JobType.PASS_TRANSFORM:
             pass_ = self.future_to_pass[future]
             assert pass_
             if not isinstance(pass_, list):
@@ -490,13 +506,17 @@ class TestManager:
                 if future.exception():
                     # starting with Python 3.11: concurrent.futures.TimeoutError == TimeoutError
                     if type(future.exception()) in (TimeoutError, concurrent.futures.TimeoutError):
-                        if future.is_init:
+                        assert future.job_type != JobType.RMFOLDER
+                        if future.job_type == JobType.PASS_NEW:
                             logging.warning(f'Heuristic initialization timed out: pass={self.current_passes[future.pass_id]}')
                             self.states[future.pass_id] = None
-                        else:
+                        elif future.job_type == JobType.PASS_TRANSFORM:
+                            self.finished_transform_jobs += 1
                             logging.warning(f'Test timed out: pass={self.future_to_pass[future]} state={future.state}')
+                        else:
+                            assert False, f'Unexpected job type {future.job_type}'
                         self.timeout_count += 1
-                        if self.timeout_count < self.MAX_TIMEOUTS or False:  # DISABLED
+                        if self.timeout_count < self.MAX_TIMEOUTS and False:  # DISABLED
                             self.save_extra_dir(self.temporary_folders[future])
                             if len(self.current_passes) == 1:
                                 quit_loop = True
@@ -509,14 +529,16 @@ class TestManager:
                     else:
                         raise future.exception()
 
-                if future.is_init:
+                if future.job_type == JobType.RMFOLDER:
+                    pass
+                elif future.job_type == JobType.PASS_NEW:
                     state = future.result()
                     pass_id = future.pass_id
                     p = self.current_passes[pass_id]
                     logging.debug(f'Init completed for {p}')
                     self.states[pass_id] = state
                     self.init_states[pass_id] = state
-                else:
+                elif future.job_type == JobType.PASS_TRANSFORM:
                     test_env = future.result()
                     opass = self.current_pass
                     self.current_pass = self.future_to_pass[future]
@@ -528,13 +550,17 @@ class TestManager:
                     if outcome == PassCheckingOutcome.ACCEPT:
                         new_futures.add(future)
                     elif outcome == PassCheckingOutcome.IGNORE:
+                        self.finished_transform_jobs += 1
                         if isinstance(test_env.state, list):
                             self.failed_merges.append(test_env.state)
                             self.failed_merge_comparison_keys.append(self.get_state_comparison_key(test_env.state, test_env.size_improvement, test_env.file_count_improvement))
                     elif outcome == PassCheckingOutcome.QUIT_LOOP:
+                        self.finished_transform_jobs += 1
                         quit_loop = True
                         p = self.future_to_pass[future]
                         self.states[self.current_passes.index(p)] = None
+                else:
+                    assert False, f'Unexpected job_type {future.job_type}'
 
             else:
                 new_futures.add(future)
@@ -625,7 +651,7 @@ class TestManager:
         with pebble.ProcessPool(max_workers=self.parallel_tests) as pool:
             order = 1
             next_pass_to_schedule = 0
-            finished_jobs = 0
+            self.finished_transform_jobs = 0
             self.timeout_count = 0
             self.giveup_reported = False
             success_cnt = 0
@@ -654,11 +680,8 @@ class TestManager:
                 if len(self.futures) >= self.parallel_tests or not any(self.states):
                     wait(self.futures, return_when=FIRST_COMPLETED)
 
-                cnt_before = len(self.futures)
                 quit_loop = self.process_done_futures()
-                cnt_after = len(self.futures)
-                finished_jobs += cnt_before - cnt_after
-                assert finished_jobs <= order
+                assert self.finished_transform_jobs <= order
                 if quit_loop and len(self.current_passes) == 1:
                     if success_cnt > 0:
                         self.current_pass = best_success_pass
@@ -679,7 +702,7 @@ class TestManager:
 
                 tmp_futures = copy.copy(self.futures)
                 for future in tmp_futures:
-                    if future.done() and not future.exception() and not future.is_init:
+                    if future.done() and not future.exception() and future.job_type == JobType.PASS_TRANSFORM:
                         env = future.result()
                         assert env
                         pass_ = self.future_to_pass[future]
@@ -690,8 +713,8 @@ class TestManager:
                         outcome = self.check_pass_result(env)
                         if outcome == PassCheckingOutcome.ACCEPT:
                             success_cnt += 1
-                            finished_jobs += 1
-                            assert finished_jobs <= order
+                            self.finished_transform_jobs += 1
+                            assert self.finished_transform_jobs <= order
                             improv = env.size_improvement
                             improv_file_count = env.file_count_improvement
                             # assert improv == self.run_test_case_size - get_file_size(env.test_case_path), f'improv={improv} run_test_case_size={self.run_test_case_size} get_file_size(env.test_case_path)={get_file_size(env.test_case_path)} files={list(env.test_case_path.rglob('*'))}'
@@ -707,7 +730,7 @@ class TestManager:
                                 best_success_improv = improv
                                 best_success_improv_file_count = improv_file_count
                                 best_success_comparison_key = self.get_state_comparison_key(best_success_env.state, best_success_improv, best_success_improv_file_count)
-                                schedule_rmfolder(self.tmp_for_best)
+                                self.folder_tombstone.append(self.tmp_for_best)
                                 self.tmp_for_best = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}best-')
                                 pa = os.path.join(self.tmp_for_best, os.path.basename(future.result().test_case_path))
                                 logging.debug(f'run_parallel_tests: rename from {future.result().test_case_path} to {pa}')
@@ -723,7 +746,7 @@ class TestManager:
                             self.release_future(future)
                             improv_speed = best_success_improv / (now - measure_start_time)
                             file_count_improv_speed = best_success_improv_file_count / (now - measure_start_time)
-                            logging.debug(f'observed success success_cnt={success_cnt} improv={improv} improv_file_count={improv_file_count} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={finished_jobs} failed_merges={len(self.failed_merges)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed} comparison_key={comparison_key}')
+                            logging.debug(f'observed success success_cnt={success_cnt} improv={improv} improv_file_count={improv_file_count} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={self.finished_transform_jobs} failed_merges={len(self.failed_merges)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed} comparison_key={comparison_key}')
                         elif outcome == PassCheckingOutcome.IGNORE:
                             if isinstance(env.state, list):
                                 self.failed_merges.append(env.state)
@@ -736,7 +759,7 @@ class TestManager:
                     file_count_improv_speed = best_success_improv_file_count / (now - measure_start_time)
                     should_proceed = not self.futures or len(self.current_passes) == 1
                     if not should_proceed and job_counter_when_init_finished is not None and \
-                        finished_jobs - job_counter_when_init_finished > max(self.parallel_tests, len(self.current_passes)) * 5 and \
+                        self.finished_transform_jobs - job_counter_when_init_finished > max(self.parallel_tests, len(self.current_passes)) * 5 and \
                             (not any_merge_started or self.any_merge_completed) and now - measure_start_time >= 10:
                         if best_improv_speed is None or improv_speed > best_improv_speed:
                             if logging.getLogger().isEnabledFor(logging.DEBUG):
@@ -748,7 +771,7 @@ class TestManager:
                             should_proceed = True
 
                     if should_proceed:
-                        logging.debug(f'run_parallel_tests: proceeding: finished_jobs={finished_jobs} failed_merges={len(self.failed_merges)} order={order} improv={best_success_improv} improv_file_count={best_success_improv_file_count} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} strategy={self.strategy} comparison_key={self.get_state_comparison_key(best_success_env.state, best_success_improv, best_success_improv_file_count)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed}')
+                        logging.debug(f'run_parallel_tests: proceeding: finished_jobs={self.finished_transform_jobs} failed_merges={len(self.failed_merges)} order={order} improv={best_success_improv} improv_file_count={best_success_improv_file_count} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} strategy={self.strategy} comparison_key={self.get_state_comparison_key(best_success_env.state, best_success_improv, best_success_improv_file_count)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed}')
                         for pass_id, state in dict((fu.pass_id, fu.state)
                                                 for fu in sorted(self.futures, key=lambda fu: -fu.order)
                                                 if not isinstance(fu.pass_id, list) and
@@ -757,6 +780,14 @@ class TestManager:
                             self.states[pass_id] = state
                         self.terminate_all(pool)
                         return best_success_env
+
+                if self.folder_tombstone:
+                    path = self.folder_tombstone.pop(0)
+                    env = RmFolderEnvironment(path)
+                    future = pool.schedule(env.run)
+                    future.job_type = JobType.RMFOLDER
+                    self.futures.append(future)
+                    continue
 
                 pass_id_to_init = None
                 meta_pass_id_to_init = None
@@ -780,8 +811,8 @@ class TestManager:
                     logging.debug(f'Going to init pass {pass_}')
                     self.states[pass_id] = 'initializing'
                     env = SetupEnvironment(pass_, self.current_test_case, self.test_cases, self.save_temps, self.last_state_hint[pass_id], strategy=self.strategy, other_init_states=self.init_states)
-                    future = pool.schedule(env.execute, timeout=self.timeout)
-                    future.is_init = True
+                    future = pool.schedule(env.run, timeout=self.timeout)
+                    future.job_type = JobType.PASS_NEW
                     future.pass_id = pass_id
                     self.futures.append(future)
                     order += 1
@@ -789,10 +820,10 @@ class TestManager:
                 if all(s in ('needinit', 'initializing', None) for s in self.states):
                     continue
                 if job_counter_when_init_finished is None and all(s not in ('needinit', 'initializing') for s in self.states):
-                    job_counter_when_init_finished = finished_jobs
+                    job_counter_when_init_finished = self.finished_transform_jobs
 
                 state = None
-                if finished_jobs % 5 == 0 and len(self.next_successes_hint) >= 2:
+                if self.finished_transform_jobs % 5 == 0 and len(self.next_successes_hint) >= 2:
                     for attempt in range(10):
                         merge_blocklist = set()
                         for failed_state in self.failed_merges:
@@ -855,14 +886,17 @@ class TestManager:
                     if isinstance(state, list):
                         test_env.predicted_improv = merge_improv
                     future = pool.schedule(test_env.run, timeout=self.timeout)
-                    future.is_init = False
+                    future.job_type = JobType.PASS_TRANSFORM
                     future.order = order
                     future.pass_id = pass_id
                     future.state = state
                     self.future_to_pass[future] = pass_
+                    assert len(self.future_to_pass) <= self.parallel_tests
                     assert future not in self.temporary_folders
                     self.temporary_folders[future] = folder
+                    assert len(self.temporary_folders) <= self.parallel_tests
                     self.futures.append(future)
+                    assert len(self.futures) <= self.parallel_tests
                     # self.pass_statistic.add_executed(self.current_pass)
                     order += 1
 
@@ -904,6 +938,7 @@ class TestManager:
         self.current_passes = [pass_]
         self.futures = []
         self.temporary_folders = {}
+        self.folder_tombstone = []
         m = Manager()
         self.pid_queue = m.Queue()
         self.create_root()
@@ -1014,6 +1049,7 @@ class TestManager:
         self.current_passes = passes
         self.futures = []
         self.temporary_folders = {}
+        self.folder_tombstone = []
         m = Manager()
         self.pid_queue = m.Queue()
         if not self.tmp_for_best:
@@ -1140,7 +1176,7 @@ class TestManager:
         try:
             logging.debug(f'process_result: copy from {test_env.test_case_path} to {self.current_test_case}')
             if test_env.test_case_path.is_dir():
-                shutil.rmtree(self.current_test_case, ignore_errors=True)
+                rmtree(self.current_test_case)
                 shutil.copytree(test_env.test_case_path, self.current_test_case, symlinks=True)
             else:
                 shutil.copy(test_env.test_case_path, self.current_test_case)
@@ -1178,5 +1214,5 @@ class SetupEnvironment:
         self.strategy = strategy
         self.other_init_states = other_init_states
 
-    def execute(self):
+    def run(self):
         return self.pass_.new(self.test_case, last_state_hint=self.last_state_hint, strategy=self.strategy, other_init_states=self.other_init_states)
