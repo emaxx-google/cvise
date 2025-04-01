@@ -142,7 +142,10 @@ class TestEnvironment:
         try:
             self.base_size = get_file_size(self.test_case)
             self.initial_file_count = get_file_count(self.test_case)
-            if not self.lazy_input_copying:
+            if self.lazy_input_copying:
+                if self.test_case.is_dir():
+                    self.test_case_path.mkdir()
+            else:
                 self.copy_inputs()
 
             # transform by state
@@ -1196,7 +1199,7 @@ class TestManager:
             if test_env.test_case_path.is_dir():
                 if test_env.lazy_input_copying:
                     for path in test_env.test_case_path.rglob('*'):
-                        if not path.is_symlink():
+                        if not path.is_symlink() and not path.is_dir():
                             shutil.copy(path, self.current_test_case / path.relative_to(test_env.test_case_path))
                     for path in self.current_test_case.rglob('*'):
                         dest_path = test_env.test_case_path / path.relative_to(self.current_test_case)

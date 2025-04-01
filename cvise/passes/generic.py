@@ -287,9 +287,12 @@ class GenericPass(AbstractPass):
         if logging.getLogger().isEnabledFor(logging.DEBUG):
             logging.debug(f'files_for_deletion={[files[f] for f in files_for_deletion]} file_to_edits={len(file_to_edits)}')
 
+        for path in original_test_case.rglob('*'):
+            if path.is_dir():
+                dest_path = test_case / path.relative_to(original_test_case)
+                dest_path.mkdir(parents=True, exist_ok=True)
         improv_per_depth = [0] * (2 + max_depth)
         for file_id, path in enumerate(files):
-            path.parent.mkdir(parents=True, exist_ok=True)
             if file_id in files_for_deletion:
                 continue
             original_path = original_test_case / path.relative_to(test_case)
