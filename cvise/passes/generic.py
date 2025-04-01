@@ -155,6 +155,9 @@ class GenericPass(AbstractPass):
     def supports_merging(self):
         return True
 
+    def lazy_input_copying(self):
+        return True
+
     def new(self, test_case, check_sanity=None, last_state_hint=None, strategy=None, other_init_states=None):
         test_case = Path(test_case)
 
@@ -265,7 +268,7 @@ class GenericPass(AbstractPass):
         if not isinstance(state, list):
             state.on_success_observed()
 
-    def transform(self, test_case, state, process_event_notifier):
+    def transform(self, test_case, state, process_event_notifier, original_test_case):
         test_case = Path(test_case)
         state_list = state if isinstance(state, list) else [state]
         if logging.getLogger().isEnabledFor(logging.DEBUG):
@@ -282,20 +285,28 @@ class GenericPass(AbstractPass):
                     file_to_edits.setdefault(l['f'], []).append(l)
 
         if logging.getLogger().isEnabledFor(logging.DEBUG):
-            logging.debug(f'files_for_deletion={len(files_for_deletion)} file_to_edits={len(file_to_edits)}')
+            logging.debug(f'files_for_deletion={[files[f] for f in files_for_deletion]} file_to_edits={len(file_to_edits)}')
 
         improv_per_depth = [0] * (2 + max_depth)
-        for file_id, chunks in file_to_edits.items():
-            path = files[file_id]
-            improv = edit_file(path, chunks)
-            d = path_to_depth.get(path, max_depth + 1)
-            improv_per_depth[d] += improv
+        for file_id, path in enumerate(files):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if file_id in files_for_deletion:
+                continue
+            original_path = original_test_case / path.relative_to(test_case)
+            if file_id in file_to_edits:
+                improv = edit_file(original_path, path, file_to_edits[file_id])
+                d = path_to_depth.get(path, max_depth + 1)
+                improv_per_depth[d] += improv
+            else:
+                os.symlink(original_path.resolve(), path)
+
         for file_id in files_for_deletion:
             path = files[file_id]
-            improv = path.stat().st_size
+            assert not path.exists(), f'{path}'
+            original_path = original_test_case / path.relative_to(test_case)
+            improv = original_path.stat().st_size
             d = path_to_depth.get(path, max_depth + 1)
             improv_per_depth[d] += improv
-            os.unlink(path)
 
         # Sanity-check we don't start including files outside of bundle.
         if logging.getLogger().isEnabledFor(logging.DEBUG):
@@ -345,8 +356,8 @@ def load_hints(state_list, test_case, load_all=False):
                     hints.append(json.loads(line))
     return files, path_to_depth, hints
 
-def edit_file(file, chunks):
-    with open(file) as f:
+def edit_file(src_path, dest_path, chunks):
+    with open(src_path) as f:
         data = f.read()
     merged = merge_chunks(chunks)
     new_data = ''
@@ -360,7 +371,7 @@ def edit_file(file, chunks):
     assert len(new_data) <= len(data), f'file={file} chunks={chunks}'
     if logging.getLogger().isEnabledFor(logging.DEBUG) and False:
         logging.debug(f'file={file} before:\n{data}\nafter:\n{new_data}')
-    with open(file, 'w') as f:
+    with open(dest_path, 'w') as f:
         f.write(new_data)
     return len(data) - len(new_data)
 

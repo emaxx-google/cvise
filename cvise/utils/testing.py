@@ -38,11 +38,11 @@ MAX_PASS_INCREASEMENT_THRESHOLD = 3
 
 
 def get_file_size(path):
-    inner_paths = [f for f in Path(path).rglob('*') if not f.is_dir() and not f.is_symlink()] if os.path.isdir(path) else [path]
-    return sum(f.stat().st_size for f in inner_paths)
+    inner_paths = [f for f in Path(path).rglob('*') if not f.is_dir()] if os.path.isdir(path) else [path]
+    return sum(f.resolve().stat().st_size for f in inner_paths)
 
 def get_file_count(path):
-    inner_paths = [f for f in Path(path).rglob('*') if not f.is_dir() and not f.is_symlink()] if os.path.isdir(path) else [path]
+    inner_paths = [f for f in Path(path).rglob('*') if not f.is_dir()] if os.path.isdir(path) else [path]
     return len(inner_paths)
 
 
@@ -95,6 +95,7 @@ class TestEnvironment:
         all_test_cases,
         transform,
         pid_queue=None,
+        lazy_input_copying=False
     ):
         self.state = state
         self.folder = folder
@@ -109,6 +110,7 @@ class TestEnvironment:
         self.pwd = os.getcwd()
         self.test_case = test_case
         self.all_test_cases = all_test_cases
+        self.lazy_input_copying = lazy_input_copying
 
     @property
     def size_improvement(self):
@@ -140,12 +142,14 @@ class TestEnvironment:
         try:
             self.base_size = get_file_size(self.test_case)
             self.initial_file_count = get_file_count(self.test_case)
-            self.copy_inputs()
+            if not self.lazy_input_copying:
+                self.copy_inputs()
 
             # transform by state
-            (result, self.state) = self.transform(
-                str(self.test_case_path), self.state, ProcessEventNotifier(self.pid_queue)
-            )
+            args = [str(self.test_case_path), self.state, ProcessEventNotifier(self.pid_queue)]
+            if self.lazy_input_copying:
+                args.append(self.test_case)
+            (result, self.state) = self.transform(*args)
             self.result = result
             if self.result != PassResult.OK:
                 return self
@@ -156,10 +160,10 @@ class TestEnvironment:
             self.exitcode = self.run_test(verbose=True)
 
             return self
-        except OSError as e:
-            # this can happen when we clean up temporary files for cancelled processes
-            logging.debug(f'TestEnvironment::run OSError: ' + str(e))
-            return self
+        # except OSError as e:
+        #     # this can happen when we clean up temporary files for cancelled processes
+        #     logging.debug(f'TestEnvironment::run OSError: ' + str(e))
+        #     return self
         except Exception as e:
             logging.debug(f'Unexpected TestEnvironment::run failure: ' + str(e))
             traceback.print_exc()
@@ -884,6 +888,7 @@ class TestManager:
                     folder = Path(tempfile.mkdtemp(f'{self.TEMP_PREFIX}job{order}', dir=tmp_parent_dir))
                     test_case = self.current_test_case
                     transform = pass_.transform
+                    lazy_input_copying = hasattr(pass_, 'lazy_input_copying') and pass_.lazy_input_copying()
                     test_env = TestEnvironment(
                         state,
                         order,
@@ -893,6 +898,7 @@ class TestManager:
                         self.test_cases,
                         transform,
                         self.pid_queue,
+                        lazy_input_copying,
                     )
                     test_env.is_regular_iteration = should_advance
                     future = pool.schedule(test_env.run, timeout=self.timeout)
@@ -1188,8 +1194,17 @@ class TestManager:
         try:
             logging.debug(f'process_result: copy from {test_env.test_case_path} to {self.current_test_case}')
             if test_env.test_case_path.is_dir():
-                rmtree(self.current_test_case)
-                shutil.copytree(test_env.test_case_path, self.current_test_case, symlinks=True)
+                if test_env.lazy_input_copying:
+                    for path in test_env.test_case_path.rglob('*'):
+                        if not path.is_symlink():
+                            shutil.copy(path, self.current_test_case / path.relative_to(test_env.test_case_path))
+                    for path in self.current_test_case.rglob('*'):
+                        dest_path = test_env.test_case_path / path.relative_to(self.current_test_case)
+                        if not dest_path.exists():
+                            os.unlink(path)
+                else:
+                    rmtree(self.current_test_case)
+                    shutil.copytree(test_env.test_case_path, self.current_test_case, symlinks=True)
             else:
                 shutil.copy(test_env.test_case_path, self.current_test_case)
         except FileNotFoundError:
