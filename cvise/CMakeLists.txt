@@ -116,7 +116,7 @@ set(SOURCE_FILES
   "utils/testing.py"
   "calc-include-depth/calc-include-depth"
   "inclusion-graph/inclusion-graph"
-  "tree_sit/func_body_remover"
+#  "tree_sit/func_body_remover"
 )
 
 foreach(file IN LISTS SOURCE_FILES)
