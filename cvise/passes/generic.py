@@ -727,7 +727,7 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id):
         str(INCLUSION_GRAPH_TOOL),
         str(root_file),
         '--',
-        f'-resource-dir={clang_path.parent.parent}/lib/clang/google3-trunk'] + orig_command
+        f'-resource-dir={get_clang_resource_dir()}'] + orig_command
     if logging.getLogger().isEnabledFor(logging.DEBUG):
         logging.debug(f'generate_inclusion_directive_hints: running: {shlex.join(command)}')
     proc = subprocess.run(command, cwd=test_case, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
@@ -741,12 +741,15 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id):
             continue
         from_file, from_line, to_file = line.split(' ')
         from_file = Path(from_file)
+        to_file = Path(to_file)
+        if from_file.is_relative_to(resource_dir) or to_file.is_relative_to(resource_dir):
+            # Ignore #includes to/inside the compiler's resource directory - we never try deleting those headers.
+            continue
         if not from_file.is_absolute():
             from_file = abs_test_case / from_file
         from_file = test_case / from_file.relative_to(abs_test_case)
         assert from_file in file_to_id, f'from_file={from_file} file_to_id={file_to_id}'
         from_line = int(from_line) - 1
-        to_file = Path(to_file)
         if not to_file.is_absolute():
             to_file = abs_test_case / to_file
         to_file = test_case / to_file.relative_to(abs_test_case)
@@ -763,11 +766,15 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id):
         logging.debug(f'generate_inclusion_directive_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
     return hints
 
+def get_clang_resource_dir():
+    clang_path = Path(os.environ['CLANG'])
+    return f'{clang_path.parent.parent}/lib/clang/google3-trunk'
+
 def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
     orig_command = get_root_compile_command(test_case)
     if not orig_command:
         return []
-    clang_path = Path(os.environ['CLANG'])
+    resource_dir = get_clang_resource_dir()
 
     with tempfile.NamedTemporaryFile() as tmp_dump:
         with tempfile.TemporaryDirectory(prefix='cvise-clanglazypcm') as tmp_for_copy:
@@ -779,7 +786,7 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
 
             command = ['make', '-j64']
             extra_env = {
-                'EXTRA_CFLAGS': f'-resource-dir={clang_path.parent.parent}/lib/clang/google3-trunk -fno-crash-diagnostics -Xclang -fallow-pcm-with-compiler-errors -ferror-limit=0',
+                'EXTRA_CFLAGS': f'-resource-dir={resource_dir} -fno-crash-diagnostics -Xclang -fallow-pcm-with-compiler-errors -ferror-limit=0',
                 'CLANG': str(Path.home() / 'clang-toys/clang-fprint-deserialized-declarations'), # TODO: this should land to upstream Clang
             }
             if logging.getLogger().isEnabledFor(logging.DEBUG):
@@ -812,7 +819,11 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
                         logging.debug(f'LINE {line.strip()}')
                     match = re.match(r'required lines in file: (.*)', line)
                     if match:
-                        file_rel = (tmp_copy / match[1]).relative_to(tmp_copy)
+                        file = Path(match[1])
+                        if file.is_relative_to(resource_dir):
+                            # Ignore #includes inside the compiler's resource directory - we never try modifying those headers.
+                            continue
+                        file_rel = (tmp_copy / file).relative_to(tmp_copy)
                         file = test_case / file_rel
                         seg_from = None
                         seg_to = None
@@ -975,7 +986,6 @@ def get_ordered_files_list(test_case, strategy):
 
     root_file_candidates = list(test_case.rglob('*.cc'))
     root_file = root_file_candidates[0] if root_file_candidates else None
-    clang_path = Path(os.environ['CLANG'])
 
     path_to_depth = {}
     if root_file and orig_command:
@@ -984,7 +994,7 @@ def get_ordered_files_list(test_case, strategy):
             str(INCLUDE_DEPTH_TOOL),
             str(root_file),
             '--',
-            f'-resource-dir={clang_path.parent.parent}/lib/clang/google3-trunk'] + orig_command
+            f'-resource-dir={get_clang_resource_dir()}'] + orig_command
         path_and_depth = []
         if logging.getLogger().isEnabledFor(logging.DEBUG):
             logging.debug(f'get_ordered_files_list: running: {shlex.join(command)}')
