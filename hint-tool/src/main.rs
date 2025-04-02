@@ -112,6 +112,7 @@ fn main() {
         files = fs;
         hints.extend(hs);
     }
+    // eprintln!("files={:?}", files);
     // for h in hints.iter() {
     //     eprintln!("{:?}", h);
     // }
@@ -151,13 +152,14 @@ fn main() {
         fs::create_dir_all(dir_dest).unwrap();
     }
 
+    let nest = fs::metadata(src_path).unwrap().is_dir();
     let mut reduction = 0;
     for (file_id, file) in files.into_iter().enumerate() {
         if files_for_deletion.contains(&(file_id as u32)) {
             continue;
         }
-        let file_src = src_path.join(&file);
-        let file_dest = dest_path.join(&file);
+        let file_src = if nest { src_path.join(&file) } else { src_path.to_path_buf() };
+        let file_dest = if nest { dest_path.join(&file) } else { dest_path.to_path_buf() };
         // eprintln!("file={:?} file_src={:?} file_dest={:?}", file, file_src, file_dest);
         match file_to_edits.remove(&(file_id as u32)) {
             None => {

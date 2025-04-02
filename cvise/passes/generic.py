@@ -35,6 +35,11 @@ def get_type_to_attempted(pass_repr, generation):
         d['value'] = {}
     return d['value']
 
+def relative_path(path, test_case):
+    if test_case.is_dir():
+        return path.relative_to(test_case)
+    return path.name
+
 
 class PolyState(dict):
     def __init__(self):
@@ -237,9 +242,9 @@ class GenericPass(AbstractPass):
                         logging.debug(f'       DEL {c["l"]}..{c["r"]}: "{dbg}"')
 
         with gzip.open(self.extra_file_path, 'wt') as f:
-            f.write(dump_json([str(f.relative_to(test_case)) for f in files]))
+            f.write(dump_json([str(relative_path(f, test_case)) for f in files]))
             f.write('\n')
-            f.write(dump_json(dict((str(s.relative_to(test_case)), v) for s,v in path_to_depth.items())))
+            f.write(dump_json(dict((str(relative_path(k, test_case)), v) for k,v in path_to_depth.items())))
             f.write('\n')
             for hint in hints:
                 f.write(dump_json(hint))
