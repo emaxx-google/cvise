@@ -967,7 +967,7 @@ def get_root_compile_command(test_case):
         for i, l in enumerate(lines):
             if '.o:' in l:
                 p = i + 1
-                while p < len(lines) and lines[p].strip().lstrip('@').lstrip().split()[0] in ('mkdir',):
+                while p < len(lines) and lines[p].strip().lstrip('@').lstrip().split()[0] != '$(CLANG)':
                     p += 1
                 if p >= len(lines):
                     return None
