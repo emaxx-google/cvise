@@ -19,8 +19,8 @@ from cvise.passes.abstract import AbstractPass, BinaryState, FuzzyBinaryState, P
 import pebble
 
 
-INCLUDE_DEPTH_TOOL = Path(__file__).resolve().parent.parent / 'calc-include-depth/calc-include-depth'
-INCLUSION_GRAPH_TOOL = Path(__file__).resolve().parent.parent / 'inclusion-graph/inclusion-graph'
+INCLUDE_DEPTH_TOOL = Path(__file__).resolve().parent.parent.parent / 'calc-include-depth/calc-include-depth'
+INCLUSION_GRAPH_TOOL = Path(__file__).resolve().parent.parent.parent / 'inclusion-graph/inclusion-graph'
 TOPFORMFLAT_TOOL = Path(__file__).resolve().parent.parent.parent / 'delta/topformflat'
 CLANG_DELTA_TOOL = Path(__file__).resolve().parent.parent.parent / 'clang_delta/clang_delta'
 

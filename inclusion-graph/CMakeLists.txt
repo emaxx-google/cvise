@@ -1,9 +1,8 @@
 cmake_minimum_required(VERSION 3.14)
 project(inclusion-graph)
 
-find_package(LLVM REQUIRED CONFIG NO_CMAKE_BUILDS_PATH)
-find_package(Clang REQUIRED CONFIG NO_CMAKE_BUILDS_PATH)
-message(STATUS "Using clang: ${LLVM_VERSION_MAJOR}")
+# find_package(LLVM) is done by the topmost "CMakeLists.txt" file.
+# find_package(Clang) is done by the topmost "CMakeLists.txt" file.
 set(LLVM_CMAKE_MODULE_PATH "${CLANG_INCLUDE_DIRS}/../lib/cmake")
 list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_MODULE_PATH}/clang"
      "${LLVM_CMAKE_MODULE_PATH}/llvm")
