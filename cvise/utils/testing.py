@@ -45,7 +45,6 @@ def get_file_count(path):
     inner_paths = [f for f in Path(path).rglob('*') if not f.is_dir()] if os.path.isdir(path) else [path]
     return len(inner_paths)
 
-
 @unique
 class PassCheckingOutcome(Enum):
     """Outcome of checking the result of an invocation of a pass."""
@@ -725,6 +724,7 @@ class TestManager:
             any_merge_started = False
             self.any_merge_completed = False
             job_counter_when_init_finished = None
+            init_finished_when = None
 
             successes = [(s, p, i, ifc) for s, p, i, ifc in self.next_successes_hint if not isinstance(s, list)] + self.successes_hint
             successes.sort(key=lambda i: (-i[2], -i[3]))
@@ -818,7 +818,7 @@ class TestManager:
                     should_proceed = not self.futures or len(self.current_passes) == 1
                     if not should_proceed and job_counter_when_init_finished is not None and \
                         self.finished_transform_jobs - job_counter_when_init_finished > max(self.parallel_tests, len(self.current_passes)) * 5 and \
-                            (not any_merge_started or self.any_merge_completed) and now - measure_start_time >= 10:
+                            (not any_merge_started or self.any_merge_completed) and now - init_finished_when >= 10:
                         if best_improv_speed is None or improv_speed > best_improv_speed:
                             if logging.getLogger().isEnabledFor(logging.DEBUG):
                                 logging.debug(f'run_parallel_tests: new best_improv_speed={improv_speed} old={best_improv_speed}')
@@ -880,6 +880,7 @@ class TestManager:
                     continue
                 if job_counter_when_init_finished is None and all(s not in ('needinit', 'initializing') for s in self.states):
                     job_counter_when_init_finished = self.finished_transform_jobs
+                    init_finished_when = now
 
                 state = None
                 if self.finished_transform_jobs % 5 == 0 and len(self.next_successes_hint) >= 2:
