@@ -2,13 +2,6 @@
 //
 // Usage:
 //   calc-include-depth file.cc -- -Ifoo -std=gnu++20 ...other flags...
-//
-// In the common case of creduce'ing a multi-file target with a makefile, the
-// compilation commands (after the "--") could be built as:
-//   $(grep -P -A1 '^[^\t].*\.o:' target.makefile | tail -n1 | sed
-//   's/\S*[-]fmodule\S*//g') \
-//     -resource-dir=$($(grep -P -A1 '^[^\t].*\.o:' target.makefile | tail -n1)
-//     --print-resource-dir)
 
 #include <map>
 #include <memory>

@@ -214,10 +214,12 @@ add_test(NAME all COMMAND ${Python3_EXECUTABLE} -m pytest)
 # Needs to be sourced after we have a compiler tested
 include(GNUInstallDirs)
 
+add_subdirectory(calc-include-depth)
 add_subdirectory(clang_delta)
 add_subdirectory(clex)
 add_subdirectory(cvise)
 add_subdirectory(delta)
+add_subdirectory(inclusion-graph)
 
 # Copy top-level cvise script
 configure_file(
