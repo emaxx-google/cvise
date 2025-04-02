@@ -156,7 +156,13 @@ class TestEnvironment:
             self.result = result
             if self.result != PassResult.OK:
                 return self
-            self.new_size = get_file_size(self.test_case_path)
+            try:
+                self.new_size = get_file_size(self.test_case_path)
+            except FileNotFoundError as e:
+                logging.info(f'FUCK: {e}')
+                import time
+                time.sleep(1000)
+                raise
             self.new_file_count = get_file_count(self.test_case_path)
 
             # run test script
