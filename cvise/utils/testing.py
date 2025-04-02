@@ -479,10 +479,43 @@ class TestManager:
                 active_pids.discard(event.pid)
             else:
                 active_pids.add(event.pid)
+
+        # A slightly modified version of psutil's children(), in order
+        # to only do the expensive pid-to-ppid map building only once.
+
+        def get_children(process, ppid_map):
+            # Copyright (c) 2009, Giampaolo Rodola'. All rights reserved.
+            # Use of this source code is governed by a BSD-style license that can be
+            # found in the LICENSE file.
+            reverse_ppid_map = collections.defaultdict(list)
+            for pid, ppid in ppid_map.items():
+                reverse_ppid_map[ppid].append(pid)
+            seen = set()
+            stack = [process.pid]
+            ret = []
+            while stack:
+                pid = stack.pop()
+                if pid in seen:
+                    continue
+                seen.add(pid)
+                for child_pid in reverse_ppid_map[pid]:
+                    try:
+                        child = psutil.Process(child_pid)
+                        intime = process.create_time() <= child.create_time()
+                        if intime:
+                            ret.append(child)
+                            stack.append(child_pid)
+                        else:
+                            assert False, f'ABNORMAL CHILD: process={process.pid} create_time={process.create_time()} child={child.pid} create_time={child.create_time()}'
+                    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                        pass
+            return ret
+
+        ppid_map = psutil._ppid_map()
         for pid in active_pids:
             try:
                 process = psutil.Process(pid)
-                children = process.children(recursive=True)
+                children = get_children(process, ppid_map)
                 children.append(process)
                 for child in children:
                     try:
