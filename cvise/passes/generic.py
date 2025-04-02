@@ -708,6 +708,7 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id):
         return []
     root_file = root_file_candidates[0].relative_to(test_case)
     clang_path = Path(os.environ['CLANG'])
+    resource_dir = get_clang_resource_dir()
 
     file_to_line_pos = {}
     def get_line_pos_in_file(file, idx):
@@ -727,7 +728,7 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id):
         str(INCLUSION_GRAPH_TOOL),
         str(root_file),
         '--',
-        f'-resource-dir={get_clang_resource_dir()}'] + orig_command
+        f'-resource-dir={resource_dir}'] + orig_command
     if logging.getLogger().isEnabledFor(logging.DEBUG):
         logging.debug(f'generate_inclusion_directive_hints: running: {shlex.join(command)}')
     proc = subprocess.run(command, cwd=test_case, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
@@ -747,11 +748,13 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id):
             continue
         if not from_file.is_absolute():
             from_file = abs_test_case / from_file
+        assert from_file.is_relative_to(abs_test_case), f'Error: discovered #include in the file {from_file} that is outside both the test case {test_case} and the resource dir {resource_dir}; the command was: {command}'
         from_file = test_case / from_file.relative_to(abs_test_case)
         assert from_file in file_to_id, f'from_file={from_file} file_to_id={file_to_id}'
         from_line = int(from_line) - 1
         if not to_file.is_absolute():
             to_file = abs_test_case / to_file
+        assert to_file.is_relative_to(abs_test_case), f'Error: discovered #include from {from_file} (line {from_line}) to the file {to_file} that is outside both the test case {test_case} and the resource dir {resource_dir}; the command was: {command}'
         to_file = test_case / to_file.relative_to(abs_test_case)
         assert to_file in file_to_id, f'to_file={to_file} file_to_id={file_to_id}'
         start_pos, end_pos = get_line_pos_in_file(from_file, from_line)
@@ -823,7 +826,9 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
                         if file.is_relative_to(resource_dir):
                             # Ignore #includes inside the compiler's resource directory - we never try modifying those headers.
                             continue
-                        file_rel = (tmp_copy / file).relative_to(tmp_copy)
+                        file = tmp_copy / file
+                        assert file.is_relative_to(tmp_copy), f'Error - the file {file} is outside the test case {tmp_copy} and outside the resource dir {resource_dir}; env was: {extra_env}'
+                        file_rel = file.relative_to(tmp_copy)
                         file = test_case / file_rel
                         seg_from = None
                         seg_to = None
