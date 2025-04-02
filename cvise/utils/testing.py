@@ -594,6 +594,8 @@ class TestManager:
 
     def wait_for_first_success(self):
         for future in self.futures:
+            if future.job_type == JobType.RMFOLDER:
+                continue
             try:
                 test_env = future.result()
                 self.current_pass = self.future_to_pass[future]
