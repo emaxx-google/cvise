@@ -707,6 +707,7 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id):
     if not root_file_candidates:
         return []
     root_file = root_file_candidates[0].relative_to(test_case)
+    clang_path = Path(os.environ['CLANG'])
 
     file_to_line_pos = {}
     def get_line_pos_in_file(file, idx):
@@ -726,7 +727,7 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id):
         str(INCLUSION_GRAPH_TOOL),
         str(root_file),
         '--',
-        '-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk'] + orig_command
+        f'-resource-dir={clang_path.parent.parent}/lib/clang/google3-trunk'] + orig_command
     if logging.getLogger().isEnabledFor(logging.DEBUG):
         logging.debug(f'generate_inclusion_directive_hints: running: {shlex.join(command)}')
     proc = subprocess.run(command, cwd=test_case, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
@@ -766,6 +767,7 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
     orig_command = get_root_compile_command(test_case)
     if not orig_command:
         return []
+    clang_path = Path(os.environ['CLANG'])
 
     with tempfile.NamedTemporaryFile() as tmp_dump:
         with tempfile.TemporaryDirectory(prefix='cvise-clanglazypcm') as tmp_for_copy:
@@ -777,7 +779,7 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
 
             command = ['make', '-j64']
             extra_env = {
-                'EXTRA_CFLAGS': '-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk -fno-crash-diagnostics -Xclang -fallow-pcm-with-compiler-errors -ferror-limit=0',
+                'EXTRA_CFLAGS': f'-resource-dir={clang_path.parent.parent}/lib/clang/google3-trunk -fno-crash-diagnostics -Xclang -fallow-pcm-with-compiler-errors -ferror-limit=0',
                 'CLANG': str(Path.home() / 'clang-toys/clang-fprint-deserialized-declarations'), # TODO: this should land to upstream Clang
             }
             if logging.getLogger().isEnabledFor(logging.DEBUG):
@@ -973,6 +975,7 @@ def get_ordered_files_list(test_case, strategy):
 
     root_file_candidates = list(test_case.rglob('*.cc'))
     root_file = root_file_candidates[0] if root_file_candidates else None
+    clang_path = Path(os.environ['CLANG'])
 
     path_to_depth = {}
     if root_file and orig_command:
@@ -981,7 +984,7 @@ def get_ordered_files_list(test_case, strategy):
             str(INCLUDE_DEPTH_TOOL),
             str(root_file),
             '--',
-            '-resource-dir=third_party/crosstool/v18/stable/toolchain/lib/clang/google3-trunk'] + orig_command
+            f'-resource-dir={clang_path.parent.parent}/lib/clang/google3-trunk'] + orig_command
         path_and_depth = []
         if logging.getLogger().isEnabledFor(logging.DEBUG):
             logging.debug(f'get_ordered_files_list: running: {shlex.join(command)}')
