@@ -3,7 +3,7 @@
 
 DEB_HOST_ARCH ?= $(shell dpkg-architecture -qDEB_HOST_ARCH)
 
-CLANG_V=20
+CLANG_V=19
 V=$(shell dpkg-parsechangelog -S Version | sed 's/-.*$$//')
 
 %:
