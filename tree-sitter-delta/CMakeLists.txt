@@ -13,6 +13,10 @@ add_executable(tree-sitter-delta
     ../tree-sitter-cpp/src/parser.c
     ../tree-sitter-cpp/src/scanner.c)
 
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+set_source_files_properties(../tree-sitter-cpp/src/scanner.c PROPERTIES COMPILE_FLAGS "-Wno-strict-prototypes")
+endif()
+
 install(TARGETS tree-sitter-delta
   DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/${cvise_PACKAGE}/"
   )

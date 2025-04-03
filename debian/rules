@@ -10,7 +10,10 @@ V=$(shell dpkg-parsechangelog -S Version | sed 's/-.*$$//')
 	dh $@ --with python3
 
 override_dh_auto_configure:
-	dh_auto_configure -- \
+	CC=/usr/bin/clang-$(CLANG_V) \
+		CXX=/usr/bin/clang++-$(CLANG_V) \
+		dh_auto_configure -- \
+		-DCMAKE_BUILD_TYPE=Release \
 		-DCMAKE_PREFIX_PATH=/usr/lib/llvm-$(CLANG_V) \
 		-DCLANG_FORMAT=clang-format-$(CLANG_V) \
 		-DCMAKE_INSTALL_LIBEXECDIR=lib
@@ -37,7 +40,7 @@ endif
 
 override_dh_dwz:
 ifeq (,$(filter $(DEB_HOST_ARCH), mipsel))
-	dh_dwz
+	# dh_dwz
 endif
 
 override_dh_shlibdeps:
