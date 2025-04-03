@@ -23,6 +23,7 @@ INCLUDE_DEPTH_TOOL = Path(__file__).resolve().parent.parent.parent / 'calc-inclu
 INCLUSION_GRAPH_TOOL = Path(__file__).resolve().parent.parent.parent / 'inclusion-graph/inclusion-graph'
 TOPFORMFLAT_TOOL = Path(__file__).resolve().parent.parent.parent / 'delta/topformflat'
 CLANG_DELTA_TOOL = Path(__file__).resolve().parent.parent.parent / 'clang_delta/clang_delta'
+TREE_SITTER_TOOL =Path(__file__).resolve().parent.parent.parent / 'tree-sitter-delta/tree-sitter-delta'
 
 success_histories = {}
 type_to_attempted = {}
@@ -180,6 +181,8 @@ class GenericPass(AbstractPass):
             hints = generate_inclusion_directive_hints(test_case, files, file_to_id)
         elif self.arg == 'clang_pcm_lazy_load':
             hints = generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id)
+        elif self.arg == 'line_markers':
+            hints = generate_line_markers_hints(test_case, files, file_to_id)
         elif self.arg == 'blank':
             hints = generate_blank_hints(test_case, files, file_to_id)
         elif self.arg == 'lines':
@@ -188,8 +191,8 @@ class GenericPass(AbstractPass):
             hints = generate_topformflat_hints(test_case, files, file_to_id, int(self.arg.partition('::')[2]))
         elif self.arg.startswith('clang_delta::'):
             hints = generate_clang_delta_hints(test_case, files, file_to_id, self.arg.partition('::')[2])
-        elif self.arg == 'line_markers':
-            hints = generate_line_markers_hints(test_case, files, file_to_id)
+        elif self.arg == 'tree_sitter_delta':
+            hints = generate_tree_sitter_delta_hints(test_case, files, file_to_id)
         elif self.arg == 'meta::delete-file':
             hints = generate_delete_file_hints(test_case, files, file_to_id, other_init_states)
         else:
@@ -274,6 +277,8 @@ class GenericPass(AbstractPass):
             state.on_success_observed()
 
     def transform(self, test_case, state, process_event_notifier, original_test_case):
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f'{self}.transform: state={state}')
         state_list = state if isinstance(state, list) else [state]
         cmd = [
             '/usr/local/google/home/emaxx/cvise/hint-tool/target/release/hint-tool',
@@ -937,6 +942,25 @@ def generate_blank_hints(test_case, files, file_to_id):
                             'r': line_start_pos + match.end(),
                         })
                 line_start_pos = line_end_pos
+    return hints
+
+def generate_tree_sitter_delta_hints(test_case, files, file_to_id):
+    command = [str(TREE_SITTER_TOOL)]
+    if logging.getLogger().isEnabledFor(logging.DEBUG):
+        logging.debug(f'generate_tree_sitter_delta_hints: running: {shlex.join(command)}')
+    paths = '\n'.join(str(f) for f in files)
+    try:
+        out = subprocess.check_output(command, input=paths, stderr=subprocess.PIPE, encoding='utf-8')
+    except subprocess.CalledProcessError as e:
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f'generate_tree_sitter_delta_hints: failed: stdout={e.stdout}\nstderr={e.stderr}')
+        return []
+    hints = []
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        h = json.loads(line)
+        hints.append(h)
     return hints
 
 def generate_delete_file_hints(test_case, files, file_to_id, other_init_states):
