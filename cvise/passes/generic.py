@@ -281,14 +281,18 @@ class GenericPass(AbstractPass):
         if logging.getLogger().isEnabledFor(logging.DEBUG):
             logging.debug(f'{self}.transform: state={state}')
         state_list = state if isinstance(state, list) else [state]
-        cmd = [
+        command = [
             HINT_TOOL,
             str(test_case),
             str(original_test_case),
         ]
         for s in state_list:
-            cmd += [str(s.extra_file_path), str(s.begin()), str(s.end())]
-        out = subprocess.check_output(cmd)
+            command += [str(s.extra_file_path), str(s.begin()), str(s.end())]
+        try:
+            out = subprocess.check_output(command, stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError as e:
+            logging.warning(f'hint_tool failed: command:\n{shlex.join(command)}\nstdout:\n{e.stdout}\nstderr:\n{e.stderr}')
+            raise e
         improv = int(out.strip())
 
         for s in state_list:
@@ -703,10 +707,10 @@ def generate_clang_delta_hints(test_case, files, file_to_id, transformation):
     if logging.getLogger().isEnabledFor(logging.DEBUG):
         logging.debug(f'generate_clang_delta_hints: running: {shlex.join(command)}')
     try:
-        out = subprocess.check_output(command, stderr=subprocess.DEVNULL, encoding='utf-8')
-    except subprocess.CalledProcessError:
+        out = subprocess.check_output(command, stderr=subprocess.PIPE, encoding='utf-8')
+    except subprocess.CalledProcessError as e:
         if logging.getLogger().isEnabledFor(logging.DEBUG):
-            logging.debug(f'generate_clang_delta_hints: failed: stdout={out}')
+            logging.debug(f'generate_clang_delta_hints failed: command:\n{shlex.join(command)}\nstdout:\n{e.stdout}\nstderr:\n{e.stderr}')
         return []
     hints = []
     file_id = file_to_id[test_case]
@@ -954,7 +958,7 @@ def generate_tree_sitter_delta_hints(test_case, files, file_to_id):
         out = subprocess.check_output(command, input=paths, stderr=subprocess.PIPE, encoding='utf-8')
     except subprocess.CalledProcessError as e:
         if logging.getLogger().isEnabledFor(logging.DEBUG):
-            logging.debug(f'generate_tree_sitter_delta_hints: failed: stdout={e.stdout}\nstderr={e.stderr}')
+            logging.debug(f'generate_tree_sitter_delta_hints failed: command:\n{shlex.join(command)}\nstdout:\n{e.stdout}\nstderr:\n{e.stderr}')
         return []
     hints = []
     for line in out.splitlines():
