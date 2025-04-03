@@ -8,9 +8,13 @@ DESTDIR = os.getenv('DESTDIR', '')
 
 def find_external_programs():
     programs = {
+        'calc-include-depth': 'calc-include-depth',
         'clang_delta': 'clang_delta',
         'clex': 'clex',
+        'hint_tool': 'hint_tool',
+        'inclusion-graph': 'inclusion-graph',
         'topformflat': 'delta',
+        'tree-sitter-delta': 'tree-sitter-delta',
         'unifdef': None,
         'gcov-dump': None,
     }

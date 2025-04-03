@@ -19,12 +19,7 @@ from cvise.passes.abstract import AbstractPass, BinaryState, FuzzyBinaryState, P
 import pebble
 
 
-HINT_TOOL = Path(__file__).resolve().parent.parent.parent / 'hint_tool/hint_tool'
-INCLUDE_DEPTH_TOOL = Path(__file__).resolve().parent.parent.parent / 'calc-include-depth/calc-include-depth'
-INCLUSION_GRAPH_TOOL = Path(__file__).resolve().parent.parent.parent / 'inclusion-graph/inclusion-graph'
-TOPFORMFLAT_TOOL = Path(__file__).resolve().parent.parent.parent / 'delta/topformflat'
-CLANG_DELTA_TOOL = Path(__file__).resolve().parent.parent.parent / 'clang_delta/clang_delta'
-TREE_SITTER_TOOL =Path(__file__).resolve().parent.parent.parent / 'tree-sitter-delta/tree-sitter-delta'
+EXTERNAL_PROGRAMS = ['calc-include-depth', 'clang_delta', 'hint_tool', 'inclusion-graph', 'topformflat', 'tree-sitter-delta']
 
 success_histories = {}
 type_to_attempted = {}
@@ -157,7 +152,7 @@ class GenericPass(AbstractPass):
         return s
 
     def check_prerequisites(self):
-        return True
+        return all(self.check_external_program(p) for p in EXTERNAL_PROGRAMS)
 
     def supports_merging(self):
         return True
@@ -168,7 +163,7 @@ class GenericPass(AbstractPass):
     def new(self, test_case, check_sanity=None, last_state_hint=None, strategy=None, other_init_states=None):
         test_case = Path(test_case)
 
-        files, path_to_depth = get_ordered_files_list(test_case, strategy)
+        files, path_to_depth = get_ordered_files_list(test_case, strategy, self.external_programs)
         if not files:
             return None
         max_depth = max(path_to_depth.values()) if path_to_depth else 0
@@ -179,7 +174,7 @@ class GenericPass(AbstractPass):
         elif self.arg == 'cppmaps':
             hints = generate_cppmaps_hints(test_case, files, file_to_id)
         elif self.arg == 'inclusion_directives':
-            hints = generate_inclusion_directive_hints(test_case, files, file_to_id)
+            hints = generate_inclusion_directive_hints(test_case, files, file_to_id, self.external_programs)
         elif self.arg == 'clang_pcm_lazy_load':
             hints = generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id)
         elif self.arg == 'line_markers':
@@ -189,11 +184,11 @@ class GenericPass(AbstractPass):
         elif self.arg == 'lines':
             hints = generate_line_hints(test_case, files, file_to_id)
         elif self.arg.startswith('topformflat::'):
-            hints = generate_topformflat_hints(test_case, files, file_to_id, int(self.arg.partition('::')[2]))
+            hints = generate_topformflat_hints(test_case, files, file_to_id, int(self.arg.partition('::')[2]), self.external_programs)
         elif self.arg.startswith('clang_delta::'):
-            hints = generate_clang_delta_hints(test_case, files, file_to_id, self.arg.partition('::')[2])
+            hints = generate_clang_delta_hints(test_case, files, file_to_id, self.arg.partition('::')[2], self.external_programs)
         elif self.arg == 'tree_sitter_delta':
-            hints = generate_tree_sitter_delta_hints(test_case, files, file_to_id)
+            hints = generate_tree_sitter_delta_hints(test_case, files, file_to_id, self.external_programs)
         elif self.arg == 'meta::delete-file':
             hints = generate_delete_file_hints(test_case, files, file_to_id, other_init_states)
         else:
@@ -282,7 +277,7 @@ class GenericPass(AbstractPass):
             logging.debug(f'{self}.transform: state={state}')
         state_list = state if isinstance(state, list) else [state]
         command = [
-            HINT_TOOL,
+            self.external_programs['hint_tool'],
             str(test_case),
             str(original_test_case),
         ]
@@ -675,11 +670,11 @@ def generate_line_hints(test_case, files, file_to_id):
                     raise RuntimeError(f'Failure while parsing {file}: {e}')
     return hints
 
-def generate_topformflat_hints(test_case, files, file_to_id, depth):
+def generate_topformflat_hints(test_case, files, file_to_id, depth, external_programs):
     hints = []
     for file_id, file in enumerate(files):
         if not file.is_symlink() and file.suffix not in ('.makefile', '.cppmap') and file.name not in ('Makefile',):
-            command = [str(TOPFORMFLAT_TOOL), str(depth), str(file)]
+            command = [str(external_programs['topformflat']), str(depth), str(file)]
             if logging.getLogger().isEnabledFor(logging.DEBUG):
                 logging.debug(f'generate_topformflat_hints: running: {shlex.join(command)}')
             out = subprocess.check_output(command, stderr=subprocess.DEVNULL, encoding='utf-8')
@@ -693,12 +688,12 @@ def generate_topformflat_hints(test_case, files, file_to_id, depth):
                         raise RuntimeError(f'Error while processing {file}: JSON line "{line}": {e}')
     return hints
 
-def generate_clang_delta_hints(test_case, files, file_to_id, transformation):
+def generate_clang_delta_hints(test_case, files, file_to_id, transformation, external_programs):
     if test_case.is_dir():
         return []
 
     command = [
-        str(CLANG_DELTA_TOOL),
+        str(external_programs['clang_delta']),
         f'--generate-hints={transformation}',
         str(test_case),
         '--warn-on-counter-out-of-bounds',
@@ -727,7 +722,7 @@ def generate_clang_delta_hints(test_case, files, file_to_id, transformation):
         hints.append(h)
     return hints
 
-def generate_inclusion_directive_hints(test_case, files, file_to_id):
+def generate_inclusion_directive_hints(test_case, files, file_to_id, external_programs):
     if not test_case.is_dir():
         return []
 
@@ -757,7 +752,7 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id):
 
     orig_command = re.sub(r'\S*-fmodule\S*', '', orig_command).split()
     command = [
-        str(INCLUSION_GRAPH_TOOL),
+        str(external_programs['inclusion-graph']),
         str(root_file),
         '--',
         f'-resource-dir={resource_dir}'] + orig_command
@@ -949,8 +944,8 @@ def generate_blank_hints(test_case, files, file_to_id):
                 line_start_pos = line_end_pos
     return hints
 
-def generate_tree_sitter_delta_hints(test_case, files, file_to_id):
-    command = [str(TREE_SITTER_TOOL)]
+def generate_tree_sitter_delta_hints(test_case, files, file_to_id, external_programs):
+    command = [str(external_programs['tree-sitter-delta'])]
     if logging.getLogger().isEnabledFor(logging.DEBUG):
         logging.debug(f'generate_tree_sitter_delta_hints: running: {shlex.join(command)}')
     paths = '\n'.join(str(f) for f in files)
@@ -1026,7 +1021,7 @@ def get_root_compile_command(test_case):
         else:
             return None
 
-def get_ordered_files_list(test_case, strategy):
+def get_ordered_files_list(test_case, strategy, external_programs):
     if not test_case.is_dir():
         return [test_case], {test_case: 0}
 
@@ -1047,7 +1042,7 @@ def get_ordered_files_list(test_case, strategy):
     if root_file and orig_command:
         orig_command = re.sub(r'\S*-fmodule\S*', '', orig_command).split()
         command = [
-            str(INCLUDE_DEPTH_TOOL),
+            str(external_programs['calc-include-depth']),
             str(root_file),
             '--',
             f'-resource-dir={get_clang_resource_dir()}'] + orig_command

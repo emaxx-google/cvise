@@ -30,3 +30,7 @@ clang_target_link_libraries(calc-include-depth
   clangTooling
   clangToolingRefactoring
   )
+
+install(TARGETS calc-include-depth
+  DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/${cvise_PACKAGE}/"
+  )

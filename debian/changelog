@@ -1,0 +1,232 @@
+cvise (2.11.20250403) plucky; urgency=medium
+
+  * Optimizations and multi-file support.
+
+ -- Maksim Ivanov <emaxx@google.com>  Fri, 03 Apr 2025 12:00:00 +0100
+
+cvise (2.11.0-1ubuntu1) plucky; urgency=medium
+
+  * Build using LLVM 20, patch taken from the trunk.
+
+ -- Matthias Klose <doko@ubuntu.com>  Fri, 21 Feb 2025 12:05:34 +0100
+
+cvise (2.11.0-1) unstable; urgency=medium
+
+  * New upstream version.
+  * Bump standards version.
+
+ -- Matthias Klose <doko@debian.org>  Tue, 12 Nov 2024 17:44:19 +0100
+
+cvise (2.10.0+20240909-1) unstable; urgency=medium
+
+  * New upstream snapshot.
+  * Build using LLVM 19.
+
+ -- Matthias Klose <doko@debian.org>  Mon, 09 Sep 2024 17:25:52 +0200
+
+cvise (2.10.0-2) unstable; urgency=medium
+
+  * Drop build dependency on python-pytest-flake8 (Olivier Gayot).
+
+ -- Matthias Klose <doko@debian.org>  Mon, 15 Apr 2024 15:47:33 +0200
+
+cvise (2.10.0-1) unstable; urgency=medium
+
+  * New upstream version.
+
+ -- Matthias Klose <doko@debian.org>  Wed, 13 Mar 2024 21:28:24 +0100
+
+cvise (2.9.0-4) unstable; urgency=medium
+
+  * Build using LLVM 18.
+
+ -- Matthias Klose <doko@debian.org>  Tue, 12 Mar 2024 16:42:54 +0100
+
+cvise (2.9.0-2) unstable; urgency=medium
+
+  * Build using LLVM 17.0.6.
+
+ -- Matthias Klose <doko@debian.org>  Sun, 10 Dec 2023 19:29:46 +0100
+
+cvise (2.9.0-1) unstable; urgency=medium
+
+  * New upstream version.
+  * Build using LLVM 17.
+
+ -- Matthias Klose <doko@debian.org>  Thu, 16 Nov 2023 14:08:12 +0100
+
+cvise (2.8.0-2) unstable; urgency=medium
+
+  * Build using LLVM 16.
+  * Bump standards version.
+
+ -- Matthias Klose <doko@debian.org>  Thu, 24 Aug 2023 19:10:09 +0200
+
+cvise (2.8.0-1) unstable; urgency=medium
+
+  * New upstream version.
+
+ -- Matthias Klose <doko@debian.org>  Tue, 06 Jun 2023 17:23:25 +0200
+
+cvise (2.7.0-2) unstable; urgency=medium
+
+  * Don't call dh_dwz on mipsel (runs out of memory).
+
+ -- Matthias Klose <doko@debian.org>  Sat, 31 Dec 2022 10:52:35 +0100
+
+cvise (2.7.0-1) unstable; urgency=medium
+
+  * New upstream version.
+  * Drop the excessive llvm build dependencies.
+
+ -- Matthias Klose <doko@debian.org>  Mon, 26 Dec 2022 11:39:03 +0100
+
+cvise (2.6.0-1) unstable; urgency=medium
+
+  * New upstream version.
+  * Build using LLVM 15.
+  * Build-depend on clang-tools-15, clang-tidy-15, clangd-15. These are not
+    used in anyway, but LLVM's broken cmake support requires these.
+
+ -- Matthias Klose <doko@debian.org>  Sun, 23 Oct 2022 20:33:43 +0200
+
+cvise (2.5.0-1) unstable; urgency=medium
+
+  * New upstream version.
+
+ -- Matthias Klose <doko@debian.org>  Wed, 14 Sep 2022 16:37:13 +0200
+
+cvise (2.4.0-3) unstable; urgency=medium
+
+  * Build using LLVM 14.
+
+ -- Matthias Klose <doko@debian.org>  Fri, 18 Feb 2022 00:59:37 +0100
+
+cvise (2.4.0-2.1) unstable; urgency=medium
+
+  * Non-maintainer upload.
+  * Remove stale LLVM 9 build dependencies on armel/armhf.
+    (Closes: #1000892)
+  * Recommend colordiff. (Closes: #1001375)
+
+ -- Adrian Bunk <bunk@debian.org>  Wed, 29 Dec 2021 22:41:49 +0200
+
+cvise (2.4.0-2) unstable; urgency=medium
+
+  * (Build-)depend on python3-chardet.
+
+ -- Matthias Klose <doko@debian.org>  Tue, 02 Nov 2021 16:15:02 +0200
+
+cvise (2.4.0-1) unstable; urgency=medium
+
+  * New upstream version.
+  * Build using LLVM 13.
+  * Bump standards version.
+
+ -- Matthias Klose <doko@debian.or>  Tue, 02 Nov 2021 14:43:50 +0200
+
+cvise (2.3.0-1) unstable; urgency=medium
+
+  * New upstream version.
+  * Can be built using LLVM 12, which also fixes #979495.
+
+ -- Matthias Klose <doko@debian.org>  Wed, 17 Mar 2021 12:47:09 +0100
+
+cvise (2.2.0-2) unstable; urgency=medium
+
+  * Fix issue #47, remove temporary files in working directory.
+
+ -- Matthias Klose <doko@debian.org>  Mon, 08 Mar 2021 16:41:40 +0100
+
+cvise (2.2.0-1) unstable; urgency=medium
+
+  * New upstream version.
+
+ -- Matthias Klose <doko@debian.org>  Fri, 05 Mar 2021 18:25:42 +0100
+
+cvise (2.1.0-1) unstable; urgency=medium
+
+  * New upstream version.
+
+ -- Matthias Klose <doko@debian.org>  Tue, 12 Jan 2021 19:21:35 +0100
+
+cvise (2.0.0-4) unstable; urgency=medium
+
+  * Update to the branch 20210108.
+  * Build using LLVM 9 on armel, armhf. See #979495.
+  * Bump debhelper version.
+
+ -- Matthias Klose <doko@debian.org>  Fri, 08 Jan 2021 14:02:42 +0100
+
+cvise (2.0.0-3) unstable; urgency=medium
+
+  * Update to the branch 20201126.
+    - Handle using declarations declared with macros.
+  * Bump standards version.
+
+ -- Matthias Klose <doko@debian.org>  Sun, 13 Dec 2020 12:37:58 +0100
+
+cvise (2.0.0-2) unstable; urgency=medium
+
+  * New upstream version.
+  * Updates up to 7c303ae036e18be10ab4014724b9e14d4a1245d6.
+
+ -- Matthias Klose <doko@debian.org>  Tue, 17 Nov 2020 14:09:28 +0100
+
+cvise (1.9.0-1) unstable; urgency=medium
+
+  * New upstream version.
+  * Updates up to a000f9eefce217576ac3095a443fcd9bb7b95953.
+
+ -- Matthias Klose <doko@debian.org>  Tue, 10 Nov 2020 12:03:35 +0100
+
+cvise (1.8.0-1) unstable; urgency=medium
+
+  * New upstream version.
+  * Build using LLVM 11.
+
+ -- Matthias Klose <doko@debian.org>  Thu, 22 Oct 2020 13:17:58 +0200
+
+cvise (1.7.0-1) unstable; urgency=medium
+
+  * New upstream version.
+
+ -- Matthias Klose <doko@debian.org>  Tue, 06 Oct 2020 14:00:36 +0200
+
+cvise (1.6.0-3) unstable; urgency=medium
+
+  * Pull fixes from the VCS 20200929:
+    - Fix psutil core count detection code.
+
+ -- Matthias Klose <doko@debian.org>  Tue, 29 Sep 2020 16:37:45 +0200
+
+cvise (1.6.0-2) unstable; urgency=medium
+
+  * Pull fixes from the VCS 20200917:
+    - Fix infinite loop in IfPass.
+
+ -- Matthias Klose <doko@debian.org>  Thu, 17 Sep 2020 13:42:14 +0200
+
+cvise (1.6.0-1) unstable; urgency=medium
+
+  * New upstream version.
+
+ -- Matthias Klose <doko@debian.org>  Sun, 02 Aug 2020 13:13:22 +0200
+
+cvise (1.5.0-1) unstable; urgency=medium
+
+  * New upstream version.
+
+ -- Matthias Klose <doko@debian.org>  Wed, 22 Jul 2020 18:47:11 +0200
+
+cvise (1.4.0-1) unstable; urgency=medium
+
+  * New upstream version.
+
+ -- Matthias Klose <doko@debian.org>  Mon, 29 Jun 2020 13:57:40 +0200
+
+cvise (1.0.0-1) unstable; urgency=medium
+
+  * Initial release. Closes: #959084.
+
+ -- Matthias Klose <doko@debian.org>  Tue, 28 Apr 2020 16:41:32 +0200

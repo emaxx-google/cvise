@@ -30,3 +30,7 @@ clang_target_link_libraries(inclusion-graph
   clangTooling
   clangToolingRefactoring
   )
+
+install(TARGETS inclusion-graph
+  DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/${cvise_PACKAGE}/"
+  )

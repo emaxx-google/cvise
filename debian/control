@@ -1,0 +1,41 @@
+Source: cvise
+Section: misc
+Priority: optional
+Maintainer: Debian GCC Maintainers <debian-gcc@lists.debian.org>
+Uploaders: Matthias Klose <doko@debian.org>
+Build-Depends: debhelper-compat (= 12),
+  dh-python,
+  chrpath,
+  cmake,
+  flex,
+  python3,
+  python3-chardet,
+  python3-pebble,
+  python3-psutil,
+  python3-pytest <!nocheck>,
+  llvm-19-dev, libclang-19-dev, clang-19, clang-format-19,
+  unifdef,
+Standards-Version: 4.7.0
+Homepage: https://github.com/marxin/cvise
+
+Package: cvise
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, ${python3:Depends},
+  python3,
+  python3-chardet,
+  python3-pebble,
+  python3-psutil,
+  unifdef,
+Recommends: colordiff
+Description: super-parallel Python port of the C-Reduce project
+ C-Vise is a tool that takes a large C, C++ or OpenCL program that has
+ a property of interest (such as triggering a compiler bug) and
+ automatically produces a much smaller C/C++ or OpenCL program that
+ has the same property. It is intended for use by people who discover
+ and report bugs in compilers and other tools that process C/C++ or
+ OpenCL code.
+ .
+ NOTE: C-Vise happens to do a pretty good job reducing the size of
+ programs in languages other than C/C++, such as JavaScript and
+ Rust. If you need to reduce programs in some other language, please
+ give it a try.
