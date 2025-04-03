@@ -22,8 +22,8 @@ add_custom_target(hint_tool_copy ALL
 add_custom_command(
     TARGET hint_tool_copy POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy
-            "${CMAKE_BINARY_DIR}/hint_tool/${ARTIFACT_DIR}/hint_tool"
-            "${CMAKE_BINARY_DIR}/hint_tool/hint_tool")
+        "${CMAKE_BINARY_DIR}/hint_tool/${ARTIFACT_DIR}/hint_tool"
+        "${CMAKE_BINARY_DIR}/hint_tool/hint_tool")
 
 install(PROGRAMS "${CMAKE_BINARY_DIR}/hint_tool/hint_tool"
     DESTINATION "${CMAKE_INSTALL_LIBEXECDIR}/${cvise_PACKAGE}"

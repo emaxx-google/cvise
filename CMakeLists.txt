@@ -270,6 +270,18 @@ install(PROGRAMS "${PROJECT_BINARY_DIR}/cvise-delta.py"
   RENAME "cvise-delta"
 )
 
-###############################################################################
+add_custom_target(copy-vendor-files ALL
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+    "${CMAKE_SOURCE_DIR}/vendor"
+    "${CMAKE_BINARY_DIR}/cvise/vendor")
+install(DIRECTORY "${CMAKE_BINARY_DIR}/vendor"
+  DESTINATION "${CMAKE_INSTALL_DATADIR}/${cvise_PACKAGE}"
+  FILES_MATCHING
+  PATTERN "*.py"
+  PATTERN "LICENSE"
+  PATTERN "__pycache__" EXCLUDE
+  )
+
+  ###############################################################################
 
 ## End of file.

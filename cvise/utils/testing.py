@@ -29,8 +29,14 @@ from cvise.utils.error import PassBugError
 from cvise.utils.error import ZeroSizeError
 from cvise.utils.misc import is_readable_file
 from cvise.utils.readkey import KeyLogger
-import pebble
 import psutil
+
+# Hack to use the vendored version of Pebble to guarantee the performance fix is in (>=5.1.1).
+vendor_path = Path(__file__).parent.parent / 'vendor'
+sys.path.insert(0, str(vendor_path))
+import pebble
+assert Path(pebble.__file__).is_relative_to(vendor_path), f'vendor_path={vendor_path} pebble.__file__={pebble.__file__}'
+sys.path.pop(0)
 
 # change default Pebble sleep unit for faster response
 pebble.common.SLEEP_UNIT = 0.01

@@ -16,7 +16,6 @@ import tempfile
 import types
 
 from cvise.passes.abstract import AbstractPass, BinaryState, FuzzyBinaryState, PassResult
-import pebble
 
 
 EXTERNAL_PROGRAMS = ['calc-include-depth', 'clang_delta', 'hint_tool', 'inclusion-graph', 'topformflat', 'tree-sitter-delta']

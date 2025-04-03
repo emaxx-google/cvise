@@ -114,7 +114,6 @@ set(SOURCE_FILES
   "utils/readkey.py"
   "utils/statistics.py"
   "utils/testing.py"
-#  "tree_sit/func_body_remover"
 )
 
 foreach(file IN LISTS SOURCE_FILES)
