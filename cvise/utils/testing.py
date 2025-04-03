@@ -796,9 +796,9 @@ class TestManager:
                                 best_success_env.test_case = pa
                                 dbg = []
                                 if improv:
-                                    dbg.append(f'-{improv} bytes')
+                                    dbg.append(f'-{improv} byte{"s" if improv > 1 else ""}')
                                 if improv_file_count:
-                                    dbg.append(f'-{improv_file_count} files')
+                                    dbg.append(f'-{improv_file_count} file{"s" if improv_file_count > 1 else ""}')
                                 if len(self.current_passes) > 1:
                                     logging.info(f'candidate: {", ".join(dbg)} ({get_heuristic_names_for_log(env.state, pass_)})')
                             self.release_future(future)
