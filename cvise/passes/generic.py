@@ -19,6 +19,7 @@ from cvise.passes.abstract import AbstractPass, BinaryState, FuzzyBinaryState, P
 import pebble
 
 
+HINT_TOOL = Path(__file__).resolve().parent.parent.parent / 'hint_tool/hint_tool'
 INCLUDE_DEPTH_TOOL = Path(__file__).resolve().parent.parent.parent / 'calc-include-depth/calc-include-depth'
 INCLUSION_GRAPH_TOOL = Path(__file__).resolve().parent.parent.parent / 'inclusion-graph/inclusion-graph'
 TOPFORMFLAT_TOOL = Path(__file__).resolve().parent.parent.parent / 'delta/topformflat'
@@ -281,7 +282,7 @@ class GenericPass(AbstractPass):
             logging.debug(f'{self}.transform: state={state}')
         state_list = state if isinstance(state, list) else [state]
         cmd = [
-            '/usr/local/google/home/emaxx/cvise/hint-tool/target/release/hint-tool',
+            HINT_TOOL,
             str(test_case),
             str(original_test_case),
         ]
