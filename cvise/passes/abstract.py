@@ -152,20 +152,21 @@ class FuzzyBinaryState(BinaryState):
 
     @staticmethod
     def create_from_hint(instances, strategy, last_state_hint, depth_to_instances=None):
-        if instances is not None and last_state_hint.chunk > instances:
-            return None
         self = copy.copy(last_state_hint)
         if instances is not None:
             self.instances = instances
         if self.index >= self.instances:
             self.index = 0
+        if self.chunk > self.instances:
+            self.chunk = self.instances
         self.tp = 0
         self.rnd_index = None
         self.rnd_chunk = None
         self.rnd_depth = None
         self.depth_to_instances = depth_to_instances
         self.strategy = strategy
-        self.prepare_rnd_shift()
+        if self.rnd_shift % self.chunk or self.rnd_shift >= self.instances:
+            self.prepare_rnd_shift()
         return self
 
     def prepare_rnd_shift(self):
