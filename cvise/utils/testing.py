@@ -179,7 +179,6 @@ class TestEnvironment:
             self.new_size = get_file_size(self.test_case_path)
             self.new_file_count = get_file_count(self.test_case_path)
             self.new_line_count = get_line_count(self.test_case_path)
-
             return self
         # except OSError as e:
         #     # this can happen when we clean up temporary files for cancelled processes
@@ -652,13 +651,12 @@ class TestManager:
             return PassCheckingOutcome.ACCEPT
 
         # self.pass_statistic.add_failure(self.current_pass)
-        if test_env.result == PassResult.OK:
-            assert test_env.exitcode, f'test_env={vars(test_env)}'
+        if test_env.result == PassResult.OK and test_env.exitcode is not None:
             if self.also_interesting is not None and test_env.exitcode == self.also_interesting:
                 self.save_extra_dir(test_env.test_case_path)
         elif test_env.result == PassResult.STOP:
             return PassCheckingOutcome.QUIT_LOOP
-        elif test_env.result == PassResult.ERROR:
+        elif test_env.result == PassResult.ERROR or test_env.exitcode is None:
             if not self.silent_pass_bug:
                 self.report_pass_bug(test_env, 'pass error')
                 return PassCheckingOutcome.QUIT_LOOP

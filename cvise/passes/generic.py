@@ -223,7 +223,6 @@ class GenericPass(AbstractPass):
         for h in hints:
             d = path_to_depth.get(hint_main_file(h), max_depth + 1)
             depth_to_instances[d] += 1
-        logging.info(f'Generated hints for arg={self.arg}: {instances}')
 
         if logging.getLogger().isEnabledFor(logging.DEBUG) and False:
             for hint in hints:
@@ -261,6 +260,9 @@ class GenericPass(AbstractPass):
             state.extra_file_path = self.extra_file_path
         # while state and strategy == 'topo' and state.tp == 0:
         #     state = state.advance(success_histories)
+
+        logging.info(f'Generated hints for arg={self.arg}: {instances}')
+
         return state
 
     def advance(self, test_case, state):
