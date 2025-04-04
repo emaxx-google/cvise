@@ -51,6 +51,15 @@ def get_file_count(path):
     inner_paths = [f for f in Path(path).rglob('*') if not f.is_dir()] if os.path.isdir(path) else [path]
     return len(inner_paths)
 
+def get_line_count(path):
+    lines = 0
+    inner_files = [f for f in Path(path).rglob('*') if not f.is_dir()] if os.path.isdir(path) else [path]
+    for file in inner_files:
+        if is_readable_file(file):
+            with open(file) as f:
+                lines += len([line for line in f.readlines() if line and not line.isspace()])
+    return lines
+
 @unique
 class PassCheckingOutcome(Enum):
     """Outcome of checking the result of an invocation of a pass."""
@@ -161,17 +170,15 @@ class TestEnvironment:
             self.result = result
             if self.result != PassResult.OK:
                 return self
-            try:
-                self.new_size = get_file_size(self.test_case_path)
-            except FileNotFoundError as e:
-                logging.info(f'FUCK: {e}')
-                import time
-                time.sleep(1000)
-                raise
-            self.new_file_count = get_file_count(self.test_case_path)
 
             # run test script
             self.exitcode = self.run_test(verbose=True)
+            if self.exitcode != 0:
+                return self
+
+            self.new_size = get_file_size(self.test_case_path)
+            self.new_file_count = get_file_count(self.test_case_path)
+            self.new_line_count = get_line_count(self.test_case_path)
 
             return self
         # except OSError as e:
@@ -300,6 +307,8 @@ class TestManager:
             == 0
         )
 
+        self.line_counts = {f: get_line_count(f) for f in self.test_cases}
+
     def create_root(self, p=None, suffix=''):
         pass_name = str(p or self.current_pass).replace('::', '-').replace(' ', '_')
         root = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}{pass_name}{suffix}-')
@@ -345,21 +354,6 @@ class TestManager:
     @property
     def sorted_test_cases(self):
         return sorted(self.test_cases, key=lambda x: get_file_size(x), reverse=True)
-
-    @property
-    def total_line_count(self):
-        return self.get_line_count(self.test_cases)
-
-    @staticmethod
-    def get_line_count(files):
-        lines = 0
-        for outer_file in files:
-            inner_files = [f for f in Path(outer_file).rglob('*') if not f.is_dir() and not f.is_symlink()] if os.path.isdir(outer_file) else [outer_file]
-            for file in inner_files:
-                if is_readable_file(file):
-                    with open(file) as f:
-                        lines += len([line for line in f.readlines() if line and not line.isspace()])
-        return lines
 
     def backup_test_cases(self):
         for f in self.test_cases:
@@ -612,7 +606,6 @@ class TestManager:
                         self.finished_transform_jobs += 1
                         if isinstance(test_env.state, list):
                             self.failed_merges.append(test_env.state)
-                            self.failed_merge_comparison_keys.append(self.get_state_comparison_key(test_env.state, test_env.size_improvement, test_env.file_count_improvement))
                     elif outcome == PassCheckingOutcome.QUIT_LOOP:
                         self.finished_transform_jobs += 1
                         quit_loop = True
@@ -738,7 +731,6 @@ class TestManager:
             self.next_successes_hint = []
             attempted_merges = set()
             self.failed_merges = []
-            self.failed_merge_comparison_keys = []
 
             while any(self.states) or self.futures:
                 # do not create too many states
@@ -814,8 +806,6 @@ class TestManager:
                         elif outcome == PassCheckingOutcome.IGNORE:
                             if isinstance(env.state, list):
                                 self.failed_merges.append(env.state)
-                                if env.new_size is not None:
-                                    self.failed_merge_comparison_keys.append(self.get_state_comparison_key(env.state, env.size_improvement, env.file_count_improvement))
                         self.current_pass = None
 
                 if success_cnt > 0:
@@ -1258,10 +1248,15 @@ class TestManager:
                     shutil.copytree(test_env.test_case_path, self.current_test_case, symlinks=True)
             else:
                 shutil.copy(test_env.test_case_path, self.current_test_case)
+            self.line_counts[self.current_test_case] = test_env.new_line_count
         except FileNotFoundError:
             raise RuntimeError(
                 f"Can't find {self.current_test_case} -- did your interestingness test move it?"
             ) from None
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            assert len(self.line_counts) == len(self.test_cases)
+            for f in self.test_cases:
+                assert self.line_counts[f] == get_line_count(f)
 
         if len(self.current_passes) == 1:
             assert self.states[0]
@@ -1274,8 +1269,7 @@ class TestManager:
         notes.append(f'{self.total_file_size} bytes')
         c = self.total_file_count
         notes.append(f'{c} file{"s" if c > 1 else ""}')
-        if self.total_line_count:
-            notes.append(f'{self.total_line_count} lines')
+        notes.append(f'{sum(self.line_counts.values())} lines')
         if len(self.test_cases) > 1:
             notes.append(str(test_env.test_case))
 
