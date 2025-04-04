@@ -70,22 +70,21 @@ fn merge_edits(mut edits: Vec<HintLoc>) -> Vec<HintLoc> {
     merged
 }
 
-fn write_edited_file(file_dest: &Path, file_src: &Path, edits: Vec<HintLoc>) -> usize {
+fn write_edited_file(file_dest: &Path, file_src: &Path, edits: Vec<HintLoc>) -> i64 {
     let data = fs::read(file_src).unwrap();
     let mut new_data = vec![];
     let mut reduction = 0;
     let mut ptr = 0;
     for e in merge_edits(edits) {
         new_data.extend(&data[ptr..e.l as usize]);
-        reduction += (e.r - e.l) as usize;
+        reduction += (e.r - e.l) as i64;
         if let Some(v) = e.v {
             new_data.extend(v.as_bytes());
-            reduction -= v.as_bytes().len();
+            reduction -= v.as_bytes().len() as i64;
         }
         ptr = e.r as usize;
     }
     new_data.extend(&data[ptr..]);
-    assert!(data.len() >= new_data.len());
     fs::write(file_dest, new_data).unwrap();
     reduction
 }
@@ -155,11 +154,12 @@ fn main() {
     let nest = fs::metadata(src_path).unwrap().is_dir();
     let mut reduction = 0;
     for (file_id, file) in files.into_iter().enumerate() {
-        if files_for_deletion.contains(&(file_id as u32)) {
-            continue;
-        }
         let file_src = if nest { src_path.join(&file) } else { src_path.to_path_buf() };
         let file_dest = if nest { dest_path.join(&file) } else { dest_path.to_path_buf() };
+        if files_for_deletion.contains(&(file_id as u32)) {
+            reduction += fs::metadata(file_src).unwrap().len() as i64;
+            continue;
+        }
         // eprintln!("file={:?} file_src={:?} file_dest={:?}", file, file_src, file_dest);
         match file_to_edits.remove(&(file_id as u32)) {
             None => {
