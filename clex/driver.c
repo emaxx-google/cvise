@@ -282,19 +282,28 @@ static void rm_toks(int idx) {
   int matched = 0;
   int which = 0;
   int started = 0;
+  int pos = 0;
+  int tok_pos[n_toks];
   for (i = 0; i < toks; i++) {
+    int end_pos = pos + strlen(tok_list[i].str);
     if (tok_list[i].kind != TOK_WS &&
         tok_list[i].kind != TOK_NEWLINE) {
       if (which == idx) {
         started = 1;
         matched = 1;
       }
+      tok_pos[which % n_toks] = pos;
+      if (idx == -1 && which + 1 >= n_toks) {
+        int cut_start = tok_pos[(which + n_toks - 1) % n_toks];
+        printf("{\"l\":%d,\"r\":%d}\n", cut_start, end_pos);
+      }
       which++;
     }
-    if (!started || (which > (idx + n_toks)))
+    if (idx != -1 && (!started || (which > (idx + n_toks))))
       printf("%s", tok_list[i].str);
+    pos = end_pos;
   }
-  if (matched) {
+  if (matched || idx == -1) {
     exit(OK);
   } else {
     exit(STOP);
@@ -324,7 +333,7 @@ static void rm_tok_pattern(int idx) {
     patterns[i] = 1 | ((unsigned)i << 1);
   }
 
-  int n_pattern = idx & (n_patterns - 1);
+  int n_pattern = (idx < 0 ? -idx-1 : idx) & (n_patterns - 1);
   unsigned char pat = patterns[n_pattern];
 
 #ifdef _MSC_VER
@@ -336,44 +345,71 @@ static void rm_tok_pattern(int idx) {
     print_pattern(pat);
   }
 
-  idx >>= (n_toks - 1);
+  if (idx >= 0) {
+    idx >>= (n_toks - 1);
+  }
 
   int which = 0;
   int started = 0;
   int matched = 0;
   int deleted = 0;
+  int pos = 0;
+  int tok_pos[n_toks];
+  int tok_end_pos[n_toks];
   for (i = 0; i < toks; i++) {
+    int end_pos = pos + strlen(tok_list[i].str);
     if (tok_list[i].kind != TOK_WS &&
         tok_list[i].kind != TOK_NEWLINE) {
-      if (which == idx) {
+      if (idx >= 0 && which == idx) {
         matched = 1;
         started = 1;
       }
-      if (which == (idx + n_toks))
+      if (idx >= 0 && which == (idx + n_toks))
         started = 0;
+      tok_pos[which % n_toks] = pos;
+      tok_end_pos[which % n_toks] = end_pos;
+      if (idx < 0 && which + 1 >= n_toks) {
+        pat = patterns[n_pattern];
+        printf("{\"multi\":[");
+        int first = 1;
+        for (int j = 1; j <= n_toks; ++j) {
+          if (pat & 1) {
+            int arr_idx = (which + j) % n_toks;
+            if (!first)
+              printf(",");
+            printf("{\"l\":%d,\"r\":%d}", tok_pos[arr_idx], tok_end_pos[arr_idx]);
+            first = 0;
+          }
+          pat >>= 1;
+        }
+        printf("]}\n");
+      }
       which++;
     }
-    int print = 0;
-    if (tok_list[i].kind == TOK_WS ||
-        tok_list[i].kind == TOK_NEWLINE) {
-      print = 1;
-    } else {
-      if (!started) {
+    if (idx >= 0) {
+      int print = 0;
+      if (tok_list[i].kind == TOK_WS ||
+          tok_list[i].kind == TOK_NEWLINE) {
         print = 1;
       } else {
-        if (pat & 1) {
-          deleted = 1;
-          // printf ("[%s]", tok_list[i].str);
-        } else {
+        if (!started) {
           print = 1;
+        } else {
+          if (pat & 1) {
+            deleted = 1;
+            // printf ("[%s]", tok_list[i].str);
+          } else {
+            print = 1;
+          }
+          pat >>= 1;
         }
-        pat >>= 1;
       }
+      if (print)
+        printf("%s", tok_list[i].str);
     }
-    if (print)
-      printf("%s", tok_list[i].str);
+    pos = end_pos;
   }
-  if (matched && deleted) {
+  if ((matched && deleted) || idx < 0) {
     exit(OK);
   } else {
     exit(STOP);

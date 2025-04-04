@@ -18,7 +18,7 @@ import types
 from cvise.passes.abstract import AbstractPass, BinaryState, FuzzyBinaryState, PassResult
 
 
-EXTERNAL_PROGRAMS = ['calc-include-depth', 'clang_delta', 'hint_tool', 'inclusion-graph', 'topformflat', 'tree-sitter-delta']
+EXTERNAL_PROGRAMS = ['calc-include-depth', 'clang_delta', 'clex', 'hint_tool', 'inclusion-graph', 'topformflat', 'tree-sitter-delta']
 
 success_histories = {}
 type_to_attempted = {}
@@ -182,6 +182,8 @@ class GenericPass(AbstractPass):
             hints = generate_blank_hints(test_case, files, file_to_id)
         elif self.arg == 'lines':
             hints = generate_line_hints(test_case, files, file_to_id)
+        elif self.arg.startswith('clex::'):
+            hints = generate_clex_hints(test_case, files, file_to_id, self.arg.partition('::')[2], self.external_programs)
         elif self.arg.startswith('topformflat::'):
             hints = generate_topformflat_hints(test_case, files, file_to_id, int(self.arg.partition('::')[2]), self.external_programs)
         elif self.arg.startswith('clang_delta::'):
@@ -669,6 +671,31 @@ def generate_line_hints(test_case, files, file_to_id):
                     raise RuntimeError(f'Failure while parsing {file}: {e}')
     return hints
 
+def generate_clex_hints(test_case, files, file_to_id, clex_arg, external_programs):
+    hints = []
+    for file_id, file in enumerate(files):
+        if not file.is_symlink() and file.suffix not in ('.makefile', '.cppmap') and file.name not in ('Makefile',):
+            command = [str(external_programs['clex']), clex_arg, '-1', str(file)]
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f'generate_clex_hints: running: {shlex.join(command)}')
+            proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
+            if proc.returncode != 51:
+                raise RuntimeError(f'generate_clex_hints failed: command:\n{shlex.join(command)}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
+            for line in proc.stdout.splitlines():
+                if line.strip():
+                    try:
+                        h = json.loads(line)
+                    except json.decoder.JSONDecodeError as e:
+                        raise RuntimeError(f'Error while processing {file}: JSON line "{line}": {e}')
+                    h['t'] = clex_arg
+                    if 'multi' in h:
+                        for l in h['multi']:
+                            l['f'] = file_id
+                    else:
+                        h['f'] = file_id
+                    hints.append(h)
+    return hints
+
 def generate_topformflat_hints(test_case, files, file_to_id, depth, external_programs):
     hints = []
     for file_id, file in enumerate(files):
@@ -676,7 +703,10 @@ def generate_topformflat_hints(test_case, files, file_to_id, depth, external_pro
             command = [str(external_programs['topformflat']), str(depth), str(file)]
             if logging.getLogger().isEnabledFor(logging.DEBUG):
                 logging.debug(f'generate_topformflat_hints: running: {shlex.join(command)}')
-            out = subprocess.check_output(command, stderr=subprocess.DEVNULL, encoding='utf-8')
+            try:
+                out = subprocess.check_output(command, stderr=subprocess.DEVNULL, encoding='utf-8')
+            except subprocess.CalledProcessError as e:
+                raise RuntimeError(f'generate_topformflat_hints failed: command:\n{shlex.join(command)}\nstdout:\n{e.stdout}\nstderr:\n{e.stderr}')
             for line in out.splitlines():
                 if line.strip():
                     try:

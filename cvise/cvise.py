@@ -112,9 +112,11 @@ class CVise:
                 ('exclude' not in pass_dict) or not bool(parse_options(pass_dict['exclude']) & options)
             )
 
-        for category in ['first', 'main', 'last', 'parallel']:
+        STANDARD_CATEGORIES = ('first', 'main', 'last')
+        PARALLEL_CATEGORIES = ('parallel::initial', 'parallel::main', 'parallel::last')
+        for category in STANDARD_CATEGORIES + PARALLEL_CATEGORIES:
             if category not in pass_group_dict:
-                if category != 'parallel':
+                if category not in PARALLEL_CATEGORIES:
                     raise CViseError(f'Missing category {category}')
                 continue
 
@@ -172,9 +174,15 @@ class CVise:
         if not self.tidy:
             self.test_manager.backup_test_cases()
 
-        if pass_group.get('parallel'):
-            logging.info('PARALLEL PASSES')
-            self._run_main_passes(pass_group['parallel'], True)
+        if pass_group.get('parallel::initial') and not skip_initial:
+            logging.info('PARALLEL INITIAL PASSES')
+            self._run_main_passes(pass_group['parallel::initial'], True)
+        if pass_group.get('parallel::main'):
+            logging.info('PARALLEL MAIN PASSES')
+            self._run_main_passes(pass_group['parallel::main'], True)
+        if pass_group.get('parallel::last'):
+            logging.info('PARALLEL CLEANUP PASSES')
+            self._run_main_passes(pass_group['parallel::last'], True)
 
         if all(not t.is_dir() for t in self.test_manager.test_cases):
             if not skip_initial:
