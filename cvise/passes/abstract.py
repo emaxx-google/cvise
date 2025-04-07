@@ -278,15 +278,21 @@ class ProcessEventNotifier:
     def __init__(self, pid_queue):
         self.pid_queue = pid_queue
 
-    def run_process(self, cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False):
+    def run_process(self, cmd, stdout=None, stderr=None, shell=False, need_output=True):
         if shell:
             assert isinstance(cmd, str)
+        if stdout is None:
+            stdout = subprocess.PIPE if need_output else subprocess.DEVNULL
+        if stderr is None:
+            stderr = subprocess.PIPE if need_output else subprocess.DEVNULL
+        universal_newlines = stdout != subprocess.DEVNULL or stderr != subprocess.DEVNULL
+        encoding = 'utf8' if stdout != subprocess.DEVNULL or stderr != subprocess.DEVNULL else None
         proc = subprocess.Popen(
             cmd,
             stdout=stdout,
             stderr=stderr,
-            universal_newlines=True,
-            encoding='utf8',
+            universal_newlines=universal_newlines,
+            encoding=encoding,
             shell=shell,
         )
         if self.pid_queue:

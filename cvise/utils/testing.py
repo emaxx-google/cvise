@@ -192,11 +192,13 @@ class TestEnvironment:
     def run_test(self, verbose):
         try:
             os.chdir(self.folder)
-            logging.debug(f'TestEnvironment.run_test: "{self.test_script}" in "{self.folder}"')
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f'TestEnvironment.run_test: "{self.test_script}" in "{self.folder}"')
+            need_output = verbose and logging.getLogger().isEnabledFor(logging.DEBUG)
             stdout, stderr, returncode = ProcessEventNotifier(self.pid_queue).run_process(
-                str(self.test_script), shell=True
+                str(self.test_script), shell=True, need_output=need_output
             )
-            if verbose and returncode != 0 and logging.getLogger().isEnabledFor(logging.DEBUG):
+            if need_output and returncode != 0:
                 logging.debug('stdout:\n' + stdout)
                 logging.debug('stderr:\n' + stderr)
         finally:
