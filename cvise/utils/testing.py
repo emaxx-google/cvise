@@ -183,10 +183,11 @@ class TestEnvironment:
             self.new_line_count = get_line_count(self.test_case_path)
             self.duration = time.monotonic() - start_time
             return self
-        # except OSError as e:
-        #     # this can happen when we clean up temporary files for cancelled processes
-        #     logging.debug(f'TestEnvironment::run OSError: ' + str(e))
-        #     return self
+        except OSError as e:
+            # this can happen when we clean up temporary files for cancelled processes
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f'TestEnvironment::run OSError: ' + str(e))
+            return self
         except Exception as e:
             logging.debug(f'Unexpected TestEnvironment::run failure: ' + str(e))
             traceback.print_exc()
