@@ -712,6 +712,25 @@ class TestManager:
             return frozenset(sorted(self.get_state_compact_repr(s) for s in state))
         return (state.begin(), state.end())
 
+    def get_pass_id_to_init(self):
+        pass_id_to_init = None
+        meta_pass_id_to_init = None
+        all_non_meta_passes_inited = True
+        for i, s in enumerate(self.states):
+            is_meta_pass = self.current_passes[i].arg and self.current_passes[i].arg.startswith('meta::')
+            if not is_meta_pass and s in ('needinit', 'initializing'):
+                all_non_meta_passes_inited = False
+            if s == 'needinit':
+                if is_meta_pass and meta_pass_id_to_init is None:
+                    meta_pass_id_to_init = i
+                if not is_meta_pass and pass_id_to_init is None:
+                    pass_id_to_init = i
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f'pass_id_to_init={pass_id_to_init} meta_pass_id_to_init={meta_pass_id_to_init} all_non_meta_passes_inited={all_non_meta_passes_inited} states={self.states}')
+        if pass_id_to_init is None and meta_pass_id_to_init is not None and all_non_meta_passes_inited:
+            return meta_pass_id_to_init
+        return pass_id_to_init
+
     def run_parallel_tests(self, passes):
         assert not self.futures
         assert not self.temporary_folders
@@ -746,7 +765,8 @@ class TestManager:
 
             while any(self.states) or self.futures:
                 # do not create too many states
-                if len(self.futures) >= self.parallel_tests or not any(self.states):
+                any_transform_possible = any(s not in (None, 'needinit', 'initializing') for s in self.states)
+                if len(self.futures) >= self.parallel_tests or not any_transform_possible and self.get_pass_id_to_init() is None:
                     wait(self.futures, return_when=FIRST_COMPLETED)
 
                 quit_loop = self.process_done_futures()
@@ -857,22 +877,7 @@ class TestManager:
                     self.futures.append(future)
                     continue
 
-                pass_id_to_init = None
-                meta_pass_id_to_init = None
-                all_non_meta_passes_inited = True
-                for i, s in enumerate(self.states):
-                    is_meta_pass = passes[i].arg and passes[i].arg.startswith('meta::')
-                    if not is_meta_pass and s in ('needinit', 'initializing'):
-                        all_non_meta_passes_inited = False
-                    if s == 'needinit':
-                        if is_meta_pass and meta_pass_id_to_init is None:
-                            meta_pass_id_to_init = i
-                        if not is_meta_pass and pass_id_to_init is None:
-                            pass_id_to_init = i
-                if logging.getLogger().isEnabledFor(logging.DEBUG):
-                    logging.debug(f'pass_id_to_init={pass_id_to_init} meta_pass_id_to_init={meta_pass_id_to_init} all_non_meta_passes_inited={all_non_meta_passes_inited} states={self.states}')
-                if pass_id_to_init is None and meta_pass_id_to_init is not None and all_non_meta_passes_inited:
-                    pass_id_to_init = meta_pass_id_to_init
+                pass_id_to_init = self.get_pass_id_to_init()
                 if pass_id_to_init is not None:
                     pass_id = pass_id_to_init
                     pass_ = passes[pass_id]
