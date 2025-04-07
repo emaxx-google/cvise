@@ -154,6 +154,7 @@ class TestEnvironment:
         return Path(test_case).parent.glob('extra*.dat')
 
     def run(self):
+        start_time = time.monotonic()
         try:
             self.base_size = get_file_size(self.test_case)
             self.initial_file_count = get_file_count(self.test_case)
@@ -180,6 +181,7 @@ class TestEnvironment:
             self.new_size = get_file_size(self.test_case_path)
             self.new_file_count = get_file_count(self.test_case_path)
             self.new_line_count = get_line_count(self.test_case_path)
+            self.duration = time.monotonic() - start_time
             return self
         # except OSError as e:
         #     # this can happen when we clean up temporary files for cancelled processes
@@ -261,6 +263,8 @@ class TestManager:
     ):
         self.test_script = Path(test_script).absolute()
         self.timeout = timeout
+        self.setup_timeout = timeout
+        self.duration_history = collections.deque(maxlen=max(30, 3 * parallel_tests))
         self.save_temps = save_temps
         self.pass_statistic = pass_statistic
         self.test_cases = set()
@@ -310,6 +314,12 @@ class TestManager:
         )
 
         self.line_counts = {f: get_line_count(f) for f in self.test_cases}
+
+    def get_timeout(self):
+        if len(self.duration_history) < self.duration_history.maxlen:
+            return self.timeout
+        mx = max(self.duration_history)
+        return 2 * round(math.ceil(mx))
 
     def create_root(self, p=None, suffix=''):
         pass_name = str(p or self.current_pass).replace('::', '-').replace(' ', '_')
@@ -779,6 +789,7 @@ class TestManager:
                             if hasattr(pass_, 'on_success_observed'):
                                 pass_.on_success_observed(env.state)
                             self.next_successes_hint.append((env.state, pass_, improv, improv_file_count))
+                            self.duration_history.append(env.duration)
                             comparison_key = self.get_state_comparison_key(env.state, improv, improv_file_count)
                             if best_success_improv is None or comparison_key < best_success_comparison_key:
                                 best_success_env = env
@@ -867,7 +878,7 @@ class TestManager:
                     logging.debug(f'Going to init pass {pass_}')
                     self.states[pass_id] = 'initializing'
                     env = SetupEnvironment(pass_, self.current_test_case, self.test_cases, self.save_temps, self.last_state_hint[pass_id], strategy=self.strategy, other_init_states=self.init_states)
-                    future = pool.schedule(env.run, timeout=self.timeout)
+                    future = pool.schedule(env.run, timeout=self.setup_timeout)
                     future.job_type = JobType.PASS_NEW
                     future.pass_id = pass_id
                     self.futures.append(future)
@@ -943,6 +954,11 @@ class TestManager:
                         lazy_input_copying,
                     )
                     test_env.is_regular_iteration = should_advance
+
+                    new_timeout = self.get_timeout()
+                    if new_timeout != self.timeout:
+                        logging.info(f'changing timeout: new={new_timeout} old={self.timeout}')
+                        self.timeout = new_timeout
                     future = pool.schedule(test_env.run, timeout=self.timeout)
                     future.job_type = JobType.PASS_TRANSFORM
                     future.order = order
