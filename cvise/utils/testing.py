@@ -189,7 +189,8 @@ class TestEnvironment:
                 logging.debug(f'TestEnvironment::run OSError: ' + str(e))
             return self
         except Exception as e:
-            logging.debug(f'Unexpected TestEnvironment::run failure: ' + str(e))
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f'Unexpected TestEnvironment::run failure: ' + str(e))
             traceback.print_exc()
             return self
 
@@ -214,13 +215,15 @@ class TestEnvironment:
         for test_case in self.all_test_cases:
             (self.folder / test_case.parent).mkdir(parents=True, exist_ok=True)
             dest = self.folder / test_case.parent / os.path.basename(test_case)
-            logging.debug(f'TestEnvironment.run: copy from {test_case} to {dest}')
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f'TestEnvironment.run: copy from {test_case} to {dest}')
             if test_case.is_dir():
                 shutil.copytree(test_case, dest, symlinks=True)
             else:
                 shutil.copy2(test_case, dest)
             for extra in self.extra_file_paths(test_case):
-                logging.debug(f'TestEnvironment.run: copy from {extra} to {dest.parent}')
+                if logging.getLogger().isEnabledFor(logging.DEBUG):
+                    logging.debug(f'TestEnvironment.run: copy from {extra} to {dest.parent}')
                 shutil.copy(extra, dest.parent)
 
 def get_heuristic_names_for_log(state, pass_):
@@ -326,13 +329,15 @@ class TestManager:
         pass_name = str(p or self.current_pass).replace('::', '-').replace(' ', '_')
         root = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}{pass_name}{suffix}-')
         self.roots.append(Path(root))
-        logging.debug(f'Creating pass root folder: {root}')
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f'Creating pass root folder: {root}')
 
     def recreate_root(self, idx, p, suffix):
         pass_name = str(p).replace('::', '-').replace(' ', '_')
         root = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}{pass_name}{suffix}-')
         self.roots[idx] = Path(root)
-        logging.debug(f'Creating pass root folder: {root}')
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f'Creating pass root folder: {root}')
 
     def remove_root(self):
         if not self.save_temps:
@@ -601,7 +606,8 @@ class TestManager:
                     state = future.result()
                     pass_id = future.pass_id
                     p = self.current_passes[pass_id]
-                    logging.debug(f'Init completed for {p}')
+                    if logging.getLogger().isEnabledFor(logging.DEBUG):
+                        logging.debug(f'Init completed for {p}')
                     self.states[pass_id] = state
                     self.init_states[pass_id] = state
                 elif future.job_type == JobType.PASS_TRANSFORM:
@@ -774,13 +780,15 @@ class TestManager:
                 if quit_loop and len(self.current_passes) == 1:
                     if success_cnt > 0:
                         self.current_pass = best_success_pass
-                        logging.debug(f'run_parallel_tests: proceeding on quit_loop: best improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state}')
+                        if logging.getLogger().isEnabledFor(logging.DEBUG):
+                            logging.debug(f'run_parallel_tests: proceeding on quit_loop: best improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state}')
                         self.states[0] = best_success_env.state
                         self.terminate_all(pool)
                         return best_success_env
                     else:
                         success = self.wait_for_first_success()
-                        logging.debug(f'run_parallel_tests: wait_for_first_success returned {success.state if success else None}')
+                        if logging.getLogger().isEnabledFor(logging.DEBUG):
+                            logging.debug(f'run_parallel_tests: wait_for_first_success returned {success.state if success else None}')
                         if success:
                             self.states[0] = success.state
                         self.terminate_all(pool)
@@ -822,7 +830,8 @@ class TestManager:
                                     self.folder_tombstone.append(self.tmp_for_best)
                                 self.tmp_for_best = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}best-')
                                 pa = os.path.join(self.tmp_for_best, os.path.basename(future.result().test_case_path))
-                                logging.debug(f'run_parallel_tests: rename from {future.result().test_case_path} to {pa}')
+                                if logging.getLogger().isEnabledFor(logging.DEBUG):
+                                    logging.debug(f'run_parallel_tests: rename from {future.result().test_case_path} to {pa}')
                                 os.rename(future.result().test_case_path, pa)
                                 best_success_env.test_case = pa
                                 dbg = []
@@ -835,7 +844,8 @@ class TestManager:
                             self.release_future(future)
                             improv_speed = best_success_improv / (now - measure_start_time)
                             file_count_improv_speed = best_success_improv_file_count / (now - measure_start_time)
-                            logging.debug(f'observed success success_cnt={success_cnt} improv={improv} improv_file_count={improv_file_count} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={self.finished_transform_jobs} failed_merges={len(self.failed_merges)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed} comparison_key={comparison_key}')
+                            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                                logging.debug(f'observed success success_cnt={success_cnt} improv={improv} improv_file_count={improv_file_count} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={self.finished_transform_jobs} failed_merges={len(self.failed_merges)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed} comparison_key={comparison_key}')
                         elif outcome == PassCheckingOutcome.IGNORE:
                             if isinstance(env.state, list):
                                 self.failed_merges.append(env.state)
@@ -858,13 +868,15 @@ class TestManager:
                             should_proceed = True
 
                     if should_proceed:
-                        logging.debug(f'run_parallel_tests: proceeding: finished_jobs={self.finished_transform_jobs} failed_merges={len(self.failed_merges)} order={order} improv={best_success_improv} improv_file_count={best_success_improv_file_count} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} strategy={self.strategy} comparison_key={self.get_state_comparison_key(best_success_env.state, best_success_improv, best_success_improv_file_count)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed}')
+                        if logging.getLogger().isEnabledFor(logging.DEBUG):
+                            logging.debug(f'run_parallel_tests: proceeding: finished_jobs={self.finished_transform_jobs} failed_merges={len(self.failed_merges)} order={order} improv={best_success_improv} improv_file_count={best_success_improv_file_count} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} strategy={self.strategy} comparison_key={self.get_state_comparison_key(best_success_env.state, best_success_improv, best_success_improv_file_count)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed}')
                         transform_futures = list(f for f in self.futures if f.job_type == JobType.PASS_TRANSFORM)
                         for pass_id, state in dict((fu.pass_id, fu.state)
                                                 for fu in sorted(transform_futures, key=lambda fu: -fu.order)
                                                 if not isinstance(fu.pass_id, list) and
                                                    fu.order > (self.last_finished_order[fu.pass_id] or 0)).items():
-                            logging.debug(f'run_parallel_tests: rewinding {passes[pass_id]} from {self.states[pass_id]} to {state}')
+                            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                                logging.debug(f'run_parallel_tests: rewinding {passes[pass_id]} from {self.states[pass_id]} to {state}')
                             self.states[pass_id] = state
                         self.terminate_all(pool)
                         return best_success_env
@@ -881,7 +893,8 @@ class TestManager:
                 if pass_id_to_init is not None:
                     pass_id = pass_id_to_init
                     pass_ = passes[pass_id]
-                    logging.debug(f'Going to init pass {pass_}')
+                    if logging.getLogger().isEnabledFor(logging.DEBUG):
+                        logging.debug(f'Going to init pass {pass_}')
                     self.states[pass_id] = 'initializing'
                     env = SetupEnvironment(pass_, self.current_test_case, self.test_cases, self.save_temps, self.last_state_hint[pass_id], strategy=self.strategy, other_init_states=self.init_states)
                     future = pool.schedule(env.run, timeout=self.setup_timeout)
@@ -989,13 +1002,15 @@ class TestManager:
                         if state is None and len(passes) == 1:
                             if success_cnt > 0:
                                 self.current_pass = best_success_pass
-                                logging.debug(f'run_parallel_tests: proceeding on end state with best: improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={self.current_pass} state={best_success_env.state}')
+                                if logging.getLogger().isEnabledFor(logging.DEBUG):
+                                    logging.debug(f'run_parallel_tests: proceeding on end state with best: improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={self.current_pass} state={best_success_env.state}')
                                 self.states[0] = best_success_env.state
                                 self.terminate_all(pool)
                                 return best_success_env
                             else:
                                 success = self.wait_for_first_success()
-                                logging.debug(f'run_parallel_tests: proceeding on end after wait_for_first_success: state={success.state if success else None}')
+                                if logging.getLogger().isEnabledFor(logging.DEBUG):
+                                    logging.debug(f'run_parallel_tests: proceeding on end after wait_for_first_success: state={success.state if success else None}')
                                 if success:
                                     self.states[0] = success.state
                                 self.terminate_all(pool)
@@ -1004,7 +1019,8 @@ class TestManager:
             # we are at the end of enumeration
             self.current_pass = best_success_pass
             self.terminate_all(pool)
-            logging.debug(f'TestManager.run_parallel_tests: }}END: end of enumeration')
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f'TestManager.run_parallel_tests: }}END: end of enumeration')
             return best_success_env
 
     def run_pass(self, pass_):
@@ -1125,7 +1141,8 @@ class TestManager:
             sys.exit(1)
 
     def run_concurrent_passes(self, passes):
-        logging.debug(f'run_concurrent_passes: BEGIN{{')
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f'run_concurrent_passes: BEGIN{{')
 
         self.current_pass = None
         self.current_passes = passes
@@ -1192,7 +1209,8 @@ class TestManager:
                             self.print_diff = not self.print_diff
 
                     self.run_test_case_size = get_file_size(self.current_test_case)
-                    logging.debug(f'run_test_case_size={self.run_test_case_size}')
+                    if logging.getLogger().isEnabledFor(logging.DEBUG):
+                        logging.debug(f'run_test_case_size={self.run_test_case_size}')
                     success_env = self.run_parallel_tests(passes)
                     self.kill_pid_queue()
 
@@ -1237,7 +1255,8 @@ class TestManager:
             self.remove_root()
             self.current_pass = None
             self.current_passes = None
-            logging.debug(f'run_concurrent_passes: }}END')
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f'run_concurrent_passes: }}END')
         except KeyboardInterrupt:
             logging.info('Exiting now ...')
             self.remove_root()
@@ -1256,7 +1275,8 @@ class TestManager:
             logging.info(diff_str)
 
         try:
-            logging.debug(f'process_result: copy from {test_env.test_case_path} to {self.current_test_case}')
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f'process_result: copy from {test_env.test_case_path} to {self.current_test_case}')
             if test_env.test_case_path.is_dir():
                 if test_env.lazy_input_copying:
                     for path in test_env.test_case_path.rglob('*'):
