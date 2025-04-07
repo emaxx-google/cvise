@@ -144,7 +144,8 @@ class TestEnvironment:
 
     def dump(self, dst):
         for f in self.all_test_cases:
-            shutil.copy(self.folder / f, dst)
+            if not (self.folder / f).is_dir():
+                shutil.copy(self.folder / f, dst)
 
         shutil.copy(self.test_script, dst)
 
