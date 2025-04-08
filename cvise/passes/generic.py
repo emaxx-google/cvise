@@ -995,6 +995,9 @@ def generate_tree_sitter_delta_hints(test_case, files, file_to_id, external_prog
     return hints
 
 def generate_delete_file_hints(test_case, files, file_to_id, other_init_states):
+    if not test_case.is_dir():
+        return []
+
     assert other_init_states
     states_to_load = [s for s in other_init_states if s]
     if not states_to_load:
@@ -1023,15 +1026,14 @@ def generate_delete_file_hints(test_case, files, file_to_id, other_init_states):
         set_hint_locs(h, locs)
         hints.append(h)
 
-    if test_case.is_dir():
-        for file_id, file in enumerate(files):
-            if file_to_id[file] not in file_to_locs:
-                if file.suffix not in ('.makefile',) and file.name not in ('Makefile',):  # Hack
-                    hints.append({
-                        't': 'delfile::0',
-                        'n': file_to_id[file],
-                        'multi': [],
-                    })
+    for file_id, file in enumerate(files):
+        if file_to_id[file] not in file_to_locs:
+            if file.suffix not in ('.makefile',) and file.name not in ('Makefile',):  # Hack
+                hints.append({
+                    't': 'delfile::0',
+                    'n': file_to_id[file],
+                    'multi': [],
+                })
 
     return hints
 
