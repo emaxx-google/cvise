@@ -329,10 +329,16 @@ class TestManager:
         self.line_counts = {f: get_line_count(f) for f in self.test_cases}
 
     def get_timeout(self):
-        if len(self.duration_history) < self.duration_history.maxlen:
+        if not self.duration_history:
             return self.timeout
         mx = max(self.duration_history)
-        return 2 * round(math.ceil(mx))
+        if hasattr(self, 'lastmx') and self.lastmx != round(math.ceil(mx)):  # TEMP!
+            logging.info(f'timeout_mx={round(math.ceil(mx))}')
+        self.lastmx = round(math.ceil(mx))
+        timeout = round(math.ceil(5 * mx))
+        if len(self.duration_history) < self.duration_history.maxlen:
+            timeout = max(timeout, self.timeout)
+        return timeout
 
     def create_root(self, p=None, suffix=''):
         pass_name = str(p or self.current_pass).replace('::', '-').replace(' ', '_')
@@ -742,8 +748,8 @@ class TestManager:
 
             while any(self.states) or self.futures:
                 # do not create too many states
-                any_transform_possible = any(s not in (None, 'needinit', 'initializing') for s in self.states)
-                if len(self.futures) >= self.parallel_tests or not any_transform_possible and self.get_pass_id_to_init() is None:
+                new_transform_possible = any(s not in (None, 'needinit', 'initializing') for s in self.states)
+                if len(self.futures) >= self.parallel_tests or not new_transform_possible and self.get_pass_id_to_init() is None:
                     wait(self.futures, return_when=FIRST_COMPLETED)
 
                 if order % 10 == 0:
@@ -952,7 +958,8 @@ class TestManager:
 
                     new_timeout = self.get_timeout()
                     if new_timeout != self.timeout:
-                        logging.info(f'changing timeout: new={new_timeout} old={self.timeout}')
+                        if logging.getLogger().isEnabledFor(logging.DEBUG):
+                            logging.debug(f'changing timeout: new={new_timeout} old={self.timeout}')
                         self.timeout = new_timeout
                     future = pool.schedule(test_env.run, timeout=self.timeout)
                     future.job_type = JobType.PASS_TRANSFORM
