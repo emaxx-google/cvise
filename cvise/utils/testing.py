@@ -7,11 +7,13 @@ import filecmp
 import logging
 import math
 from multiprocessing import Manager
+import multiprocessing
 import os
 from pathlib import Path
 import platform
 import random
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -91,6 +93,10 @@ def rmfolder(name):
         rmtree(name)
     except OSError as e:
         pass
+
+def worker_initializer(worker_pid_queue):
+    os.setpgrp()
+    worker_pid_queue.put(os.getpid())
 
 class RmFolderEnvironment:
     def __init__(self, name):
@@ -289,6 +295,9 @@ class TestManager:
         self.current_pass = None
         self.current_passes = None
         self.strategy = 'size'
+        # Using SimpleQueue instead of Queue to avoid deadlocks (the latter uses background threads which, when
+        # terminated at particular timing, can leave resources unfreed).
+        self.worker_pid_queue = multiprocessing.SimpleQueue()
 
         for test_case in test_cases:
             test_case = Path(test_case)
@@ -488,61 +497,6 @@ class TestManager:
     def log_key_event(cls, event):
         logging.info(f'****** {event} ******')
 
-    def kill_pid_queue(self):
-        active_pids = set()
-        while not self.pid_queue.empty():
-            event = self.pid_queue.get()
-            if event.type == ProcessEventType.FINISHED:
-                active_pids.discard(event.pid)
-            else:
-                active_pids.add(event.pid)
-
-        # A slightly modified version of psutil's children(), in order
-        # to only do the expensive pid-to-ppid map building only once.
-
-        def get_children(process, ppid_map):
-            # Copyright (c) 2009, Giampaolo Rodola'. All rights reserved.
-            # Use of this source code is governed by a BSD-style license that can be
-            # found in the LICENSE file.
-            reverse_ppid_map = collections.defaultdict(list)
-            for pid, ppid in ppid_map.items():
-                reverse_ppid_map[ppid].append(pid)
-            seen = set()
-            stack = [process.pid]
-            ret = []
-            while stack:
-                pid = stack.pop()
-                if pid in seen:
-                    continue
-                seen.add(pid)
-                for child_pid in reverse_ppid_map[pid]:
-                    try:
-                        child = psutil.Process(child_pid)
-                        intime = process.create_time() <= child.create_time()
-                        if intime:
-                            ret.append(child)
-                            stack.append(child_pid)
-                        else:
-                            assert False, f'ABNORMAL CHILD: process={process.pid} create_time={process.create_time()} child={child.pid} create_time={child.create_time()}'
-                    except (psutil.NoSuchProcess, psutil.ZombieProcess):
-                        pass
-            return ret
-
-        ppid_map = psutil._ppid_map()
-        for pid in active_pids:
-            try:
-                process = psutil.Process(pid)
-                children = get_children(process, ppid_map)
-                children.append(process)
-                for child in children:
-                    try:
-                        # Terminate the process more reliability: https://github.com/marxin/cvise/issues/145
-                        child.kill()
-                    except psutil.NoSuchProcess:
-                        pass
-            except psutil.NoSuchProcess:
-                pass
-
     def release_future(self, future):
         self.futures.remove(future)
 
@@ -563,6 +517,22 @@ class TestManager:
             os.mkdir(extra_dir)
             shutil.move(test_case_path, extra_dir)
             logging.info(f'Created extra directory {extra_dir} for you to look at later')
+
+    def sweep_children_processes(self):
+        # This loop is racy, but it's fine if a particular worker's PID is received in our next call (and SimpleQueue
+        # doesn't provide a non-blocking get operation).
+        while not self.worker_pid_queue.empty():
+            self.worker_pids.append(self.worker_pid_queue.get())
+
+        active_pids = psutil.pids()
+        for pid in self.worker_pids:
+            if pid not in active_pids:
+                try:
+                    os.killpg(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass  # The whole group is already dead.
+
+        self.worker_pids = [p for p in self.worker_pids if p in active_pids]
 
     def process_done_futures(self):
         quit_loop = False
@@ -596,6 +566,7 @@ class TestManager:
                                 self.states[self.current_passes.index(p)] = None
                         elif self.timeout_count == self.MAX_TIMEOUTS:
                             logging.warning('Maximum number of timeout were reached: %d' % self.MAX_TIMEOUTS)
+                        self.sweep_children_processes()
                         continue
                     else:
                         raise future.exception()
@@ -742,7 +713,7 @@ class TestManager:
         assert not self.temporary_folders
         self.future_to_pass = {}
         self.last_finished_order = [None] * len(passes)
-        with pebble.ProcessPool(max_workers=self.parallel_tests) as pool:
+        with pebble.ProcessPool(max_workers=self.parallel_tests, initializer=worker_initializer, initargs=(self.worker_pid_queue,)) as pool:
             order = 1
             next_pass_to_schedule = 0
             self.finished_transform_jobs = 0
@@ -774,6 +745,11 @@ class TestManager:
                 any_transform_possible = any(s not in (None, 'needinit', 'initializing') for s in self.states)
                 if len(self.futures) >= self.parallel_tests or not any_transform_possible and self.get_pass_id_to_init() is None:
                     wait(self.futures, return_when=FIRST_COMPLETED)
+
+                if order % 10 == 0:
+                    # Occasionally reclaim system resources - just for the case a timed-out worker wasn't terminated
+                    # when the future timeout was handled below.
+                    self.sweep_children_processes()
 
                 quit_loop = self.process_done_futures()
                 assert self.finished_transform_jobs <= order
@@ -1035,8 +1011,10 @@ class TestManager:
         self.futures = []
         self.temporary_folders = {}
         self.folder_tombstone = []
-        m = Manager()
-        self.pid_queue = m.Queue()
+        # m = Manager()
+        # self.pid_queue = m.Queue()
+        self.pid_queue = None
+        self.worker_pids = []
         self.create_root()
         pass_key = repr(self.current_pass)
         self.last_state_hint = [None]
@@ -1093,8 +1071,8 @@ class TestManager:
 
                     self.run_test_case_size = get_file_size(self.current_test_case)
                     success_env = self.run_parallel_tests(passes=[self.current_pass])
+                    self.sweep_children_processes()
                     self.current_pass = pass_
-                    self.kill_pid_queue()
 
                     if success_env:
                         self.process_result(success_env)
@@ -1149,8 +1127,10 @@ class TestManager:
         self.futures = []
         self.temporary_folders = {}
         self.folder_tombstone = []
-        m = Manager()
-        self.pid_queue = m.Queue()
+        # m = Manager()
+        # self.pid_queue = m.Queue()
+        self.pid_queue = None
+        self.worker_pids = []
         if not self.tmp_for_best:
             self.tmp_for_best = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}best-')
         for p in passes:
@@ -1212,7 +1192,7 @@ class TestManager:
                     if logging.getLogger().isEnabledFor(logging.DEBUG):
                         logging.debug(f'run_test_case_size={self.run_test_case_size}')
                     success_env = self.run_parallel_tests(passes)
-                    self.kill_pid_queue()
+                    self.sweep_children_processes()
 
                     if success_env:
                         self.process_result(success_env)
