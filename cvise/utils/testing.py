@@ -722,6 +722,7 @@ class TestManager:
         with pebble.ProcessPool(max_workers=self.parallel_tests, initializer=worker_initializer, initargs=(self.worker_pid_queue,)) as pool:
             order = 1
             next_pass_to_schedule = 0
+            pass_job_index = 0
             self.finished_transform_jobs = 0
             self.timeout_count = 0
             self.giveup_reported = False
@@ -928,10 +929,14 @@ class TestManager:
                         if state or not self.failed_merges:
                             break
 
-                if not state and any(self.states):
-                    next_pass_to_schedule = (next_pass_to_schedule + 1) % len(passes)
-                    while self.states[next_pass_to_schedule] in ('needinit', 'initializing', None) or passes[next_pass_to_schedule].strategy and passes[next_pass_to_schedule].strategy != self.strategy:
-                        next_pass_to_schedule = (next_pass_to_schedule + 1) % len(passes)
+                if not state and any(s not in ('needinit', 'initializing', None) for s in self.states):
+                    pass_job_index += 1
+                    while pass_job_index >= passes[next_pass_to_schedule].jobs or self.states[next_pass_to_schedule] in ('needinit', 'initializing', None) or passes[next_pass_to_schedule].strategy and passes[next_pass_to_schedule].strategy != self.strategy:
+                        pass_job_index = 0
+                        if next_pass_to_schedule + 1 < len(passes):
+                            next_pass_to_schedule += 1
+                        else:
+                            next_pass_to_schedule = 0
                     pass_id = next_pass_to_schedule
                     state = self.states[pass_id]
                     should_advance = True

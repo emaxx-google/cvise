@@ -67,8 +67,8 @@
    {"pass": "generic", "arg": "clex::rm-toks-14"},
    {"pass": "generic", "arg": "clex::rm-toks-15"},
    {"pass": "generic", "arg": "clex::rm-toks-16"},
-   {"pass": "generic", "arg": "clex::rm-tok-pattern-8", "include": ["slow"]},
-   {"pass": "generic", "arg": "clex::rm-tok-pattern-4", "exclude": ["slow"]}
+   {"pass": "generic", "arg": "clex::rm-tok-pattern-8", "jobs": 32, "include": ["slow"]},
+   {"pass": "generic", "arg": "clex::rm-tok-pattern-4", "jobs": 32, "exclude": ["slow"]},
    {"pass": "generic", "arg": "meta::delete-file"},
    {"pass": "generic", "arg": "meta::inline-file"}
 ],

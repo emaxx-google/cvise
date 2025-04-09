@@ -141,6 +141,7 @@ class CVise:
 
                 if 'strategy' in pass_dict:
                     pass_instance.strategy = pass_dict['strategy']
+                pass_instance.jobs = pass_dict.get('jobs', 1)
 
                 if not_c and 'c' in pass_dict and pass_dict['c']:
                     continue
