@@ -846,7 +846,7 @@ class TestManager:
                             best_improv_speed = improv_speed
                         if best_file_count_improv_speed is None or file_count_improv_speed > best_file_count_improv_speed:
                             best_file_count_improv_speed = file_count_improv_speed
-                        if improv_speed < best_improv_speed * 0.8 and (improv_speed > 0 or file_count_improv_speed < best_file_count_improv_speed * 0.8):
+                        if improv_speed <= best_improv_speed * 0.8 and (improv_speed > 0 or file_count_improv_speed < best_file_count_improv_speed * 0.8):
                             should_proceed = True
 
                     if should_proceed:
