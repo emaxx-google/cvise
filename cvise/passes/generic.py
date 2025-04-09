@@ -200,6 +200,8 @@ class GenericPass(AbstractPass):
         def hint_main_file(h):
             if h['t'].startswith('delfile::'):
                 return files[h['n']]
+            if 'ns' in h:
+                return test_case / h['ns']
             if 'f' in h:
                 return files[h['f']]
             return files[h['multi'][0]['f']]
@@ -1041,6 +1043,14 @@ def generate_delete_file_hints(test_case, files, file_to_id, other_init_states):
                     'n': file_to_id[file],
                     'multi': [],
                 })
+
+    for path in test_case.rglob('*'):
+        if path.is_dir() and not path.is_symlink() and not os.listdir(path):
+            hints.append({
+                't': 'rmdir',
+                'ns': str(relative_path(path, test_case)),
+                'multi': [],
+            })
 
     return hints
 

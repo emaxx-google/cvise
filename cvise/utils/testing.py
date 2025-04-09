@@ -50,7 +50,7 @@ def get_file_size(path):
     return sum(f.resolve().stat().st_size for f in inner_paths)
 
 def get_file_count(path):
-    inner_paths = [f for f in Path(path).rglob('*') if not f.is_dir()] if os.path.isdir(path) else [path]
+    inner_paths = [f for f in Path(path).rglob('*')] if os.path.isdir(path) else [path]
     return len(inner_paths)
 
 def get_line_count(path):
@@ -1272,7 +1272,10 @@ class TestManager:
                     for path in self.current_test_case.rglob('*'):
                         dest_path = test_env.test_case_path / path.relative_to(self.current_test_case)
                         if not dest_path.exists():
-                            os.unlink(path)
+                            if path.is_dir():
+                                os.rmdir(path)
+                            else:
+                                os.unlink(path)
                 else:
                     rmtree(self.current_test_case)
                     shutil.copytree(test_env.test_case_path, self.current_test_case, symlinks=True)

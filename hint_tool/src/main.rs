@@ -23,6 +23,7 @@ struct HintLoc {
 struct Hint {
     t: String,
     n: Option<u32>,
+    ns: Option<String>,
     f: Option<u32>,
     l: Option<u32>,
     r: Option<u32>,
@@ -120,12 +121,22 @@ fn main() {
     //     eprintln!("{:?}", h);
     // }
 
-    // Determine files to be deleted.
+    // Determine files/dirs to be deleted.
     let files_for_deletion: HashSet<u32> = hints
         .iter()
         .filter_map(|h| {
             if h.t.starts_with("delfile::") {
                 h.n
+            } else {
+                None
+            }
+        })
+        .collect();
+    let dirs_for_deletion: HashSet<PathBuf> = hints
+        .iter()
+        .filter_map(|h| {
+            if h.t.starts_with("rmdir") {
+                Some(PathBuf::from(h.ns.clone().unwrap()))
             } else {
                 None
             }
@@ -151,6 +162,9 @@ fn main() {
         .filter(|e| e.file_type().is_dir())
     {
         let dir_rel = entry.path().strip_prefix(src_path).unwrap();
+        if dirs_for_deletion.contains(dir_rel) {
+            continue;
+        }
         let dir_dest = dest_path.join(dir_rel);
         fs::create_dir_all(dir_dest).unwrap();
     }
