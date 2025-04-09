@@ -192,6 +192,8 @@ class GenericPass(AbstractPass):
             hints = generate_tree_sitter_delta_hints(test_case, files, file_to_id, self.external_programs)
         elif self.arg == 'meta::delete-file':
             hints = generate_delete_file_hints(test_case, files, file_to_id, other_init_states)
+        elif self.arg == 'meta::inline-file':
+            hints = generate_inline_file_hints(test_case, files, file_to_id, other_init_states)
         else:
             raise RuntimeError(f'Unknown hint source: arg={self.arg}')
 
@@ -1042,6 +1044,35 @@ def generate_delete_file_hints(test_case, files, file_to_id, other_init_states):
 
     return hints
 
+def generate_inline_file_hints(test_case, files, file_to_id, other_init_states):
+    if not test_case.is_dir():
+        return []
+
+    assert other_init_states
+    states_to_load = [s for s in other_init_states if s]
+    if not states_to_load:
+        return []
+    files, path_to_depth, old_hints = load_hints(states_to_load, test_case, load_all=True)
+
+    file_to_locs = {}
+    for h in old_hints:
+        if h['t'] == 'fileref' and h.get('w', 1) == 1:
+            file_id = h['n']
+            file_to_locs.setdefault(file_id, []).extend(get_hint_locs(h))
+
+    hints = []
+    for file_id, locs in file_to_locs.items():
+        if len(locs) == 1:
+            loc = locs[0]
+            hints.append({
+                't': 'inlinefile',
+                'multi': [
+                    {'f': loc['f'], 'l': loc['l'], 'r': loc['r'], 'vf': file_id},
+                    {'f': file_id, 'l': 0, 'r': files[file_id].stat().st_size},
+                ],
+            })
+    return hints
+
 def get_root_compile_command(test_case):
     makefile_path = test_case / 'Makefile'
     if not makefile_path.exists():
@@ -1144,6 +1175,9 @@ def assert_valid_hint(h, files):
                 assert l['l'] <= l['r']
                 if 'v' in l:
                     assert isinstance(l['v'], str)
+                if 'vf' in l:
+                    assert isinstance(l['vf'], int)
+                    assert 0 <= l['vf'] < len(files)
         else:
             assert False
     except AssertionError as e:

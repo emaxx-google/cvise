@@ -35,7 +35,6 @@
    {"pass": "generic", "arg": "clang_delta::replace-function-def-with-decl"},
    {"pass": "generic", "arg": "clang_delta::remove-unused-function"},
    {"pass": "generic", "arg": "tree_sitter_delta"},
-   {"pass": "generic", "arg": "meta::delete-file"},
    {"pass": "generic", "arg": "clex::rm-toks-32"},
    {"pass": "generic", "arg": "clex::rm-toks-31"},
    {"pass": "generic", "arg": "clex::rm-toks-30"},
@@ -70,6 +69,8 @@
    {"pass": "generic", "arg": "clex::rm-toks-16"},
    {"pass": "generic", "arg": "clex::rm-tok-pattern-8", "include": ["slow"]},
    {"pass": "generic", "arg": "clex::rm-tok-pattern-4", "exclude": ["slow"]}
+   {"pass": "generic", "arg": "meta::delete-file"},
+   {"pass": "generic", "arg": "meta::inline-file"}
 ],
 "parallel::last": [
    {"pass": "generic", "arg": "lines"},

@@ -16,6 +16,7 @@ struct HintLoc {
     l: u32,
     r: u32,
     v: Option<String>,
+    vf: Option<u32>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -26,6 +27,7 @@ struct Hint {
     l: Option<u32>,
     r: Option<u32>,
     v: Option<String>,
+    vf: Option<u32>,
     multi: Option<Vec<HintLoc>>,
 }
 
@@ -53,6 +55,7 @@ fn get_hint_locs(hint: &Hint) -> Vec<HintLoc> {
             l: hint.l.unwrap(),
             r: hint.r.unwrap(),
             v: hint.v.clone(),
+            vf: hint.vf,
         }],
     }
 }
@@ -70,21 +73,22 @@ fn merge_edits(mut edits: Vec<HintLoc>) -> Vec<HintLoc> {
     merged
 }
 
-fn write_edited_file(file_dest: &Path, file_src: &Path, edits: Vec<HintLoc>) -> i64 {
+fn write_edited_file(file_dest: &Path, file_src: &Path, edits: Vec<HintLoc>, src_paths: &Vec<PathBuf>) -> i64 {
     let data = fs::read(file_src).unwrap();
     let mut new_data = vec![];
-    let mut reduction = 0;
     let mut ptr = 0;
     for e in merge_edits(edits) {
         new_data.extend(&data[ptr..e.l as usize]);
-        reduction += (e.r - e.l) as i64;
         if let Some(v) = e.v {
             new_data.extend(v.as_bytes());
-            reduction -= v.as_bytes().len() as i64;
+        } else if let Some(vf) = e.vf {
+            let inlined_data = fs::read(&src_paths[vf as usize]).unwrap();
+            new_data.extend(inlined_data);
         }
         ptr = e.r as usize;
     }
     new_data.extend(&data[ptr..]);
+    let reduction = data.len() as i64 - new_data.len() as i64;
     fs::write(file_dest, new_data).unwrap();
     reduction
 }
@@ -152,10 +156,13 @@ fn main() {
     }
 
     let nest = fs::metadata(src_path).unwrap().is_dir();
+    let src_paths: Vec<PathBuf> = files.iter().map(|f| if nest { src_path.join(&f) } else { src_path.to_path_buf() }).collect();
+    let dest_paths: Vec<PathBuf> = files.iter().map(|f| if nest { dest_path.join(&f) } else { dest_path.to_path_buf() }).collect();
+
     let mut reduction = 0;
-    for (file_id, file) in files.into_iter().enumerate() {
-        let file_src = if nest { src_path.join(&file) } else { src_path.to_path_buf() };
-        let file_dest = if nest { dest_path.join(&file) } else { dest_path.to_path_buf() };
+    for file_id in 0..files.len() {
+        let file_src = &src_paths[file_id];
+        let file_dest = &dest_paths[file_id];
         if files_for_deletion.contains(&(file_id as u32)) {
             reduction += fs::metadata(file_src).unwrap().len() as i64;
             continue;
@@ -166,7 +173,7 @@ fn main() {
                 symlink(fs::canonicalize(file_src).unwrap(), file_dest).unwrap();
             }
             Some(edits) => {
-                reduction += write_edited_file(&file_dest, &file_src, edits);
+                reduction += write_edited_file(&file_dest, &file_src, edits, &src_paths);
             }
         }
     }
