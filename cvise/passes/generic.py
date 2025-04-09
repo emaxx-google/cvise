@@ -677,25 +677,30 @@ def generate_clex_hints(test_case, files, file_to_id, clex_arg, external_program
     hints = []
     for file_id, file in enumerate(files):
         if not file.is_symlink() and file.suffix not in ('.makefile', '.cppmap') and file.name not in ('Makefile',):
-            command = [str(external_programs['clex']), clex_arg, '-1', str(file)]
-            if logging.getLogger().isEnabledFor(logging.DEBUG):
-                logging.debug(f'generate_clex_hints: running: {shlex.join(command)}')
-            proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
-            if proc.returncode != 51:
-                raise RuntimeError(f'generate_clex_hints failed: command:\n{shlex.join(command)}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
-            for line in proc.stdout.splitlines():
-                if line.strip():
-                    try:
-                        h = json.loads(line)
-                    except json.decoder.JSONDecodeError as e:
-                        raise RuntimeError(f'Error while processing {file}: JSON line "{line}": {e}')
-                    h['t'] = clex_arg
-                    if 'multi' in h:
-                        for l in h['multi']:
-                            l['f'] = file_id
-                    else:
-                        h['f'] = file_id
-                    hints.append(h)
+            idx = -1
+            while True:
+                command = [str(external_programs['clex']), clex_arg, str(idx), str(file)]
+                if logging.getLogger().isEnabledFor(logging.DEBUG):
+                    logging.debug(f'generate_clex_hints: running: {shlex.join(command)}')
+                proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
+                if proc.returncode == 71:
+                    break
+                if proc.returncode != 51:
+                    raise RuntimeError(f'generate_clex_hints failed: command:\n{shlex.join(command)}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
+                for line in proc.stdout.splitlines():
+                    if line.strip():
+                        try:
+                            h = json.loads(line)
+                        except json.decoder.JSONDecodeError as e:
+                            raise RuntimeError(f'Error while processing {file}: JSON line "{line}": {e}')
+                        h['t'] = clex_arg
+                        if 'multi' in h:
+                            for l in h['multi']:
+                                l['f'] = file_id
+                        else:
+                            h['f'] = file_id
+                        hints.append(h)
+                idx -= 1
     return hints
 
 def generate_topformflat_hints(test_case, files, file_to_id, depth, external_programs):

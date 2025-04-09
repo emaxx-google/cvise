@@ -278,6 +278,9 @@ static void delete_string(int idx) {
 static int n_toks;
 
 static void rm_toks(int idx) {
+  if (idx < -1) {
+    exit(STOP);
+  }
   int i;
   int matched = 0;
   int which = 0;
@@ -333,7 +336,11 @@ static void rm_tok_pattern(int idx) {
     patterns[i] = 1 | ((unsigned)i << 1);
   }
 
-  int n_pattern = (idx < 0 ? -idx-1 : idx) & (n_patterns - 1);
+  if (idx < 0 && -idx-1 >= n_patterns) {
+    exit(STOP);
+  }
+
+  int n_pattern = idx < 0 ? -idx-1 : (idx & (n_patterns - 1));
   unsigned char pat = patterns[n_pattern];
 
 #ifdef _MSC_VER
