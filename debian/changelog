@@ -1,3 +1,12 @@
+cvise (2.11.20250409) plucky; urgency=medium
+
+  * Dynamically adapt timeouts.
+  * Improve child process termination.
+  * Fix crash on UTF decoding error.
+  * Improve orchestration performance.
+
+ -- Maksim Ivanov <emaxx@google.com>  Wed, 09 Apr 2025 12:00:00 +0100
+
 cvise (2.11.20250403) plucky; urgency=medium
 
   * Optimizations and multi-file support.
