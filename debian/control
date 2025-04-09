@@ -5,6 +5,7 @@ Maintainer: Debian GCC Maintainers <debian-gcc@lists.debian.org>
 Uploaders: Matthias Klose <doko@debian.org>
 Build-Depends: debhelper-compat (= 12),
   dh-python,
+  cargo,
   chrpath,
   cmake,
   flex,
