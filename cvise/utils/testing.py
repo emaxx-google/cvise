@@ -332,9 +332,6 @@ class TestManager:
         if not self.duration_history:
             return self.timeout
         mx = max(self.duration_history)
-        if hasattr(self, 'lastmx') and self.lastmx != round(math.ceil(mx)):  # TEMP!
-            logging.info(f'timeout_mx={round(math.ceil(mx))}')
-        self.lastmx = round(math.ceil(mx))
         timeout = round(math.ceil(5 * mx))
         if len(self.duration_history) < self.duration_history.maxlen:
             timeout = max(timeout, self.timeout)
