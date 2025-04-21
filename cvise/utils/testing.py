@@ -650,7 +650,7 @@ class TestManager:
                 self.save_extra_dir(test_env.test_case_path)
         elif test_env.result == PassResult.STOP:
             return PassCheckingOutcome.QUIT_LOOP
-        elif test_env.result == PassResult.ERROR or test_env.exitcode is None:
+        elif test_env.result == PassResult.ERROR or test_env.result == PassResult.OK and test_env.exitcode is None:
             if not self.silent_pass_bug:
                 self.report_pass_bug(test_env, 'pass error')
                 return PassCheckingOutcome.QUIT_LOOP
