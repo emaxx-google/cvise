@@ -336,11 +336,11 @@ static void rm_tok_pattern(int idx) {
     patterns[i] = 1 | ((unsigned)i << 1);
   }
 
-  if (idx < 0 && -idx-1 >= n_patterns) {
+  if (idx < 0 && -idx >= n_patterns) {
     exit(STOP);
   }
 
-  int n_pattern = idx < 0 ? -idx-1 : (idx & (n_patterns - 1));
+  int n_pattern = idx < 0 ? -idx : (idx & (n_patterns - 1));
   unsigned char pat = patterns[n_pattern];
 
 #ifdef _MSC_VER
