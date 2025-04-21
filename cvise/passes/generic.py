@@ -37,6 +37,12 @@ def relative_path(path, test_case):
         return path.relative_to(test_case)
     return path.name
 
+def join_to_test_case(test_case, path):
+    if test_case.is_dir():
+        return test_case / path
+    assert test_case.name == Path(path).name
+    return test_case
+
 
 class PolyState(dict):
     def __init__(self):
@@ -325,9 +331,9 @@ def load_hints(state_list, test_case, load_all=False):
         max_hint_id = None if load_all else max(hint_ids)
         with gzip.open(extra_file_path, 'rt') as f:
             files = json.loads(next(f))
-            files = [test_case / f for f in files]
+            files = [join_to_test_case(test_case, f) for f in files]
             path_to_depth = json.loads(next(f))
-            path_to_depth = dict((test_case / s, v) for s, v in path_to_depth.items())
+            path_to_depth = dict((join_to_test_case(test_case, s), v) for s, v in path_to_depth.items())
             for i, line in enumerate(f):
                 should_load = False
                 if load_all:
