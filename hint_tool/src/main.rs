@@ -13,8 +13,9 @@ use walkdir::WalkDir;
 #[derive(Clone, Debug, Deserialize)]
 struct HintLoc {
     f: u32,
-    l: u32,
-    r: u32,
+    t: Option<String>,
+    l: Option<u32>,
+    r: Option<u32>,
     v: Option<String>,
     vf: Option<u32>,
 }
@@ -53,44 +54,69 @@ fn get_hint_locs(hint: &Hint) -> Vec<HintLoc> {
         Some(multi) => multi.clone(),
         None => vec![HintLoc {
             f: hint.f.unwrap(),
-            l: hint.l.unwrap(),
-            r: hint.r.unwrap(),
+            t: None,
+            l: hint.l,
+            r: hint.r,
             v: hint.v.clone(),
             vf: hint.vf,
         }],
     }
 }
 
-fn merge_edits(mut edits: Vec<HintLoc>) -> Vec<HintLoc> {
+fn merge_edits(mut edits: Vec<HintLoc>) -> (Vec<HintLoc>, Vec<HintLoc>) {
     let mut merged: Vec<HintLoc> = vec![];
     edits.sort_by_key(|e| (e.l, e.v.is_some()));
+    let mut global_edits = vec![];
     for e in edits.into_iter() {
-        if merged.len() > 0 && merged.last().unwrap().r > e.l {
-            merged.last_mut().unwrap().r = max(merged.last().unwrap().r, e.r);
+        if !e.l.is_some() || !e.r.is_some() {
+            global_edits.push(e);
+            continue;
+        }
+        if merged.len() > 0 && merged.last().unwrap().r.unwrap() > e.l.unwrap() {
+            merged.last_mut().unwrap().r = Some(max(merged.last().unwrap().r.unwrap(), e.r.unwrap()));
         } else {
             merged.push(e);
         }
     }
-    merged
+    (global_edits, merged)
 }
 
-fn write_edited_file(file_dest: &Path, file_src: &Path, edits: Vec<HintLoc>, src_paths: &Vec<PathBuf>) -> i64 {
-    let data = fs::read(file_src).unwrap();
+fn write_edited_file(file_id: usize, edits: Vec<HintLoc>, dest_path: &Path, src_file_paths: &Vec<PathBuf>, dest_file_paths: &Vec<PathBuf>) -> i64 {
+    let read_path = &src_file_paths[file_id];
+    let data = fs::read(read_path).unwrap();
+
     let mut new_data = vec![];
     let mut ptr = 0;
-    for e in merge_edits(edits) {
-        new_data.extend(&data[ptr..e.l as usize]);
+    let (global_edits, merged_edits) = merge_edits(edits);
+    for e in merged_edits {
+        new_data.extend(&data[ptr..e.l.unwrap() as usize]);
         if let Some(v) = e.v {
             new_data.extend(v.as_bytes());
         } else if let Some(vf) = e.vf {
-            let inlined_data = fs::read(&src_paths[vf as usize]).unwrap();
+            let inlined_data = fs::read(&src_file_paths[vf as usize]).unwrap();
             new_data.extend(inlined_data);
         }
-        ptr = e.r as usize;
+        ptr = e.r.unwrap() as usize;
     }
     new_data.extend(&data[ptr..]);
+
+    let mut write_path_override = None;
+    for e in global_edits {
+        if e.t == Some("mv".to_string()) {
+            write_path_override = Some(dest_path.join(e.v.unwrap()));
+        } else {
+            panic!("unexpected hint loc type {:?}", e.t);
+        }
+    }
+    let write_path = if let Some(overridden) = &write_path_override {
+        eprintln!("writing {} bytes to moved file {:?}", new_data.len(), overridden);
+        overridden
+    } else {
+        &dest_file_paths[file_id]
+    };
+
+    fs::write(write_path, &new_data).unwrap();
     let reduction = data.len() as i64 - new_data.len() as i64;
-    fs::write(file_dest, new_data).unwrap();
     reduction
 }
 
@@ -163,31 +189,35 @@ fn main() {
     {
         let dir_rel = entry.path().strip_prefix(src_path).unwrap();
         if dirs_for_deletion.contains(dir_rel) {
+            eprintln!("skipping deleted dir {:?}", dir_rel);
             continue;
         }
         let dir_dest = dest_path.join(dir_rel);
+        eprintln!("creating dir {:?}", dir_dest);
         fs::create_dir_all(dir_dest).unwrap();
     }
 
     let nest = fs::metadata(src_path).unwrap().is_dir();
-    let src_paths: Vec<PathBuf> = files.iter().map(|f| if nest { src_path.join(&f) } else { src_path.to_path_buf() }).collect();
-    let dest_paths: Vec<PathBuf> = files.iter().map(|f| if nest { dest_path.join(&f) } else { dest_path.to_path_buf() }).collect();
+    let src_file_paths: Vec<PathBuf> = files.iter().map(|f| if nest { src_path.join(&f) } else { src_path.to_path_buf() }).collect();
+    let dest_file_paths: Vec<PathBuf> = files.iter().map(|f| if nest { dest_path.join(&f) } else { dest_path.to_path_buf() }).collect();
 
     let mut reduction = 0;
     for file_id in 0..files.len() {
-        let file_src = &src_paths[file_id];
-        let file_dest = &dest_paths[file_id];
+        let path_from = &src_file_paths[file_id];
         if files_for_deletion.contains(&(file_id as u32)) {
-            reduction += fs::metadata(file_src).unwrap().len() as i64;
+            reduction += fs::metadata(path_from).unwrap().len() as i64;
+            eprintln!("skipping deleted file {:?}", path_from);
             continue;
         }
-        // eprintln!("file={:?} file_src={:?} file_dest={:?}", file, file_src, file_dest);
         match file_to_edits.remove(&(file_id as u32)) {
             None => {
-                symlink(fs::canonicalize(file_src).unwrap(), file_dest).unwrap();
+                let canon_path_from = fs::canonicalize(path_from).unwrap();
+                let path_to = &dest_file_paths[file_id];
+                eprintln!("creating symlink at {:?} pointing to {:?}", path_to, canon_path_from);
+                symlink(canon_path_from, path_to).unwrap();
             }
             Some(edits) => {
-                reduction += write_edited_file(&file_dest, &file_src, edits, &src_paths);
+                reduction += write_edited_file(file_id, edits, dest_path, &src_file_paths, &dest_file_paths);
             }
         }
     }

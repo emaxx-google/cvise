@@ -11,6 +11,7 @@ import random
 import re
 import shlex
 import shutil
+import string
 import subprocess
 import tempfile
 import types
@@ -194,6 +195,10 @@ class GenericPass(AbstractPass):
             hints = generate_delete_file_hints(test_case, files, file_to_id, other_init_states)
         elif self.arg == 'meta::inline-file':
             hints = generate_inline_file_hints(test_case, files, file_to_id, other_init_states)
+        elif self.arg == 'meta::rename-file':
+            hints = generate_rename_file_hints(test_case, files, file_to_id, other_init_states)
+        elif self.arg == 'meta::rename-symbol':
+            hints = generate_rename_symbol_hints(test_case, files, file_to_id, other_init_states)
         else:
             raise RuntimeError(f'Unknown hint source: arg={self.arg}')
 
@@ -413,6 +418,9 @@ def edit_file(src_path, dest_path, chunks):
     return len(data) - len(new_data)
 
 def generate_makefile_hints(test_case, files, file_to_id):
+    if not test_case.is_dir():
+        return []
+
     targets = {}
     file_to_generating_targets = {}
     file_mentions = {}
@@ -422,6 +430,7 @@ def generate_makefile_hints(test_case, files, file_to_id):
     if not makefile_path.exists():
         return []
     makefile_file_id = file_to_id[makefile_path]
+    hints = []
     with open(makefile_path) as f:
         line_start_pos = 0
         cur_target = None
@@ -431,6 +440,8 @@ def generate_makefile_hints(test_case, files, file_to_id):
             if line.strip() and not line.startswith('\t') and ':' in line:
                 cur_target_name = line.split(':')[0].strip()
                 assert cur_target_name
+                target_name_pos = line.find(cur_target_name)
+                assert target_name_pos != -1
                 is_special_target = cur_target_name in ('clean', '.ALWAYS')
                 if not is_special_target:
                     cur_target = targets.setdefault(cur_target_name, [])
@@ -439,9 +450,19 @@ def generate_makefile_hints(test_case, files, file_to_id):
                         'l': line_start_pos,
                         'r': line_end_pos,
                     })
+                    file_mentions.setdefault(cur_target_name, []).append({
+                        'f': makefile_file_id,
+                        'l': line_start_pos + target_name_pos,
+                        'r': line_start_pos + target_name_pos + len(cur_target_name),
+                    })
                     for dep_name in line.split(':', maxsplit=2)[1].split():
                         mention_pos = line_start_pos + line.find(dep_name)
                         targets.setdefault(dep_name, []).append({
+                            'f': makefile_file_id,
+                            'l': mention_pos,
+                            'r': mention_pos + len(dep_name),
+                        })
+                        file_mentions.setdefault(dep_name, []).append({
                             'f': makefile_file_id,
                             'l': mention_pos,
                             'r': mention_pos + len(dep_name),
@@ -454,9 +475,18 @@ def generate_makefile_hints(test_case, files, file_to_id):
                     'r': line_end_pos,
                 })
                 tokens = line.split()
-                if tokens and tokens[0] == '$(CLANG)':
+                if tokens and tokens[0] == 'mkdir':
+                    path = test_case / tokens[-1]
+                    if not path.exists() or not list(path.iterdir()):
+                        hints.append({
+                            't': 'makemkdir',
+                            'f': makefile_file_id,
+                            'l': line_start_pos,
+                            'r': line_end_pos,
+                        })
+                elif tokens and tokens[0] == '$(CLANG)':
                     token_search_pos = 0
-                    option_with_untouchable_arg = False
+                    arg_of_option = None
                     for i, token in enumerate(tokens):
                         if token == '||':  # hack
                             break
@@ -468,7 +498,7 @@ def generate_makefile_hints(test_case, files, file_to_id):
                         match = re.match(r'([^=]*=)*([^=]+\.(txt|cppmap|pcm|o|cc))$', token)
                         if match:
                             mentioned_file = match.group(2)
-                            is_main_file_for_rule = not match.group(1) and not option_with_untouchable_arg
+                            is_main_file_for_rule = not match.group(1) and not arg_of_option
                             if is_main_file_for_rule:
                                 file_to_generating_targets.setdefault(mentioned_file, []).append(cur_target_name)
                             else:
@@ -478,48 +508,84 @@ def generate_makefile_hints(test_case, files, file_to_id):
                                     'r': mention_pos + len(token),
                                 })
                             option_with_untouchable_arg = False
-                        elif i > 0 and not option_with_untouchable_arg and \
+                        elif i > 0 and token.startswith('-fmodule-name='):
+                            name = token.removeprefix('-fmodule-name=')
+                            hints.append({
+                                'f': makefile_file_id,
+                                't': 'symbol',
+                                'ns': f'module::{name}',
+                                'l': mention_pos + len('-fmodule-name='),
+                                'r': mention_pos + len(token),
+                            })
+                        elif i > 0 and not arg_of_option and token.startswith('--sysroot='):
+                            dir_path = test_case / token.removeprefix('--sysroot=')
+                            if not dir_path.exists() or not list(dir_path.iterdir()):
+                                hints.append({
+                                    'f': makefile_file_id,
+                                    't': 'makeincldir',
+                                    'l': mention_pos,
+                                    'r': mention_pos + len(token),
+                                })
+                        elif i > 0 and not arg_of_option and \
                                 token not in ('-c', '-cc1', '-nostdinc++', '-nostdlib++', '-fno-crash-diagnostics', '-ferror-limit=0', '-w', '-Wno-error', '-Xclang=-emit-module', '-xc++', '-fmodules', '-fno-implicit-modules', '-fno-implicit-module-maps', '-Xclang=-fno-cxx-modules', '-Xclang=-fmodule-map-file-home-is-cwd') and \
-                                not token.startswith('-fmodule-name=') and not token.startswith('-std=') and not token.startswith('--sysroot='):
+                                not token.startswith('-std='):
                             if token in ('-o', '-iquote', '-isystem', '-I'):
-                                option_with_untouchable_arg = True
+                                arg_of_option = (token, mention_pos)
                             if token == '-Xclang':
                                 next_tokens = line[token_search_pos:].split(maxsplit=2)
                                 if next_tokens and next_tokens[0] == '-fallow-pcm-with-compiler-errors':
-                                    option_with_untouchable_arg = True
+                                    arg_of_option = (token, mention_pos)
                             if not option_with_untouchable_arg:
                                 token_to_locs.setdefault(token, []).append({
                                     'f': makefile_file_id,
                                     'l': mention_pos,
                                     'r': mention_pos + len(token),
                                 })
+                        elif arg_of_option and arg_of_option[0] in ('-iquote', '-isystem', '-I'):
+                            dir_path = test_case / token
+                            if not dir_path.exists() or not list(dir_path.iterdir()):
+                                hints.append({
+                                    'f': makefile_file_id,
+                                    't': 'makeincldir',
+                                    'l': arg_of_option[1],
+                                    'r': mention_pos + len(token),
+                                })
+                            arg_of_option = None
                         else:
-                            option_with_untouchable_arg = False
+                            arg_of_option = None
             else:
                 cur_target = None
                 cur_target_name = None
 
             line_start_pos = line_end_pos
 
-    hints = []
-    deletion_candidates = set(list(file_mentions.keys()) + list(file_to_generating_targets.keys()))
-    for path in deletion_candidates:
+    all_mentioned_files = set(list(file_mentions.keys()) + list(file_to_generating_targets.keys()))
+    for path in all_mentioned_files:
         full_path = test_case / path
-        if not full_path.exists() or full_path.suffix in ('.cc',):
-            continue
-        assert full_path.suffix not in ('.pcm', '.o', '.tmp', '.ALWAYS')
-        chunks = []
-        chunks += file_mentions.get(path, [])
-        for target_name in file_to_generating_targets.get(path, []):
-            chunks += targets[target_name]
-            chunks += file_mentions.get(target_name, [])
-        assert chunks, f'path={path}'
-        h = {
-            't': 'fileref',
-            'n': file_to_id[full_path],
-        }
-        set_hint_locs(h, chunks)
-        hints.append(h)
+        if full_path.exists():
+            assert full_path.suffix not in ('.pcm', '.o', '.tmp', '.ALWAYS')
+            chunks = []
+            chunks += file_mentions.get(path, [])
+            for target_name in file_to_generating_targets.get(path, []):
+                chunks += targets[target_name]
+                chunks += file_mentions.get(target_name, [])
+            assert chunks, f'path={path}'
+            h = {
+                't': 'fileref',
+                'n': file_to_id[full_path],
+            }
+            set_hint_locs(h, chunks)
+            hints.append(h)
+        elif path not in ('.ALWAYS',) and Path(path).suffix not in ('.cppmap',):
+            assert full_path.suffix in ('.pcm', '.o', ''), f'{full_path}'
+            for loc in file_mentions.get(path, []):
+                hints.append({
+                    't': 'fileref',
+                    'ns': path,
+                    'f': makefile_file_id,
+                    'l': loc['l'],
+                    'r': loc['r'],
+                })
     for token, locs in sorted(token_to_locs.items()):
         for chunk in locs:
             h = {'t': 'maketok'}
@@ -528,6 +594,9 @@ def generate_makefile_hints(test_case, files, file_to_id):
     return hints
 
 def generate_cppmaps_hints(test_case, files, file_to_id):
+    if not test_case.is_dir():
+        return []
+
     hints = []
     name_to_cppmaps = {}
     cppmap_to_uses = {}
@@ -576,7 +645,17 @@ def parse_cppmap(test_case, cppmap_path, files, file_to_id):
             module_match = re.match(r'.*module\s+(\S+).*', line)
             if module_match:
                 if module_depth == 0:
-                    top_level_names.append(module_match.group(1).strip('"'))
+                    name = module_match.group(1).strip('"')
+                    name_pos = line.find(name)
+                    assert name_pos != -1
+                    hints.append({
+                        't': 'symbol',
+                        'ns': f'module::{name}',
+                        'f': cppmap_file_id,
+                        'l': line_start_pos + name_pos,
+                        'r': line_start_pos + name_pos + len(name),
+                    })
+                    top_level_names.append(name)
                 else:
                     nested_module_start_pos = line_start_pos
                     nested_module_start_line_end_pos = line_end_pos
@@ -619,7 +698,7 @@ def parse_cppmap(test_case, cppmap_path, files, file_to_id):
             closing_brace = line.strip() == '}'
             if closing_brace:
                 module_depth -= 1
-                assert module_depth >= 0, f'cppmap_path={cppmap_path}'
+                # assert module_depth >= 0, f'cppmap_path={cppmap_path}'
                 if nested_module_start_pos is not None:
                     if nested_module_empty:
                         # Attempt to delete the empty submodule.
@@ -654,7 +733,7 @@ def parse_cppmap(test_case, cppmap_path, files, file_to_id):
 
             line_start_pos = line_end_pos
 
-    assert module_depth == 0, f'cppmap_path={cppmap_path}'
+    # assert module_depth == 0, f'cppmap_path={cppmap_path}'
     return hints, top_level_names, headers, uses
 
 def generate_line_hints(test_case, files, file_to_id):
@@ -766,74 +845,81 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id, external_pr
     if not test_case.is_dir():
         return []
 
-    orig_command = get_root_compile_command(test_case)
-    if not orig_command:
-        return []
-
-    root_file_candidates = list(test_case.rglob('*.cc'))
-    if not root_file_candidates:
-        return []
-    root_file = root_file_candidates[0].relative_to(test_case)
-    clang_path = Path(os.environ['CLANG'])
     resource_dir = get_clang_resource_dir()
-
-    file_to_line_pos = {}
-    def get_line_pos_in_file(file, idx):
-        if file not in file_to_line_pos:
-            lines_pos = []
-            with open(file) as f:
-                line_start_pos = 0
-                for line in f:
-                    line_end_pos = line_start_pos + len(line)
-                    lines_pos.append((line_start_pos, line_end_pos))
-                    line_start_pos = line_end_pos
-            file_to_line_pos[file] = lines_pos
-        return file_to_line_pos[file][idx]
-
-    orig_command = re.sub(r'\S*-fmodule\S*', '', orig_command).split()
-    command = [
-        str(external_programs['inclusion-graph']),
-        str(root_file),
-        '--',
-        f'-resource-dir={resource_dir}'] + orig_command
-    if logging.getLogger().isEnabledFor(logging.DEBUG):
-        logging.debug(f'generate_inclusion_directive_hints: running: {shlex.join(command)}')
-    proc = subprocess.run(command, cwd=test_case, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
-    if proc.returncode:
-        logging.debug(f'generate_inclusion_directive_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
-        return []
     hints = []
-    abs_test_case = test_case.resolve()
-    for line in proc.stdout.splitlines():
-        if not line.strip():
+    seen_lines = set()
+    for orig_command in get_all_compile_commands(test_case):
+        main_file_candidates = list(filter(
+            lambda s: '=' not in s and (s.endswith('.cc') or s.endswith('.cppmap')),
+            orig_command.split()))
+        assert len(main_file_candidates) == 1, f'main_file_candidates={main_file_candidates} orig_command={orig_command}'
+        main_file = main_file_candidates[0]
+
+        file_to_line_pos = {}
+        def get_line_pos_in_file(file, idx):
+            if file not in file_to_line_pos:
+                lines_pos = []
+                with open(file) as f:
+                    line_start_pos = 0
+                    for line in f:
+                        line_end_pos = line_start_pos + len(line.rstrip())
+                        lines_pos.append((line_start_pos, line_end_pos))
+                        line_start_pos += len(line)
+                file_to_line_pos[file] = lines_pos
+            return file_to_line_pos[file][idx]
+
+        orig_command = orig_command.replace('$(CLANG)', '')
+        orig_command = re.sub(r'\S*-fmodule-map-file=\S*', '', orig_command)
+        orig_command = re.sub(r'\S*-fmodule-file\S*', '', orig_command)
+        command = [
+            str(external_programs['inclusion-graph']),
+            str(main_file),
+            '--',
+            f'-resource-dir={resource_dir}'] + orig_command.split()
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f'generate_inclusion_directive_hints: running: {shlex.join(command)}')
+        proc = subprocess.run(command, cwd=test_case, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
+        if proc.returncode:
+            logging.debug(f'generate_inclusion_directive_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
             continue
-        from_file, from_line, to_file = line.split(' ')
-        from_file = Path(from_file)
-        to_file = Path(to_file)
-        if from_file.is_relative_to(resource_dir) or to_file.is_relative_to(resource_dir):
-            # Ignore #includes to/inside the compiler's resource directory - we never try deleting those headers.
-            continue
-        if not from_file.is_absolute():
-            from_file = abs_test_case / from_file
-        assert from_file.is_relative_to(abs_test_case), f'Error: discovered #include in the file {from_file} that is outside both the test case {test_case} and the resource dir {resource_dir}; the command was: {command}'
-        from_file = test_case / from_file.relative_to(abs_test_case)
-        assert from_file in file_to_id, f'from_file={from_file} file_to_id={file_to_id}'
-        from_line = int(from_line) - 1
-        if not to_file.is_absolute():
-            to_file = abs_test_case / to_file
-        assert to_file.is_relative_to(abs_test_case), f'Error: discovered #include from {from_file} (line {from_line}) to the file {to_file} that is outside both the test case {test_case} and the resource dir {resource_dir}; the command was: {command}'
-        to_file = test_case / to_file.relative_to(abs_test_case)
-        assert to_file in file_to_id, f'to_file={to_file} file_to_id={file_to_id}'
-        start_pos, end_pos = get_line_pos_in_file(from_file, from_line)
-        hints.append({
-            't': 'fileref',
-            'n': file_to_id[to_file],
-            'f': file_to_id[from_file],
-            'l': start_pos,
-            'r': end_pos,
-        })
-    if not hints:
-        logging.debug(f'generate_inclusion_directive_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
+        abs_test_case = test_case.resolve()
+        hints_added = 0
+        for line in proc.stdout.splitlines():
+            if not line.strip():
+                continue
+            if line in seen_lines:
+                continue
+            seen_lines.add(line)
+            from_file, from_line, to_file = line.split(' ')
+            if not from_file:
+                continue  # links from .cppmap have the empty "from_file"
+            from_file = Path(from_file)
+            to_file = Path(to_file)
+            if from_file.is_relative_to(resource_dir) or to_file.is_relative_to(resource_dir):
+                # Ignore #includes to/inside the compiler's resource directory - we never try deleting those headers.
+                continue
+            if not from_file.is_absolute():
+                from_file = abs_test_case / from_file
+            assert from_file.is_relative_to(abs_test_case), f'Error: discovered #include in the file {from_file} that is outside both the test case {test_case} and the resource dir {resource_dir}; the command was: {command}'
+            from_file = test_case / from_file.relative_to(abs_test_case)
+            assert from_file in file_to_id, f'from_file={from_file} file_to_id={file_to_id} line="{line}"'
+            from_line = int(from_line) - 1
+            if not to_file.is_absolute():
+                to_file = abs_test_case / to_file
+            assert to_file.is_relative_to(abs_test_case), f'Error: discovered #include from {from_file} (line {from_line}) to the file {to_file} that is outside both the test case {test_case} and the resource dir {resource_dir}; the command was: {command}'
+            to_file = test_case / to_file.relative_to(abs_test_case)
+            assert to_file in file_to_id, f'to_file={to_file} file_to_id={file_to_id}'
+            start_pos, end_pos = get_line_pos_in_file(from_file, from_line)
+            hints.append({
+                't': 'fileref',
+                'n': file_to_id[to_file],
+                'f': file_to_id[from_file],
+                'l': start_pos,
+                'r': end_pos,
+            })
+            hints_added += 1
+        if not hints_added and logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f'generate_inclusion_directive_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
     return hints
 
 def get_clang_resource_dir():
@@ -1016,7 +1102,7 @@ def generate_delete_file_hints(test_case, files, file_to_id, other_init_states):
     file_to_locs = {}
     file_to_weight = {}
     for h in old_hints:
-        if h['t'] == 'fileref':
+        if h['t'] == 'fileref' and 'n' in h:
             file_id = h['n']
             file_to_locs.setdefault(file_id, []).extend(get_hint_locs(h))
             file_to_weight[file_id] = file_to_weight.get(file_id, 0) + h.get('w', 1)
@@ -1045,7 +1131,7 @@ def generate_delete_file_hints(test_case, files, file_to_id, other_init_states):
                 })
 
     for path in test_case.rglob('*'):
-        if path.is_dir() and not path.is_symlink() and not os.listdir(path):
+        if path.is_dir() and not path.is_symlink() and not list(path.iterdir()):
             hints.append({
                 't': 'rmdir',
                 'ns': str(relative_path(path, test_case)),
@@ -1066,7 +1152,7 @@ def generate_inline_file_hints(test_case, files, file_to_id, other_init_states):
 
     file_to_locs = {}
     for h in old_hints:
-        if h['t'] == 'fileref' and h.get('w', 1) == 1:
+        if h['t'] == 'fileref' and 'n' in h and h.get('w', 1) == 1:
             file_id = h['n']
             file_to_locs.setdefault(file_id, []).extend(get_hint_locs(h))
 
@@ -1081,6 +1167,145 @@ def generate_inline_file_hints(test_case, files, file_to_id, other_init_states):
                     {'f': file_id, 'l': 0, 'r': files[file_id].stat().st_size},
                 ],
             })
+    return hints
+
+def load_text(path, index_l, index_r):
+    with open(path, 'rt') as f:
+        f.seek(index_l)
+        return f.read(index_r - index_l)
+
+def generate_rename_file_hints(test_case, files, file_to_id, other_init_states):
+    if not test_case.is_dir():
+        return []
+
+    RND_VOCAB = string.ascii_uppercase + string.digits
+    RND_LEN = 3
+
+    assert other_init_states
+    states_to_load = [s for s in other_init_states if s]
+    if not states_to_load:
+        return []
+    files, path_to_depth, old_hints = load_hints(states_to_load, test_case, load_all=True)
+
+    file_to_locs = {}
+    for h in old_hints:
+        if h['t'] == 'fileref':
+            path = files[h['n']] if 'n' in h else test_case / h['ns']
+            file_to_locs.setdefault(path, []).extend(get_hint_locs(h))
+
+    hints = []
+    for path, locs in file_to_locs.items():
+        if len(path.stem) != RND_LEN or any(c not in RND_VOCAB for c in path.stem):
+            rel_path = relative_path(path, test_case)
+            new_name = ''.join(random.choices(RND_VOCAB, k=RND_LEN)) + path.suffix
+            edits = []
+            if path in file_to_id:
+                edits.append({
+                    'f': file_to_id[path],
+                    't': 'mv',
+                    'v': new_name,
+                })
+            for loc in locs:
+                loc_path = files[loc['f']]
+                orig_text = load_text(loc_path, loc['l'], loc['r'])
+                replacement_text = orig_text.replace(str(rel_path), new_name)
+                if loc_path.name not in ('Makefile',) and loc_path.suffix not in ('.cppmap',) and '#include' in orig_text:
+                    replacement_text = f'#include "{new_name}"'
+                elif orig_text == replacement_text:
+                    continue
+                edits.append({
+                    'f': loc['f'],
+                    'l': loc['l'],
+                    'r': loc['r'],
+                    'v': replacement_text,
+                })
+            hints.append({'t': 'renamefile', 'multi': edits})
+    return hints
+
+def generate_rename_symbol_hints(test_case, files, file_to_id, other_init_states):
+    RND_VOCAB = string.ascii_lowercase
+    RND_MIN_LEN = 1
+    RND_MAX_LEN = 3
+
+    assert other_init_states
+    states_to_load = [s for s in other_init_states if s]
+    if not states_to_load:
+        return []
+    files, path_to_depth, old_hints = load_hints(states_to_load, test_case, load_all=True)
+
+    file_to_ref_locs = {}
+    for h in old_hints:
+        if h['t'] == 'fileref':
+            for loc in get_hint_locs(h):
+                file_to_ref_locs.setdefault(loc['f'], []).append(loc)
+
+    for file_id, path in enumerate(files):
+        if path.name not in ('Makefile',) and path.suffix not in ('.cppmap',):
+            file_symbols = parse_file_symbols(file_id, path, file_to_ref_locs.get(file_id, []))
+            old_hints += file_symbols
+
+    symbol_to_locs = {}
+    for h in old_hints:
+        if h['t'] == 'symbol':
+            symbol = h['ns']
+            symbol_to_locs.setdefault(symbol, []).extend(get_hint_locs(h))
+
+    occupied_names = set(symbol_to_locs.keys())
+
+    def generate_next_free_name():
+        while True:
+            len = random.randint(RND_MIN_LEN, RND_MAX_LEN)
+            name = ''.join(random.choices(RND_VOCAB, k=len))
+            if name not in occupied_names:
+                occupied_names.add(name)
+                return name
+
+    hints = []
+    for symbol, locs in sorted(symbol_to_locs.items(), key=lambda s: (len(s), s)):
+        if not (RND_MIN_LEN <= len(symbol) <= RND_MAX_LEN) or any(c not in RND_VOCAB for c in symbol):
+            new_name = generate_next_free_name()
+            orig_len = locs[0]['r'] - locs[0]['l']
+            if len(new_name) >= orig_len:
+                occupied_names.remove(new_name)
+                continue
+            hints.append({
+                't': 'renamesymbol',
+                'multi': [
+                    {
+                        'f': loc['f'],
+                        'l': loc['l'],
+                        'r': loc['r'],
+                        'v': new_name,
+                    } for loc in locs
+                ]
+            })
+    return hints
+
+def parse_file_symbols(file_id, path, filerefs):
+    def inside_fileref(pos):
+        for loc in filerefs:
+            if loc['l'] <= pos < loc['r']:
+                return True
+        return False
+
+    hints = []
+    with open(path, 'rt') as f:
+        line_start_pos = 0
+        for line in f:
+            tok_start_pos = 0
+            for i, c in enumerate(line + ' '):
+                if not c.isalnum() and c != '_':
+                    if i > tok_start_pos and not inside_fileref(line_start_pos + tok_start_pos) and \
+                        '#include' not in line:  # HACK
+                        hints.append({
+                            'f': file_id,
+                            't': 'symbol',
+                            'ns': line[tok_start_pos:i],
+                            'l': line_start_pos + tok_start_pos,
+                            'r': line_start_pos + i,
+                        })
+                    tok_start_pos = i + 1
+            line_start_pos += len(line)
     return hints
 
 def get_root_compile_command(test_case):
@@ -1099,6 +1324,17 @@ def get_root_compile_command(test_case):
                 return lines[p].strip().lstrip('@').lstrip()
         else:
             return None
+
+def get_all_compile_commands(test_case):
+    makefile_path = test_case / 'Makefile'
+    if not makefile_path.exists():
+        return None
+    commands = []
+    with open(makefile_path) as f:
+        for l in f:
+            if l.strip().split(maxsplit=2)[0] == '$(CLANG)':
+                commands.append(l)
+    return commands
 
 def get_ordered_files_list(test_case, strategy, external_programs):
     if not test_case.is_dir():
@@ -1154,9 +1390,16 @@ def assert_valid_hint(h, files):
         assert 't' in h
         assert isinstance(h['t'], str)
         if h['t'].startswith('delfile::') or h['t'] == 'fileref':
-            assert 'n' in h
-            assert isinstance(h['n'], int)
-            assert 0 <= h['n'] < len(files)
+            assert 'n' in h or 'ns' in h
+            if 'n' in h:
+                assert isinstance(h['n'], int)
+                assert 0 <= h['n'] < len(files)
+            if 'ns' in h:
+                assert isinstance(h['ns'], str)
+        if h['t'] == 'symbol':
+            assert 'ns' in h
+            assert isinstance(h['ns'], str)
+            assert h['ns']
         if 'l' in h or 'r' in h or 'v' in h:
             assert 'multi' not in h
             assert 'f' in h
@@ -1177,12 +1420,15 @@ def assert_valid_hint(h, files):
                 assert 'f' in l
                 assert isinstance(l['f'], int)
                 assert 0 <= l['f'] < len(files)
-                assert 'l' in l
-                assert isinstance(l['l'], int)
-                assert 0 <= l['l']
-                assert 'r' in l
-                assert isinstance(l['r'], int)
-                assert l['l'] <= l['r']
+                if 't' in l:
+                    assert isinstance(l['t'], str)
+                if l.get('t') not in ('mv',):
+                    assert 'l' in l
+                    assert isinstance(l['l'], int)
+                    assert 0 <= l['l']
+                    assert 'r' in l
+                    assert isinstance(l['r'], int)
+                    assert l['l'] <= l['r']
                 if 'v' in l:
                     assert isinstance(l['v'], str)
                 if 'vf' in l:
