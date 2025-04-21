@@ -312,66 +312,6 @@ class GenericPass(AbstractPass):
         state_list[0].improv_per_depth = [improv]
         return (PassResult.OK, state)
 
-        # test_case = Path(test_case)
-        # state_list = state if isinstance(state, list) else [state]
-        # if logging.getLogger().isEnabledFor(logging.DEBUG):
-        #     logging.debug(f'{self}.transform: state={state}')
-
-        # files, path_to_depth, hints = load_hints(state_list, test_case)
-        # max_depth = max(path_to_depth.values()) if path_to_depth else 0
-
-        # files_for_deletion = set(h['n'] for h in hints if h['t'].startswith('delfile::'))
-        # file_to_edits = {}
-        # for h in hints:
-        #     for l in get_hint_locs(h):
-        #         if l['f'] not in files_for_deletion:
-        #             file_to_edits.setdefault(l['f'], []).append(l)
-
-        # if logging.getLogger().isEnabledFor(logging.DEBUG):
-        #     logging.debug(f'files_for_deletion={[files[f] for f in files_for_deletion]} file_to_edits={len(file_to_edits)}')
-
-        # for path in original_test_case.rglob('*'):
-        #     if path.is_dir():
-        #         dest_path = test_case / path.relative_to(original_test_case)
-        #         dest_path.mkdir(parents=True, exist_ok=True)
-        # improv_per_depth = [0] * (2 + max_depth)
-        # for file_id, path in enumerate(files):
-        #     if file_id in files_for_deletion:
-        #         continue
-        #     original_path = original_test_case / path.relative_to(test_case)
-        #     if file_id in file_to_edits:
-        #         improv = edit_file(original_path, path, file_to_edits[file_id])
-        #         d = path_to_depth.get(path, max_depth + 1)
-        #         improv_per_depth[d] += improv
-        #     else:
-        #         os.symlink(original_path.resolve(), path)
-
-        # for file_id in files_for_deletion:
-        #     path = files[file_id]
-        #     assert not path.exists(), f'{path}'
-        #     original_path = original_test_case / path.relative_to(test_case)
-        #     improv = original_path.stat().st_size
-        #     d = path_to_depth.get(path, max_depth + 1)
-        #     improv_per_depth[d] += improv
-
-        # # Sanity-check we don't start including files outside of bundle.
-        # if logging.getLogger().isEnabledFor(logging.DEBUG):
-        #     try:
-        #         get_ordered_files_list(test_case, self.strategy)
-        #     except AssertionError as e:
-        #         raise RuntimeError(f'Sanity check failed:\nfiles_for_deletion={files_for_deletion}\nfile_to_edit_hints={file_to_edits.keys()}\nstate={state}\n{e}')
-
-        # for s in state_list:
-        #     s.improv_per_depth = []
-        #     s.set_dbg(None)
-        # state_list[0].improv_per_depth = improv_per_depth
-        # dbg = 'HINTS=' + ','.join(sorted(set(h['t'] for h in hints)))
-        # state_list[0].set_dbg(dbg)
-
-        # if logging.getLogger().isEnabledFor(logging.DEBUG):
-        #     logging.debug(f'{self}.transform: END: state={state}')
-        # return (PassResult.OK, state)
-
 def load_hints(state_list, test_case, load_all=False):
     hints_to_load = {}
     for s in state_list:
