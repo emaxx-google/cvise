@@ -1089,8 +1089,8 @@ class TestManager:
                     self.current_pass = pass_
 
                     if success_env:
-                        self.process_result(success_env)
-                        self.success_count += 1
+                        if self.process_result(success_env):
+                            self.success_count += 1
 
                     # if the file increases significantly, bail out the current pass
                     test_case_size = get_file_size(self.current_test_case)
@@ -1209,8 +1209,8 @@ class TestManager:
                     self.sweep_children_processes()
 
                     if success_env:
-                        self.process_result(success_env)
-                        self.success_count += 1
+                        if self.process_result(success_env):
+                            self.success_count += 1
 
                     # if the file increases significantly, bail out the current pass
                     test_case_size = get_file_size(self.current_test_case)
@@ -1273,9 +1273,11 @@ class TestManager:
                 logging.debug(f'process_result: copy from {test_env.test_case_path} to {self.current_test_case}')
             if test_env.test_case_path.is_dir():
                 if test_env.lazy_input_copying:
+                    any_change = False
                     for path in test_env.test_case_path.rglob('*'):
                         if not path.is_symlink() and not path.is_dir():
                             shutil.copy(path, self.current_test_case / path.relative_to(test_env.test_case_path))
+                            any_change = True
                     for path in self.current_test_case.rglob('*'):
                         dest_path = test_env.test_case_path / path.relative_to(self.current_test_case)
                         if not dest_path.exists():
@@ -1283,6 +1285,9 @@ class TestManager:
                                 os.rmdir(path)
                             else:
                                 os.unlink(path)
+                            any_change = True
+                    if not any_change:
+                        return False
                 else:
                     rmtree(self.current_test_case)
                     shutil.copytree(test_env.test_case_path, self.current_test_case, symlinks=True)
@@ -1314,6 +1319,7 @@ class TestManager:
             notes.append(str(test_env.test_case))
 
         logging.info('(' + ', '.join(notes) + ')')
+        return True
 
 
 class SetupEnvironment:
