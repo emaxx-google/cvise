@@ -47,13 +47,13 @@ class PolyState(dict):
         return 'rm-toks-' in type or 'rm-tok-pattern-' in type
 
     @staticmethod
-    def create(instances, strategy, depth_to_instances, pass_repr):
+    def create(instances, pass_repr):
         self = PolyState()
         self.pass_repr = pass_repr
         self.types = list(sorted(instances.keys()))
         self.instances = instances
         for k, i in instances.items():
-            self[k] = FuzzyBinaryState.create(i, strategy, depth_to_instances, pass_repr + ' :: ' + k, start_small=self.start_small(k))
+            self[k] = FuzzyBinaryState.create(i, pass_repr + ' :: ' + k, start_small=self.start_small(k))
         if not any(self.values()):
             return None
         self.ptr = 0
@@ -63,16 +63,16 @@ class PolyState(dict):
         return self
 
     @staticmethod
-    def create_from_hint(instances, strategy, last_state_hint, depth_to_instances, pass_repr):
+    def create_from_hint(instances, last_state_hint, pass_repr):
         self = PolyState()
         self.pass_repr = pass_repr
         self.types = list(instances.keys())
         self.instances = instances
         for k, i in instances.items():
             if (k in last_state_hint) and last_state_hint[k]:
-                self[k] = FuzzyBinaryState.create_from_hint(i, strategy, last_state_hint[k], depth_to_instances)
+                self[k] = FuzzyBinaryState.create_from_hint(i, last_state_hint[k])
             else:
-                self[k] = FuzzyBinaryState.create(i, strategy, depth_to_instances, pass_repr + ' :: ' + k, start_small=self.start_small(k))
+                self[k] = FuzzyBinaryState.create(i, pass_repr + ' :: ' + k, start_small=self.start_small(k))
         if not any(self.values()):
             return None
         self.ptr = 0
@@ -140,7 +140,7 @@ class PolyState(dict):
         return self.types[self.ptr]
 
     def get_improv(self):
-        return sum(self.improv_per_depth)
+        return self.improv
 
 
 class GenericPass(AbstractPass):
@@ -148,12 +148,6 @@ class GenericPass(AbstractPass):
         super().__init__(arg, external_programs)
         self.extra_file_path = tempfile.NamedTemporaryFile(suffix='cviseextra.gz', delete=False).name
         atexit.register(functools.partial(os.unlink, self.extra_file_path))
-
-    def __repr__(self):
-        s = super().__repr__()
-        if self.strategy is not None:
-            s += f' (strategy {self.strategy})'
-        return s
 
     def check_prerequisites(self):
         return all(self.check_external_program(p) for p in EXTERNAL_PROGRAMS)
@@ -164,12 +158,13 @@ class GenericPass(AbstractPass):
     def lazy_input_copying(self):
         return True
 
-    def new(self, test_case, check_sanity=None, last_state_hint=None, strategy=None, other_init_states=None):
+    def new(self, test_case, check_sanity=None, last_state_hint=None, other_init_states=None):
         test_case = Path(test_case)
 
-        files, path_to_depth = get_ordered_files_list(test_case, strategy, self.external_programs)
+        files = get_ordered_files_list(test_case)
         if not files:
             return None
+        path_to_depth = get_path_to_depth(test_case, self.external_programs)
         max_depth = max(path_to_depth.values()) if path_to_depth else 0
         file_to_id = dict((f, i) for i, f in enumerate(files))
 
@@ -215,9 +210,7 @@ class GenericPass(AbstractPass):
                 return files[h['f']]
             return files[h['multi'][0]['f']]
         def hint_comparison_key(h):
-            file = hint_main_file(h)
-            d = path_to_depth.get(hint_main_file(h), max_depth + 1) if strategy == 'topo' else 0
-            return h['t'], h.get('w', 1), d, file
+            return h['t'], h.get('w', 1), hint_main_file(h)
 
         for h in hints:
             assert_valid_hint(h, files)
@@ -232,10 +225,14 @@ class GenericPass(AbstractPass):
                 path = files[h['n']]
                 assert path.exists(), 'path={path} hint={h}'
 
-        depth_to_instances = [0] * (max_depth + 2)
-        for h in hints:
-            d = path_to_depth.get(hint_main_file(h), max_depth + 1)
-            depth_to_instances[d] += 1
+        # instances_per_file = [0] * len(files)
+        # for h in hints:
+        #     seen_files = set()
+        #     for l in get_hint_locs(h):
+        #         f = l['f']
+        #         if f not in seen_files:
+        #             seen_files.add(f)
+        #             instances_per_file[f] += 1
 
         if logging.getLogger().isEnabledFor(logging.DEBUG) and False:
             for hint in hints:
@@ -258,6 +255,8 @@ class GenericPass(AbstractPass):
             f.write('\n')
             f.write(dump_json(dict((str(relative_path(k, test_case)), v) for k,v in path_to_depth.items())))
             f.write('\n')
+            # f.write(dump_json(instances_per_file))
+            # f.write('\n')
             for hint in hints:
                 f.write(dump_json(hint))
                 f.write('\n')
@@ -267,23 +266,18 @@ class GenericPass(AbstractPass):
             return None
 
         if last_state_hint:
-            state = PolyState.create_from_hint(instances, strategy, last_state_hint, depth_to_instances, repr(self))
+            state = PolyState.create_from_hint(instances, last_state_hint, repr(self))
         else:
-            state = PolyState.create(instances, strategy, depth_to_instances, repr(self))
+            state = PolyState.create(instances, repr(self))
         if state:
             state.extra_file_path = self.extra_file_path
-        # while state and strategy == 'topo' and state.tp == 0:
-        #     state = state.advance(success_histories)
 
         logging.info(f'Generated hints for arg={self.arg}: {instances}')
 
         return state
 
     def advance(self, test_case, state):
-        new = state.advance(success_histories)
-        # while new and new.strategy == 'topo' and new.tp == 0:
-        #     new = new.advance(success_histories)
-        return new
+        return state.advance(success_histories)
 
     def on_success_observed(self, state):
         if not isinstance(state, list):
@@ -313,9 +307,9 @@ class GenericPass(AbstractPass):
         improv = int(proc.stdout.strip())
 
         for s in state_list:
-            s.improv_per_depth = []
+            s.improv = 0
             s.set_dbg(None)
-        state_list[0].improv_per_depth = [improv]
+        state_list[0].improv = improv
         return (PassResult.OK, state)
 
 def load_hints(state_list, test_case, load_all=False):
@@ -1286,19 +1280,19 @@ def get_all_compile_commands(test_case):
                 commands.append(l)
     return commands
 
-def get_ordered_files_list(test_case, strategy, external_programs):
+def get_ordered_files_list(test_case):
     if not test_case.is_dir():
-        return [test_case], {test_case: 0}
+        return [test_case]
 
     files = [f for f in Path(test_case).rglob('*') if not f.is_dir() and not f.is_symlink()]
     assert all(f.suffix not in ('.pcm', '.o', '.tmp') and f.name != '.ALWAYS' for f in files), f'{files}'
-    if strategy == 'size':
-        files.sort()
-        return files, {}
+    files.sort()
+    return files
 
+def get_path_to_depth(test_case, external_programs):
     orig_command = get_root_compile_command(test_case)
     if not orig_command:
-        return []
+        return {}
 
     root_file_candidates = list(test_case.rglob('*.cc'))
     root_file = root_file_candidates[0] if root_file_candidates else None
@@ -1327,9 +1321,7 @@ def get_ordered_files_list(test_case, strategy, external_programs):
             path_and_depth.append((path.resolve(), int(depth)))
         path_to_depth = dict(path_and_depth)
 
-    files.sort(key=lambda f: (path_to_depth.get(f.resolve(), 1E9) if strategy == 'topo' else 0, f.suffix != '.cc', f))
-
-    return files, path_to_depth
+    return path_to_depth
 
 def dump_json(o):
     return json.dumps(o, separators=(',', ':'), check_circular=False)

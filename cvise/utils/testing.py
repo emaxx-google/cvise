@@ -294,7 +294,6 @@ class TestManager:
         self.tmp_for_best = None
         self.current_pass = None
         self.current_passes = None
-        self.strategy = 'size'
         # Using SimpleQueue instead of Queue to avoid deadlocks (the latter uses background threads which, when
         # terminated at particular timing, can leave resources unfreed).
         self.worker_pid_queue = multiprocessing.SimpleQueue()
@@ -671,21 +670,7 @@ class TestManager:
         pool.join()
 
     def get_state_comparison_key(self, state, improv, improv_file_count):
-        if self.strategy == 'size' or True:
-            return -improv, -improv_file_count
-        elif self.strategy == 'topo':
-            if isinstance(state, list):
-                inner_keys = [self.get_state_comparison_key(i, improv=0, improv_file_count=0) for i in state]
-                total_improv_per_depth = [0] * max(len(i) for i in inner_keys)
-                for improv_per_depth in inner_keys:
-                    for i in range(len(improv_per_depth)):
-                        total_improv_per_depth[i] += improv_per_depth[i]
-                total_improv_per_depth[-2] = -improv
-                total_improv_per_depth[-1] = -improv_file_count
-                return total_improv_per_depth
-            else:
-                improv_per_depth = state.improv_per_depth if hasattr(state, 'improv_per_depth') else []
-                return [-i for i in improv_per_depth] + [-improv, -improv_file_count]
+        return -improv, -improv_file_count
 
     def get_state_compact_repr(self, state):
         if isinstance(state, list):
@@ -854,7 +839,7 @@ class TestManager:
 
                     if should_proceed:
                         if logging.getLogger().isEnabledFor(logging.DEBUG):
-                            logging.debug(f'run_parallel_tests: proceeding: finished_jobs={self.finished_transform_jobs} failed_merges={len(self.failed_merges)} order={order} improv={best_success_improv} improv_file_count={best_success_improv_file_count} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} strategy={self.strategy} comparison_key={self.get_state_comparison_key(best_success_env.state, best_success_improv, best_success_improv_file_count)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed}')
+                            logging.debug(f'run_parallel_tests: proceeding: finished_jobs={self.finished_transform_jobs} failed_merges={len(self.failed_merges)} order={order} improv={best_success_improv} improv_file_count={best_success_improv_file_count} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} comparison_key={self.get_state_comparison_key(best_success_env.state, best_success_improv, best_success_improv_file_count)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed}')
                         transform_futures = list(f for f in self.futures if f.job_type == JobType.PASS_TRANSFORM)
                         for pass_id, state in dict((fu.pass_id, fu.state)
                                                 for fu in sorted(transform_futures, key=lambda fu: -fu.order)
@@ -881,7 +866,7 @@ class TestManager:
                     if logging.getLogger().isEnabledFor(logging.DEBUG):
                         logging.debug(f'Going to init pass {pass_}')
                     self.states[pass_id] = 'initializing'
-                    env = SetupEnvironment(pass_, self.current_test_case, self.test_cases, self.save_temps, self.last_state_hint[pass_id], strategy=self.strategy, other_init_states=self.init_states)
+                    env = SetupEnvironment(pass_, self.current_test_case, self.test_cases, self.save_temps, self.last_state_hint[pass_id], other_init_states=self.init_states)
                     future = pool.schedule(env.run, timeout=self.setup_timeout)
                     future.job_type = JobType.PASS_NEW
                     future.pass_id = pass_id
@@ -933,7 +918,7 @@ class TestManager:
 
                 if not state and any(s not in ('needinit', 'initializing', None) for s in self.states):
                     pass_job_index += 1
-                    while pass_job_index >= passes[next_pass_to_schedule].jobs or self.states[next_pass_to_schedule] in ('needinit', 'initializing', None) or passes[next_pass_to_schedule].strategy and passes[next_pass_to_schedule].strategy != self.strategy:
+                    while pass_job_index >= passes[next_pass_to_schedule].jobs or self.states[next_pass_to_schedule] in ('needinit', 'initializing', None):
                         pass_job_index = 0
                         if next_pass_to_schedule + 1 < len(passes):
                             next_pass_to_schedule += 1
@@ -1186,7 +1171,6 @@ class TestManager:
 
 
                 # create initial state
-                self.strategy = 'size'
                 self.init_all_passes(passes)
                 self.skip = False
                 self.last_job_update = None
@@ -1233,7 +1217,6 @@ class TestManager:
                     #     logging.info(f'skipping after {self.success_count} successful transformations')
                     #     break
 
-                    # self.strategy = 'topo' if self.strategy == 'size' else 'size'
                     self.init_all_passes(passes)
 
                 # Cache result of this pass
@@ -1257,8 +1240,7 @@ class TestManager:
             sys.exit(1)
 
     def init_all_passes(self, passes):
-        self.states = ['needinit' if not p.strategy or p.strategy == self.strategy else None
-                       for p in passes]
+        self.states = ['needinit' for p in passes]
         self.init_states = [None] * len(passes)
 
     def process_result(self, test_env):
@@ -1323,14 +1305,13 @@ class TestManager:
 
 
 class SetupEnvironment:
-    def __init__(self, pass_, test_case, test_cases, save_temps, last_state_hint, strategy, other_init_states):
+    def __init__(self, pass_, test_case, test_cases, save_temps, last_state_hint, other_init_states):
         self.pass_ = pass_
         self.test_case = test_case
         self.test_cases = test_cases
         self.save_temps = save_temps
         self.last_state_hint = last_state_hint
-        self.strategy = strategy
         self.other_init_states = other_init_states
 
     def run(self):
-        return self.pass_.new(self.test_case, last_state_hint=self.last_state_hint, strategy=self.strategy, other_init_states=self.other_init_states)
+        return self.pass_.new(self.test_case, last_state_hint=self.last_state_hint, other_init_states=self.other_init_states)

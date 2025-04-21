@@ -81,7 +81,6 @@ class AbstractPass:
         self.external_programs = external_programs
         self.arg = arg
         self.min_transforms = None
-        self.strategy = None
 
     def __repr__(self):
         if self.arg is not None:
@@ -120,38 +119,31 @@ class AbstractPass:
 
 class FuzzyBinaryState(BinaryState):
     def __repr__(self):
-        return f'FuzzyBinaryState(chunk={self.chunk} index={self.index} instances={self.instances} tp={self.tp} rnd_index={self.rnd_index} rnd_chunk={self.rnd_chunk} dbg_file={self.dbg_file} strategy={self.strategy if hasattr(self, "strategy") else None} improv_per_depth={self.improv_per_depth if hasattr(self, "improv_per_depth") else None})'
+        return f'FuzzyBinaryState(chunk={self.chunk} index={self.index} instances={self.instances} tp={self.tp} rnd_index={self.rnd_index} rnd_chunk={self.rnd_chunk} dbg_file={self.dbg_file})'
 
     @staticmethod
-    def create(instances, strategy=None, depth_to_instances=None, pass_repr='', start_small=False):
+    def create(instances, pass_repr='', start_small=False):
         if not instances:
             return None
         self = FuzzyBinaryState()
         self.instances = instances
-        self.chunk = 1 if start_small else self.choose_initial_chunk(instances, strategy)
+        self.chunk = 1 if start_small else self.choose_initial_chunk(instances)
         self.index = 0
         self.tp = 0
         self.rnd_index = None
         self.rnd_chunk = None
         self.rnd_depth = None
         self.dbg_file = None
-        self.depth_to_instances = depth_to_instances
-        self.strategy = strategy
         self.pass_repr = pass_repr
         self.prepare_rnd_shift()
         return self
 
     @staticmethod
-    def choose_initial_chunk(instances, strategy):
-        if strategy == 'topo':
-            return 1
-        elif strategy == 'size':
-            return max(1, instances)
-        else:
-            return instances
+    def choose_initial_chunk(instances):
+        return max(1, instances)
 
     @staticmethod
-    def create_from_hint(instances, strategy, last_state_hint, depth_to_instances=None):
+    def create_from_hint(instances, last_state_hint):
         self = copy.copy(last_state_hint)
         if instances is not None:
             self.instances = instances
@@ -163,8 +155,6 @@ class FuzzyBinaryState(BinaryState):
         self.rnd_index = None
         self.rnd_chunk = None
         self.rnd_depth = None
-        self.depth_to_instances = depth_to_instances
-        self.strategy = strategy
         if self.rnd_shift % self.chunk or self.rnd_shift >= self.instances:
             self.prepare_rnd_shift()
         return self
@@ -192,7 +182,7 @@ class FuzzyBinaryState(BinaryState):
             return self.rnd_chunk
 
     def get_success_history(self, success_histories):
-        key = f'{self.pass_repr} {self.strategy} {self.rnd_depth}'
+        key = f'{self.pass_repr} {self.rnd_depth}'
         if key not in success_histories:
             success_histories[key] = collections.deque(maxlen=300)
         return success_histories[key]
@@ -231,34 +221,18 @@ class FuzzyBinaryState(BinaryState):
     def prepare_rnd_step(self, success_histories):
         self.rnd_chunk = None
         self.rnd_depth = None
-        instances_within_depth = None
-        if self.strategy == 'topo':
-            while True:
-                self.rnd_depth = int(random.triangular(0, len(self.depth_to_instances), 0))
-                instances_within_depth = sum(self.depth_to_instances[:self.rnd_depth+1])
-                if instances_within_depth > 0:
-                    break
         peak = self.choose_rnd_peak(self.get_success_history(success_histories))
         if peak is None or peak == 0:
             peak = 1
         chunk_le = 1
         chunk_ri = self.instances
-        if self.strategy == 'topo':
-            chunk_le = min(chunk_le, instances_within_depth)
-            chunk_ri = min(chunk_ri, instances_within_depth)
         peak = max(peak, chunk_le)
         peak = min(peak, chunk_ri)
-        if self.strategy == 'topo':
-            peak = max(peak, min(instances_within_depth // 1000, chunk_ri))
         while self.rnd_chunk is None or self.rnd_chunk < chunk_le or self.rnd_chunk > chunk_ri:
             self.rnd_chunk = round(random.gauss(peak, peak))
         assert self.rnd_chunk > 0
-        if self.strategy == 'topo':
-            pos_le = 0
-            pos_ri = instances_within_depth
-        else:
-            pos_le = 0
-            pos_ri = self.instances - self.rnd_chunk
+        pos_le = 0
+        pos_ri = self.instances - self.rnd_chunk
         self.rnd_index = random.randint(pos_le, pos_ri)
 
 
