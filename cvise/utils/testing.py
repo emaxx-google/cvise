@@ -695,19 +695,20 @@ class TestManager:
     def get_pass_id_to_init(self):
         pass_id_to_init = None
         meta_pass_id_to_init = None
-        all_non_meta_passes_inited = True
+        meta_requirements_satisfied = True
         for i, s in enumerate(self.states):
             is_meta_pass = self.current_passes[i].arg and self.current_passes[i].arg.startswith('meta::')
-            if not is_meta_pass and s in ('needinit', 'initializing'):
-                all_non_meta_passes_inited = False
+            is_meta_requirement = not is_meta_pass and self.current_passes[i].arg and self.current_passes[i].arg not in ('clang_pcm_lazy_load', 'tree_sitter_delta')
+            if is_meta_requirement and s in ('needinit', 'initializing'):
+                meta_requirements_satisfied = False
             if s == 'needinit':
                 if is_meta_pass and meta_pass_id_to_init is None:
                     meta_pass_id_to_init = i
                 if not is_meta_pass and pass_id_to_init is None:
                     pass_id_to_init = i
         if logging.getLogger().isEnabledFor(logging.DEBUG):
-            logging.debug(f'pass_id_to_init={pass_id_to_init} meta_pass_id_to_init={meta_pass_id_to_init} all_non_meta_passes_inited={all_non_meta_passes_inited} states={self.states}')
-        if pass_id_to_init is None and meta_pass_id_to_init is not None and all_non_meta_passes_inited:
+            logging.debug(f'pass_id_to_init={pass_id_to_init} meta_pass_id_to_init={meta_pass_id_to_init} meta_requirements_satisfied={meta_requirements_satisfied} states={self.states}')
+        if pass_id_to_init is None and meta_pass_id_to_init is not None and meta_requirements_satisfied:
             return meta_pass_id_to_init
         return pass_id_to_init
 
