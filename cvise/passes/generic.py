@@ -287,6 +287,10 @@ class GenericPass(AbstractPass):
     def transform(self, test_case, state, process_event_notifier, original_test_case):
         if logging.getLogger().isEnabledFor(logging.DEBUG):
             logging.debug(f'{self}.transform: state={state}')
+        if not isinstance(state, list) and state.get_type() in ('fileref',):
+            # Filerefs are potentially dangerous to remove - e.g., deps in the makefile are crucial for the test
+            # determinism.
+            return (PassResult.INVALID, state)
         state_list = state if isinstance(state, list) else [state]
         command = [
             self.external_programs['hint_tool'],
