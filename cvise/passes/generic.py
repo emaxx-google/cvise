@@ -259,6 +259,7 @@ class GenericPass(AbstractPass):
                 f.write('\n')
 
         if not hints:
+            logging.info(f'Generated hints for arg={self.arg}: 0')
             return None
 
         if last_state_hint:
@@ -299,12 +300,13 @@ class GenericPass(AbstractPass):
         ]
         for s in state_list:
             command += [str(s.extra_file_path), str(s.begin()), str(s.end())]
+        stderr = subprocess.PIPE if logging.getLogger().isEnabledFor(logging.DEBUG) else subprocess.DEVNULL
         try:
-            out = subprocess.check_output(command, stderr=subprocess.PIPE)
+            proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=stderr, encoding='utf-8', check=True)
         except subprocess.CalledProcessError as e:
             logging.warning(f'hint_tool failed: command:\n{shlex.join(command)}\nstdout:\n{e.stdout}\nstderr:\n{e.stderr}')
             raise e
-        improv = int(out.strip())
+        improv = int(proc.stdout.strip())
 
         for s in state_list:
             s.improv_per_depth = []
