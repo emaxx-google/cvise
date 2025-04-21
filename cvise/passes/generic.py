@@ -43,13 +43,17 @@ class PolyState(dict):
         self.generation = random.randint(0, 10 ** 9)
 
     @staticmethod
+    def start_small(type):
+        return 'rm-toks-' in type or 'rm-tok-pattern-' in type
+
+    @staticmethod
     def create(instances, strategy, depth_to_instances, pass_repr):
         self = PolyState()
         self.pass_repr = pass_repr
         self.types = list(sorted(instances.keys()))
         self.instances = instances
         for k, i in instances.items():
-            self[k] = FuzzyBinaryState.create(i, strategy, depth_to_instances, pass_repr + ' :: ' + k)
+            self[k] = FuzzyBinaryState.create(i, strategy, depth_to_instances, pass_repr + ' :: ' + k, start_small=self.start_small(k))
         if not any(self.values()):
             return None
         self.ptr = 0
@@ -68,7 +72,7 @@ class PolyState(dict):
             if (k in last_state_hint) and last_state_hint[k]:
                 self[k] = FuzzyBinaryState.create_from_hint(i, strategy, last_state_hint[k], depth_to_instances)
             else:
-                self[k] = FuzzyBinaryState.create(i, strategy, depth_to_instances, pass_repr + ' :: ' + k)
+                self[k] = FuzzyBinaryState.create(i, strategy, depth_to_instances, pass_repr + ' :: ' + k, start_small=self.start_small(k))
         if not any(self.values()):
             return None
         self.ptr = 0
