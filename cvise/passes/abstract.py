@@ -241,7 +241,7 @@ class FuzzyBinaryState(BinaryState):
         peak = self.choose_rnd_peak(self.get_success_history(success_histories))
         if peak is None or peak == 0:
             peak = 1
-        chunk_le = min(self.chunk, self.instances)
+        chunk_le = 1
         chunk_ri = self.instances
         if self.strategy == 'topo':
             chunk_le = min(chunk_le, instances_within_depth)
