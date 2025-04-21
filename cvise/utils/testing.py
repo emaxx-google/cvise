@@ -744,6 +744,7 @@ class TestManager:
             self.next_successes_hint = []
             attempted_merges = set()
             self.failed_merges = []
+            pulse_counter = 0
 
             while any(self.states) or self.futures:
                 # do not create too many states
@@ -777,6 +778,10 @@ class TestManager:
 
                 now = time.monotonic()
                 self.last_job_update = now
+
+                if self.finished_transform_jobs // 1000 != pulse_counter:
+                    pulse_counter = self.finished_transform_jobs // 1000
+                    logging.info(f'pulse: {pulse_counter * 1000} jobs finished')
 
                 tmp_futures = copy.copy(self.futures)
                 for future in tmp_futures:
@@ -816,10 +821,9 @@ class TestManager:
                                 os.rename(future.result().test_case_path, pa)
                                 best_success_env.test_case = pa
                                 dbg = []
-                                if improv:
-                                    dbg.append(f'-{improv} byte{"s" if improv > 1 else ""}')
+                                dbg.append(f'{-improv} byte{"s" if abs(improv) != 1 else ""}')
                                 if improv_file_count:
-                                    dbg.append(f'-{improv_file_count} file{"s" if improv_file_count > 1 else ""}')
+                                    dbg.append(f'{-improv_file_count} file{"s" if improv_file_count > 1 else ""}')
                                 if len(self.current_passes) > 1:
                                     logging.info(f'candidate: {", ".join(dbg)} ({get_heuristic_names_for_log(env.state, pass_)})')
                             self.release_future(future)
