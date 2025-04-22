@@ -36,6 +36,7 @@ import psutil
 # Hack to use the vendored version of Pebble to guarantee the performance fix is in (>=5.1.1).
 vendor_path = Path(__file__).parent.parent / 'vendor'
 sys.path.insert(0, str(vendor_path))
+os.environ['PYTHONPATH'] = str(vendor_path) + ':' + os.environ.get('PYTHONPATH', '')
 import pebble
 assert Path(pebble.__file__).is_relative_to(vendor_path), f'vendor_path={vendor_path} pebble.__file__={pebble.__file__}'
 sys.path.pop(0)
@@ -294,9 +295,11 @@ class TestManager:
         self.tmp_for_best = None
         self.current_pass = None
         self.current_passes = None
+        self.multiproc_context = multiprocessing.get_context('forkserver')
+        self.multiproc_context.set_forkserver_preload(['pebble'])
         # Using SimpleQueue instead of Queue to avoid deadlocks (the latter uses background threads which, when
         # terminated at particular timing, can leave resources unfreed).
-        self.worker_pid_queue = multiprocessing.SimpleQueue()
+        self.worker_pid_queue = self.multiproc_context.SimpleQueue()
 
         for test_case in test_cases:
             test_case = Path(test_case)
@@ -532,7 +535,7 @@ class TestManager:
                 try:
                     os.killpg(pid, signal.SIGKILL)
                 except ProcessLookupError:
-                    pass  # The whole group is already dead.
+                    pass  # The whole group just got dead.
 
         self.worker_pids = [p for p in self.worker_pids if p in active_pids]
 
@@ -702,7 +705,7 @@ class TestManager:
         assert not self.temporary_folders
         self.future_to_pass = {}
         self.last_finished_order = [None] * len(passes)
-        with pebble.ProcessPool(max_workers=self.parallel_tests, initializer=worker_initializer, initargs=(self.worker_pid_queue,)) as pool:
+        with pebble.ProcessPool(max_workers=self.parallel_tests, context=self.multiproc_context, initializer=worker_initializer, initargs=(self.worker_pid_queue,)) as pool:
             order = 1
             next_pass_to_schedule = 0
             pass_job_index = 0
