@@ -121,7 +121,8 @@ class PolyState(dict):
             self[self.get_type()].begin(),
             self[self.get_type()].end()))
 
-    def on_success_observed(self):
+    def on_success_observed(self, improv):
+        logging.info(f'on_success_observed: improv={improv} state={self}')
         history = self[self.get_type()].get_success_history(success_histories)
         history.append(self.end() - self.begin())
         self.mark_attempted('success')

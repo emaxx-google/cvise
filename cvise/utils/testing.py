@@ -812,7 +812,7 @@ class TestManager:
                             improv_file_count = env.file_count_improvement
                             # assert improv == self.run_test_case_size - get_file_size(env.test_case_path), f'improv={improv} run_test_case_size={self.run_test_case_size} get_file_size(env.test_case_path)={get_file_size(env.test_case_path)} files={list(env.test_case_path.rglob('*'))}'
                             if hasattr(pass_, 'on_success_observed'):
-                                pass_.on_success_observed(env.state)
+                                pass_.on_success_observed(env.state, improv)
                             self.next_successes_hint.append((env.state, pass_, improv, improv_file_count))
                             self.duration_history.append(env.duration)
                             comparison_key = self.get_state_comparison_key(env.state, improv, improv_file_count)
