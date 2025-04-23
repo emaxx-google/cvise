@@ -569,7 +569,7 @@ def generate_makefile_hints(test_case, files, file_to_id):
             set_hint_locs(h, chunks)
             hints.append(h)
         elif path not in ('.ALWAYS',) and Path(path).suffix not in ('.cppmap',):
-            assert full_path.suffix in ('.pcm', '.o', ''), f'{full_path}'
+            # assert full_path.suffix in ('.pcm', '.o', ''), f'File "{full_path}" referenced in the Makefile doesn\'t exist'
             for loc in file_mentions.get(path, []):
                 hints.append({
                     't': '#fileref',
@@ -899,13 +899,19 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id, external_pr
                 continue
             if not from_file.is_absolute():
                 from_file = abs_test_case / from_file
-            assert from_file.is_relative_to(abs_test_case), f'Error: discovered #include in the file {from_file} that is outside both the test case {test_case} and the resource dir {resource_dir}; the command was: {command}'
+            # assert from_file.is_relative_to(abs_test_case), f'Error: discovered #include in the file {from_file} that is outside both the test case {test_case} and the resource dir {resource_dir}; the command was: {shlex.join(command)}'
+            if not from_file.is_relative_to(abs_test_case):
+                logging.info(f'Discovered #include in the file {from_file} that is outside both the test case {test_case} and the resource dir {resource_dir}; the command was: {shlex.join(command)}')
+                continue
             from_file = test_case / from_file.relative_to(abs_test_case)
             assert from_file in file_to_id, f'from_file={from_file} file_to_id={file_to_id} line="{line}"'
             from_line = int(from_line) - 1
             if not to_file.is_absolute():
                 to_file = abs_test_case / to_file
-            assert to_file.is_relative_to(abs_test_case), f'Error: discovered #include from {from_file} (line {from_line}) to the file {to_file} that is outside both the test case {test_case} and the resource dir {resource_dir}; the command was: {command}'
+            # assert to_file.is_relative_to(abs_test_case), f'Error: discovered #include from {from_file} (line {from_line}) to the file {to_file} that is outside both the test case {test_case} and the resource dir {resource_dir}; the command was: {shlex.join(command)}'
+            if not to_file.is_relative_to(abs_test_case):
+                logging.info(f'Error: discovered #include from {from_file} (line {from_line}) to the file {to_file} that is outside both the test case {test_case} and the resource dir {resource_dir}; the command was: {shlex.join(command)}')
+                continue
             to_file = test_case / to_file.relative_to(abs_test_case)
             assert to_file in file_to_id, f'to_file={to_file} file_to_id={file_to_id}'
             start_pos, end_pos = get_line_pos_in_file(from_file, from_line)
