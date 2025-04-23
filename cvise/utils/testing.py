@@ -859,7 +859,9 @@ class TestManager:
                             best_improv_speed = improv_speed
                         if best_file_count_improv_speed is None or file_count_improv_speed > best_file_count_improv_speed:
                             best_file_count_improv_speed = file_count_improv_speed
-                        if improv_speed <= best_improv_speed * 0.8 and (improv_speed > 0 or file_count_improv_speed < best_file_count_improv_speed * 0.8):
+                        duration_factor = (self.finished_transform_jobs - job_counter_when_init_finished) // max(self.parallel_tests, len(self.current_passes))
+                        speed_coeff = 0.95 if duration_factor >= 100 else 0.9 if duration_factor >= 20 else 0.8
+                        if improv_speed <= best_improv_speed * speed_coeff and (improv_speed > 0 or file_count_improv_speed < best_file_count_improv_speed * speed_coeff):
                             should_proceed = True
 
                     if should_proceed:
