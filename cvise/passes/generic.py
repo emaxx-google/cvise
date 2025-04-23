@@ -140,6 +140,8 @@ class PolyState(dict):
         return sum(self.instances[self.types[i]] for i in range(self.ptr))
 
     def __repr__(self):
+        if self.dysfunc:
+            return 'PolyState[dysfunc]'
         t = self.get_type()
         return t + '::' + repr(self[t])
 
