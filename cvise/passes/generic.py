@@ -1057,6 +1057,7 @@ def generate_blank_hints(test_case, files, file_to_id):
     }
     non_makefile_patterns = {
         'blanklead': r'^[ \t]+',
+        'preprcond': r'^[ \t]*\#[ \t]*(if|else|end).*',
     }
     hints = []
     for file_id, path in enumerate(files):
