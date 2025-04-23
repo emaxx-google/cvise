@@ -663,11 +663,27 @@ class TestManager:
                 logging.debug(f'Too large improvement: {test_env.size_improvement} B')
                 return PassCheckingOutcome.IGNORE
             # Report bug if transform did not change the file
-            if filecmp.cmp(self.current_test_case, test_env.test_case_path):
-                if not self.silent_pass_bug:
-                    if not self.report_pass_bug(test_env, 'pass failed to modify the variant'):
-                        return PassCheckingOutcome.QUIT_LOOP
-                return PassCheckingOutcome.IGNORE
+            if test_env.size_improvement == 0 and test_env.file_count_improvement == 0:
+                if self.current_test_case.is_dir():
+                    if test_env.lazy_input_copying:
+                        any_change = False
+                        for path in test_env.test_case_path.rglob('*'):
+                            if not path.is_symlink() and not path.is_dir():
+                                orig_path = self.current_test_case / path.relative_to(test_env.test_case_path)
+                                any_change = not filecmp.cmp(path, orig_path)
+                        for path in self.current_test_case.rglob('*'):
+                            dest_path = test_env.test_case_path / path.relative_to(self.current_test_case)
+                            if not dest_path.exists():
+                                any_change = True
+                    else:
+                        any_change = not filecmp.cmpfiles(self.current_test_case, test_env.test_case_path)
+                else:
+                    any_change = not filecmp.cmp(self.current_test_case, test_env.test_case_path)
+                if not any_change:
+                    if not self.silent_pass_bug:
+                        if not self.report_pass_bug(test_env, f'pass failed to modify the variant; state={test_env.state}'):
+                            return PassCheckingOutcome.QUIT_LOOP
+                    return PassCheckingOutcome.IGNORE
             return PassCheckingOutcome.ACCEPT
 
         # self.pass_statistic.add_failure(self.current_pass)
