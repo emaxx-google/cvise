@@ -94,8 +94,9 @@ def rmfolder(name):
     except OSError as e:
         pass
 
-def worker_initializer():
+def worker_initializer(logging_level):
     os.setpgrp()
+    logging.getLogger().setLevel(logging_level)
 
 class RmFolderEnvironment:
     def __init__(self, name):
@@ -728,7 +729,7 @@ class TestManager:
         assert not self.temporary_folders
         self.future_to_pass = {}
         self.last_finished_order = [None] * len(passes)
-        with pebble.ProcessPool(max_workers=self.parallel_tests, context=self.multiproc_context, initializer=worker_initializer) as pool:
+        with pebble.ProcessPool(max_workers=self.parallel_tests, context=self.multiproc_context, initializer=worker_initializer, initargs=(logging.getLogger().level,)) as pool:
             order = 1
             next_pass_to_schedule = 0
             pass_job_index = 0
