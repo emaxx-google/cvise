@@ -166,20 +166,26 @@ class FuzzyBinaryState(BinaryState):
     def begin(self):
         if self.tp == 0:
             return (self.index + self.rnd_shift) % self.instances
-        else:
+        elif self.tp in (1, 2):
             return self.rnd_index
+        else:
+            assert False
 
     def end(self):
         if self.tp == 0:
             return min(self.begin() + self.chunk, self.instances)
-        else:
+        elif self.tp in (1, 2):
             return self.rnd_index + self.rnd_chunk
+        else:
+            assert False
 
     def real_chunk(self):
         if self.tp == 0:
             return self.end() - self.begin()
-        else:
+        elif self.tp in (1, 2):
             return self.rnd_chunk
+        else:
+            assert False
 
     def get_success_history(self, success_histories):
         key = f'{self.pass_repr} {self.rnd_depth}'
@@ -191,7 +197,10 @@ class FuzzyBinaryState(BinaryState):
         state = copy.copy(self)
         state.dbg_file = None
         if state.tp == 0 and state.chunk < state.instances:
-            state.tp += 1
+            state.tp = 1
+            state.prepare_rnd_step(success_histories)
+        elif state.tp == 1 and len(state.instances_per_depth) > 1 and sum(state.instances_per_depth) > 0:
+            state.tp = 2
             state.prepare_rnd_step(success_histories)
         else:
             bi = super().advance()
@@ -219,20 +228,38 @@ class FuzzyBinaryState(BinaryState):
         return max(success_history)
 
     def prepare_rnd_step(self, success_histories):
-        self.rnd_chunk = None
+        instances_to_choose = self.instances
         self.rnd_depth = None
+        if self.tp == 2:
+            cand_depths = [i for i, d in enumerate(self.instances_per_depth) if d > 0]
+            assert cand_depths, f'self={self} instances_per_depth={self.instances_per_depth}'
+            for _ in range(100):
+                depth_pos = round(random.triangular(0, len(cand_depths)-1, 0))
+                self.rnd_depth = cand_depths[depth_pos]
+                instances_to_choose = sum(self.instances_per_depth[:self.rnd_depth+1])
+                if instances_to_choose > 0:
+                    break
+            else:
+                assert False, f'prepare_rnd_step failed: self={self} instances_per_depth={self.instances_per_depth}'
+
         peak = self.choose_rnd_peak(self.get_success_history(success_histories))
         if peak is None or peak == 0:
             peak = 1
-        chunk_le = 1
-        chunk_ri = self.instances
+
+        if self.tp == 2:
+            peak = math.isqrt(peak)
+
+        chunk_le = 1 if self.tp == 2 else self.chunk
+        chunk_ri = instances_to_choose
+        assert chunk_le <= chunk_ri
         peak = max(peak, chunk_le)
         peak = min(peak, chunk_ri)
+        self.rnd_chunk = None
         while self.rnd_chunk is None or self.rnd_chunk < chunk_le or self.rnd_chunk > chunk_ri:
             self.rnd_chunk = round(random.gauss(peak, peak))
         assert self.rnd_chunk > 0
         pos_le = 0
-        pos_ri = self.instances - self.rnd_chunk
+        pos_ri = instances_to_choose - self.rnd_chunk
         self.rnd_index = random.randint(pos_le, pos_ri)
 
 

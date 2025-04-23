@@ -174,9 +174,14 @@ class GenericPass(AbstractPass):
         files = get_ordered_files_list(test_case)
         if not files:
             return None
+        file_to_id = dict((f, i) for i, f in enumerate(files))
+
         path_to_depth = get_path_to_depth(test_case, self.external_programs)
         max_depth = max(path_to_depth.values()) if path_to_depth else 0
-        file_to_id = dict((f, i) for i, f in enumerate(files))
+        depth_per_file = [path_to_depth.get(path.resolve(), max_depth + 1) for path in files]
+        for p, d in path_to_depth.items():
+            pa = join_to_test_case(test_case, relative_path(p, test_case.resolve()))
+            assert depth_per_file[file_to_id[pa]] == d
 
         if self.arg == 'makefile':
             hints = generate_makefile_hints(test_case, files, file_to_id)
@@ -213,14 +218,14 @@ class GenericPass(AbstractPass):
 
         def hint_main_file(h):
             if h['t'].startswith('delfile::'):
-                return files[h['n']]
+                return h['n'], files[h['n']]
             if 'ns' in h:
-                return test_case / h['ns']
+                return len(files), test_case / h['ns']
             if 'f' in h:
-                return files[h['f']]
-            return files[h['multi'][0]['f']]
+                return h['f'], files[h['f']]
+            return h['multi'][0]['f'], files[h['multi'][0]['f']]
         def hint_comparison_key(h):
-            return h['t'], h.get('w', 1), hint_main_file(h)
+            return h['t'], hint_main_file(h)
 
         for h in hints:
             assert_valid_hint(h, files)
@@ -235,14 +240,22 @@ class GenericPass(AbstractPass):
                 path = files[h['n']]
                 assert path.exists(), 'path={path} hint={h}'
 
-        # instances_per_file = [0] * len(files)
-        # for h in hints:
-        #     seen_files = set()
-        #     for l in get_hint_locs(h):
-        #         f = l['f']
-        #         if f not in seen_files:
-        #             seen_files.add(f)
-        #             instances_per_file[f] += 1
+        instances_per_file = {}
+        instances_per_depth = {}
+        for h in hints:
+            file_id, _path = hint_main_file(h)
+            if file_id >= len(files):
+                continue  # the hint points to a temporary file
+            t = h['t']
+            if t not in instances_per_file:
+                instances_per_file[t] = [0] * len(files)
+            instances_per_file[t][file_id] += 1
+            if t not in instances_per_depth:
+                instances_per_depth[t] = []
+            if depth_per_file[file_id] >= len(instances_per_depth[t]):
+                instances_per_depth[t] += [0] * (depth_per_file[file_id] - len(instances_per_depth[t]) + 1)
+                assert depth_per_file[file_id] < len(instances_per_depth[t])
+            instances_per_depth[t][depth_per_file[file_id]] += 1
 
         if logging.getLogger().isEnabledFor(logging.DEBUG) and False:
             for hint in hints:
@@ -263,10 +276,10 @@ class GenericPass(AbstractPass):
         with gzip.open(self.extra_file_path, 'wt') as f:
             f.write(dump_json([str(relative_path(f, test_case)) for f in files]))
             f.write('\n')
-            f.write(dump_json(dict((str(relative_path(k, test_case)), v) for k,v in path_to_depth.items())))
+            f.write(dump_json(depth_per_file))
             f.write('\n')
-            # f.write(dump_json(instances_per_file))
-            # f.write('\n')
+            f.write(dump_json(instances_per_file))
+            f.write('\n')
             for hint in hints:
                 f.write(dump_json(hint))
                 f.write('\n')
@@ -281,6 +294,8 @@ class GenericPass(AbstractPass):
             state = PolyState.create(instances, repr(self))
         if state:
             state.extra_file_path = self.extra_file_path
+            for tp in state.types:
+                state[tp].instances_per_depth = instances_per_depth.get(tp, [])
 
         logging.info(f'Generated hints for arg={self.arg}: {instances}')
 
@@ -289,9 +304,9 @@ class GenericPass(AbstractPass):
     def advance(self, test_case, state):
         return state.advance(success_histories)
 
-    def on_success_observed(self, state):
+    def on_success_observed(self, state, improv):
         if not isinstance(state, list):
-            state.on_success_observed()
+            state.on_success_observed(improv)
 
     def transform(self, test_case, state, process_event_notifier, original_test_case):
         test_case = Path(test_case)
@@ -302,13 +317,38 @@ class GenericPass(AbstractPass):
         if logging.getLogger().isEnabledFor(logging.DEBUG):
             logging.debug(f'{self}.transform: state={state}')
         state_list = state if isinstance(state, list) else [state]
+        for s in state_list:
+            s.improv = 0
+            s.set_dbg(None)
+
         command = [
             self.external_programs['hint_tool'],
             str(test_case),
             str(original_test_case),
         ]
+        depth_cache = {}
         for s in state_list:
-            command += [str(s.extra_file_path), str(s.begin()), str(s.end())]
+            begin = s.begin()
+            end = s.end()
+            if s[s.get_type()].tp == 2:
+                if s.get_type() not in depth_cache:
+                    void_state = copy.copy(s[s.get_type()])
+                    void_state.tp = 0
+                    void_state.index = 0
+                    void_state.chunk = 0
+                    void_state.extra_file_path = s.extra_file_path
+                    files, depth_per_file, instances_per_file, _hints = load_hints([void_state], test_case)
+                    depth_cache[s.get_type()] = depth_per_file, instances_per_file
+                depth_per_file, instances_per_file = depth_cache[s.get_type()]
+                if s.get_type() not in instances_per_file:
+                    return (PassResult.INVALID, state)
+                global_shift = s.shift()
+                assert s.get_type() in instances_per_file, f'type={s.get_type()} begin={begin} end={end} global_shift={global_shift} instances_per_file_keys={list(instances_per_file.keys())}'
+                begin, end = recalc_per_depth_ordering(s.get_type(), begin-global_shift, end-global_shift, files, depth_per_file, instances_per_file[s.get_type()], s[s.get_type()].instances_per_depth)
+                begin += global_shift
+                end += global_shift
+                # logging.info(f'RECALC: old_begin={s.begin()} old_end={s.end()} begin={begin} end={end}')
+            command += [str(s.extra_file_path), str(begin), str(end)]
         stderr = subprocess.PIPE if logging.getLogger().isEnabledFor(logging.DEBUG) else subprocess.DEVNULL
         try:
             proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=stderr, encoding='utf-8', check=True)
@@ -317,9 +357,8 @@ class GenericPass(AbstractPass):
             raise e
         improv = int(proc.stdout.strip())
 
-        for s in state_list:
-            s.improv = 0
-            s.set_dbg(None)
+        if logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f'hint_tool stderr:\n{proc.stderr}')
         state_list[0].improv = improv
         return (PassResult.OK, state)
 
@@ -332,45 +371,41 @@ def load_hints(state_list, test_case, load_all=False):
 
     hints = []
     for extra_file_path, hint_ids in hints_to_load.items():
-        min_hint_id = None if load_all else min(hint_ids)
-        max_hint_id = None if load_all else max(hint_ids)
+        min_hint_id = None if load_all or not hint_ids else min(hint_ids)
+        max_hint_id = None if load_all or not hint_ids else max(hint_ids)
         with gzip.open(extra_file_path, 'rt') as f:
             files = json.loads(next(f))
             files = [join_to_test_case(test_case, f) for f in files]
-            path_to_depth = json.loads(next(f))
-            path_to_depth = dict((join_to_test_case(test_case, s), v) for s, v in path_to_depth.items())
-            for i, line in enumerate(f):
-                should_load = False
-                if load_all:
-                    should_load = True
-                else:
-                    if i < min_hint_id:
-                        continue
-                    if i > max_hint_id:
-                        break
-                    should_load = i in hint_ids
-                if should_load:
-                    hints.append(json.loads(line))
-    return files, path_to_depth, hints
+            depth_per_file = json.loads(next(f))
+            instances_per_file = json.loads(next(f))
+            if load_all or hint_ids:
+                for i, line in enumerate(f):
+                    should_load = False
+                    if load_all:
+                        should_load = True
+                    else:
+                        if i < min_hint_id:
+                            continue
+                        if i > max_hint_id:
+                            break
+                        should_load = i in hint_ids
+                    if should_load:
+                        hints.append(json.loads(line))
+    return files, depth_per_file, instances_per_file, hints
 
-def edit_file(src_path, dest_path, chunks):
-    with open(src_path) as f:
-        data = f.read()
-    merged = merge_chunks(chunks)
-    new_data = ''
-    ptr = 0
-    for c in merged:
-        new_data += data[ptr:c['l']]
-        if 'v' in c:
-            new_data += c['v']
-        ptr = c['r']
-    new_data += data[ptr:]
-    assert len(new_data) <= len(data), f'src_path={src_path} dest_path={dest_path} chunks={chunks}'
-    if logging.getLogger().isEnabledFor(logging.DEBUG) and False:
-        logging.debug(f'file={file} before:\n{data}\nafter:\n{new_data}')
-    with open(dest_path, 'w') as f:
-        f.write(new_data)
-    return len(data) - len(new_data)
+def recalc_per_depth_ordering(type, begin, end, files, depth_per_file, instances_per_file, instances_per_depth):
+    old_begin, old_end = begin, end
+    for file_id, _ in sorted(enumerate(depth_per_file), key=lambda i_d: (i_d[1], i_d[0])):
+        instances_here = instances_per_file[file_id]
+        if begin >= instances_here:
+            begin -= instances_here
+            end -= instances_here
+            continue
+        end = min(end, instances_here)
+        shift = sum(instances_per_file[:file_id])
+        # logging.info(f'recalc_per_depth_ordering: type={type} old_begin={old_begin} old_end={old_end} new_begin={begin+shift} new_end={end+shift} here={"d" + str(depth_per_file[file_id]) + "i" + str(instances_per_file[file_id]) + "=" + str(files[file_id])} instances_per_depth={instances_per_depth}')
+        return begin + shift, end + shift
+    assert False
 
 def generate_makefile_hints(test_case, files, file_to_id):
     if not test_case.is_dir():
@@ -1052,7 +1087,7 @@ def generate_delete_file_hints(test_case, files, file_to_id, other_init_states):
     states_to_load = [s for s in other_init_states if s]
     if not states_to_load:
         return []
-    files, path_to_depth, old_hints = load_hints(states_to_load, test_case, load_all=True)
+    files, depth_per_file, instances_per_file, old_hints = load_hints(states_to_load, test_case, load_all=True)
 
     file_to_locs = {}
     file_to_weight = {}
@@ -1103,7 +1138,7 @@ def generate_inline_file_hints(test_case, files, file_to_id, other_init_states):
     states_to_load = [s for s in other_init_states if s]
     if not states_to_load:
         return []
-    files, path_to_depth, old_hints = load_hints(states_to_load, test_case, load_all=True)
+    files, depth_per_file, instances_per_file, old_hints = load_hints(states_to_load, test_case, load_all=True)
 
     file_to_locs = {}
     for h in old_hints:
@@ -1140,7 +1175,7 @@ def generate_rename_file_hints(test_case, files, file_to_id, other_init_states):
     states_to_load = [s for s in other_init_states if s]
     if not states_to_load:
         return []
-    files, path_to_depth, old_hints = load_hints(states_to_load, test_case, load_all=True)
+    files, depth_per_file, instances_per_file, old_hints = load_hints(states_to_load, test_case, load_all=True)
 
     file_to_locs = {}
     for h in old_hints:
@@ -1186,7 +1221,7 @@ def generate_rename_symbol_hints(test_case, files, file_to_id, other_init_states
     states_to_load = [s for s in other_init_states if s]
     if not states_to_load:
         return []
-    files, path_to_depth, old_hints = load_hints(states_to_load, test_case, load_all=True)
+    files, depth_per_file, instances_per_file, old_hints = load_hints(states_to_load, test_case, load_all=True)
 
     file_to_ref_locs = {}
     for h in old_hints:
@@ -1313,23 +1348,29 @@ def get_path_to_depth(test_case, external_programs):
         orig_command = re.sub(r'\S*-fmodule\S*', '', orig_command).split()
         command = [
             str(external_programs['calc-include-depth']),
-            str(root_file),
+            str(root_file.relative_to(test_case)),
             '--',
-            f'-resource-dir={get_clang_resource_dir()}'] + orig_command
+            f'-resource-dir={resource_dir}'] + orig_command
         path_and_depth = []
+        stderr = subprocess.PIPE if logging.getLogger().isEnabledFor(logging.DEBUG) else subprocess.DEVNULL
         if logging.getLogger().isEnabledFor(logging.DEBUG):
-            logging.debug(f'get_ordered_files_list: running: {shlex.join(command)}')
-        out = subprocess.check_output(command, cwd=test_case, stderr=subprocess.DEVNULL, encoding='utf-8')
-        for line in out.splitlines():
+            logging.debug(f'get_path_to_depth: running: {shlex.join(command)}')
+        proc = subprocess.run(command, cwd=test_case, stdout=subprocess.PIPE, stderr=stderr, encoding='utf-8')
+        for line in proc.stdout.splitlines():
             if not line.strip():
                 continue
             path, depth = line.rsplit(maxsplit=1)
             path = Path(path)
             if not path.is_absolute():
-                path = test_case / path
-            assert path.is_relative_to(test_case), f'{path} doesnt belong to {test_case}'
+                path = test_case.resolve() / path
+            if path.is_relative_to(resource_dir):
+                # Ignore #includes inside the compiler's resource directory - we never try modifying those headers.
+                continue
+            assert path.is_relative_to(test_case.resolve()), f'{path} doesnt belong to {test_case}'
             assert path.exists(), f'doesnt exist: {path}'
             path_and_depth.append((path.resolve(), int(depth)))
+        if not path_and_depth and logging.getLogger().isEnabledFor(logging.DEBUG):
+            logging.debug(f'get_path_to_depth: stderr:\n{proc.stderr}')
         path_to_depth = dict(path_and_depth)
 
     return path_to_depth

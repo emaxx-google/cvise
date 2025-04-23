@@ -38,7 +38,8 @@ fn load_hints(path: &str, hint_ids: &HashSet<u32>) -> (Vec<PathBuf>, Vec<Hint>) 
     let reader = BufReader::new(GzDecoder::new(file));
     let mut lines = reader.lines();
     let files: Vec<String> = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
-    lines.next();
+    lines.next(); // depth_per_file
+    lines.next(); // instances_per_file
     let mut hints = vec![];
     for (idx, line) in lines.enumerate() {
         if hint_ids.contains(&(idx as u32)) {
