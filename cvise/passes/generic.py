@@ -988,7 +988,10 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
                             # Ignore #includes inside the compiler's resource directory - we never try modifying those headers.
                             continue
                         file = tmp_copy / file
-                        assert file.is_relative_to(tmp_copy), f'Error - the file {file} is outside the test case {tmp_copy} and outside the resource dir {resource_dir}; env was: {extra_env}'
+                        # assert file.is_relative_to(tmp_copy), f'Error - the file {file} is outside the test case {tmp_copy} and outside the resource dir {resource_dir}; env was: {extra_env}'
+                        if not file.is_relative_to(tmp_copy):
+                            logging.info(f'generate_clang_pcm_lazy_load_hints: File "{file}" is outside the test case {tmp_copy} and outside the resource dir {resource_dir}; env was: {extra_env}')
+                            continue
                         file_rel = file.relative_to(tmp_copy)
                         file = test_case / file_rel
                         seg_from = None
