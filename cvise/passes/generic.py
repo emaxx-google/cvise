@@ -417,6 +417,7 @@ def generate_makefile_hints(test_case, files, file_to_id):
     file_to_generating_targets = {}
     file_mentions = {}
     token_to_locs = {}
+    phony_targets = []
 
     makefile_path = test_case / 'Makefile'
     if not makefile_path.exists():
@@ -434,7 +435,9 @@ def generate_makefile_hints(test_case, files, file_to_id):
                 assert cur_target_name
                 target_name_pos = line.find(cur_target_name)
                 assert target_name_pos != -1
-                is_special_target = cur_target_name in ('clean', '.ALWAYS')
+                if cur_target_name == '.PHONY':
+                    phony_targets = line.split(':', maxsplit=2)[1].split()
+                is_special_target = cur_target_name in ['.PHONY', 'clean', '.ALWAYS'] + phony_targets
                 if not is_special_target:
                     cur_target = targets.setdefault(cur_target_name, [])
                     cur_target.append({
