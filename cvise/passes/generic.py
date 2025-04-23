@@ -1382,7 +1382,10 @@ def get_path_to_depth(test_case, external_programs):
             if path.is_relative_to(resource_dir):
                 # Ignore #includes inside the compiler's resource directory - we never try modifying those headers.
                 continue
-            assert path.is_relative_to(test_case.resolve()), f'{path} doesnt belong to {test_case}'
+            # assert path.is_relative_to(test_case.resolve()), f'{path} doesnt belong to {test_case}'
+            if not path.is_relative_to(test_case.resolve()):
+                logging.info(f'get_path_to_depth: {path} doesnt belong to {test_case}')
+                continue
             assert path.exists(), f'doesnt exist: {path}'
             path_and_depth.append((path.resolve(), int(depth)))
         if not path_and_depth and logging.getLogger().isEnabledFor(logging.DEBUG):
