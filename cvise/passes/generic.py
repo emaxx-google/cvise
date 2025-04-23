@@ -47,6 +47,7 @@ def join_to_test_case(test_case, path):
 class PolyState(dict):
     def __init__(self):
         self.generation = random.randint(0, 10 ** 9)
+        self.dysfunc = False
 
     @staticmethod
     def start_small(type):
@@ -60,13 +61,17 @@ class PolyState(dict):
         self.instances = instances
         for k, i in instances.items():
             self[k] = FuzzyBinaryState.create(i, pass_repr + ' :: ' + k, start_small=self.start_small(k))
-        if not any(self.values()):
-            return None
         self.ptr = 0
-        while not self[self.get_type()]:
-            self.ptr += 1
+        if not self.increment_ptr_to_suitable():
+            self.dysfunc = True
+            return self
         self.mark_attempted('attempted')
         return self
+
+    def increment_ptr_to_suitable(self):
+        while self.ptr < len(self.types) and (self.get_type().startswith('#') or not self[self.get_type()]):
+            self.ptr += 1
+        return self.ptr < len(self.types)
 
     @staticmethod
     def create_from_hint(instances, last_state_hint, pass_repr):
@@ -79,15 +84,17 @@ class PolyState(dict):
                 self[k] = FuzzyBinaryState.create_from_hint(i, last_state_hint[k])
             else:
                 self[k] = FuzzyBinaryState.create(i, pass_repr + ' :: ' + k, start_small=self.start_small(k))
-        if not any(self.values()):
-            return None
         self.ptr = 0
-        while not self[self.get_type()]:
-            self.ptr += 1
+        if not self.increment_ptr_to_suitable():
+            self.dysfunc = True
+            return self
         self.mark_attempted('attempted')
         return self
 
     def advance(self, success_histories):
+        if self.dysfunc:
+            return None
+
         tp = self.get_type()
         type_to_attempted = get_type_to_attempted(self.pass_repr, self.generation)
         previous_attempts = type_to_attempted.get(tp + '::attempted', [])
@@ -104,15 +111,11 @@ class PolyState(dict):
                                     for le, ri in previous_successes)
             if not already_attempted and not subset_of_success:
                 break
-        if not any(new.values()):
-            return None
         new.ptr += 1
-        if new.ptr == len(new.types):
-            new.ptr = 0
-        while not new[new.get_type()]:
-            new.ptr += 1
-            if new.ptr == len(new.types):
-                new.ptr = 0
+        if not new.increment_ptr_to_suitable():
+            new.ptr = 0  # cycle through types
+            if not new.increment_ptr_to_suitable():
+                return None
         new.mark_attempted('attempted')
         return new
 
@@ -291,12 +294,13 @@ class GenericPass(AbstractPass):
             state.on_success_observed()
 
     def transform(self, test_case, state, process_event_notifier, original_test_case):
+        test_case = Path(test_case)
+
+        if not isinstance(state, list) and state.dysfunc:
+            return (PassResult.INVALID, state)
+
         if logging.getLogger().isEnabledFor(logging.DEBUG):
             logging.debug(f'{self}.transform: state={state}')
-        if not isinstance(state, list) and state.get_type() in ('fileref',):
-            # Filerefs are potentially dangerous to remove - e.g., deps in the makefile are crucial for the test
-            # determinism.
-            return (PassResult.INVALID, state)
         state_list = state if isinstance(state, list) else [state]
         command = [
             self.external_programs['hint_tool'],
@@ -458,12 +462,12 @@ def generate_makefile_hints(test_case, files, file_to_id):
                                     'l': mention_pos,
                                     'r': mention_pos + len(token),
                                 })
-                            option_with_untouchable_arg = False
+                            arg_of_option = None
                         elif i > 0 and token.startswith('-fmodule-name='):
                             name = token.removeprefix('-fmodule-name=')
                             hints.append({
                                 'f': makefile_file_id,
-                                't': 'symbol',
+                                't': '#symbol',
                                 'ns': f'module::{name}',
                                 'l': mention_pos + len('-fmodule-name='),
                                 'r': mention_pos + len(token),
@@ -486,7 +490,7 @@ def generate_makefile_hints(test_case, files, file_to_id):
                                 next_tokens = line[token_search_pos:].split(maxsplit=2)
                                 if next_tokens and next_tokens[0] == '-fallow-pcm-with-compiler-errors':
                                     arg_of_option = (token, mention_pos)
-                            if not option_with_untouchable_arg:
+                            if not arg_of_option:
                                 token_to_locs.setdefault(token, []).append({
                                     'f': makefile_file_id,
                                     'l': mention_pos,
@@ -522,7 +526,7 @@ def generate_makefile_hints(test_case, files, file_to_id):
                 chunks += file_mentions.get(target_name, [])
             assert chunks, f'path={path}'
             h = {
-                't': 'fileref',
+                't': '#fileref',
                 'n': file_to_id[full_path],
             }
             set_hint_locs(h, chunks)
@@ -531,7 +535,7 @@ def generate_makefile_hints(test_case, files, file_to_id):
             assert full_path.suffix in ('.pcm', '.o', ''), f'{full_path}'
             for loc in file_mentions.get(path, []):
                 hints.append({
-                    't': 'fileref',
+                    't': '#fileref',
                     'ns': path,
                     'f': makefile_file_id,
                     'l': loc['l'],
@@ -559,7 +563,7 @@ def generate_cppmaps_hints(test_case, files, file_to_id):
         cppmap_to_uses[cppmap_path] = uses
         for header_path, chunks in headers.items():
             h = {
-                't': 'fileref',
+                't': '#fileref',
                 'n': file_to_id[test_case / header_path],
                 'w': 0.1,
             }
@@ -570,7 +574,7 @@ def generate_cppmaps_hints(test_case, files, file_to_id):
         for use_name, chunks in uses.items():
             for other_cppmap_path in name_to_cppmaps.get(use_name, []):
                 h = {
-                    't': 'fileref',
+                    't': '#fileref',
                     'n': file_to_id[other_cppmap_path],
                 }
                 set_hint_locs(h, chunks)
@@ -600,7 +604,7 @@ def parse_cppmap(test_case, cppmap_path, files, file_to_id):
                     name_pos = line.find(name)
                     assert name_pos != -1
                     hints.append({
-                        't': 'symbol',
+                        't': '#symbol',
                         'ns': f'module::{name}',
                         'f': cppmap_file_id,
                         'l': line_start_pos + name_pos,
@@ -862,7 +866,7 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id, external_pr
             assert to_file in file_to_id, f'to_file={to_file} file_to_id={file_to_id}'
             start_pos, end_pos = get_line_pos_in_file(from_file, from_line)
             hints.append({
-                't': 'fileref',
+                't': '#fileref',
                 'n': file_to_id[to_file],
                 'f': file_to_id[from_file],
                 'l': start_pos,
@@ -1053,7 +1057,7 @@ def generate_delete_file_hints(test_case, files, file_to_id, other_init_states):
     file_to_locs = {}
     file_to_weight = {}
     for h in old_hints:
-        if h['t'] == 'fileref' and 'n' in h:
+        if h['t'] == '#fileref' and 'n' in h:
             file_id = h['n']
             file_to_locs.setdefault(file_id, []).extend(get_hint_locs(h))
             file_to_weight[file_id] = file_to_weight.get(file_id, 0) + h.get('w', 1)
@@ -1103,7 +1107,7 @@ def generate_inline_file_hints(test_case, files, file_to_id, other_init_states):
 
     file_to_locs = {}
     for h in old_hints:
-        if h['t'] == 'fileref' and 'n' in h and h.get('w', 1) == 1:
+        if h['t'] == '#fileref' and 'n' in h and h.get('w', 1) == 1:
             file_id = h['n']
             file_to_locs.setdefault(file_id, []).extend(get_hint_locs(h))
 
@@ -1140,7 +1144,7 @@ def generate_rename_file_hints(test_case, files, file_to_id, other_init_states):
 
     file_to_locs = {}
     for h in old_hints:
-        if h['t'] == 'fileref':
+        if h['t'] == '#fileref':
             path = files[h['n']] if 'n' in h else test_case / h['ns']
             file_to_locs.setdefault(path, []).extend(get_hint_locs(h))
 
@@ -1186,7 +1190,7 @@ def generate_rename_symbol_hints(test_case, files, file_to_id, other_init_states
 
     file_to_ref_locs = {}
     for h in old_hints:
-        if h['t'] == 'fileref':
+        if h['t'] == '#fileref':
             for loc in get_hint_locs(h):
                 file_to_ref_locs.setdefault(loc['f'], []).append(loc)
 
@@ -1197,7 +1201,7 @@ def generate_rename_symbol_hints(test_case, files, file_to_id, other_init_states
 
     symbol_to_locs = {}
     for h in old_hints:
-        if h['t'] == 'symbol':
+        if h['t'] == '#symbol':
             symbol = h['ns']
             symbol_to_locs.setdefault(symbol, []).extend(get_hint_locs(h))
 
@@ -1250,7 +1254,7 @@ def parse_file_symbols(file_id, path, filerefs):
                         '#include' not in line:  # HACK
                         hints.append({
                             'f': file_id,
-                            't': 'symbol',
+                            't': '#symbol',
                             'ns': line[tok_start_pos:i],
                             'l': line_start_pos + tok_start_pos,
                             'r': line_start_pos + i,
@@ -1338,14 +1342,14 @@ def assert_valid_hint(h, files):
         assert isinstance(h, dict)
         assert 't' in h
         assert isinstance(h['t'], str)
-        if h['t'].startswith('delfile::') or h['t'] == 'fileref':
+        if h['t'].startswith('delfile::') or h['t'] == '#fileref':
             assert 'n' in h or 'ns' in h
             if 'n' in h:
                 assert isinstance(h['n'], int)
                 assert 0 <= h['n'] < len(files)
             if 'ns' in h:
                 assert isinstance(h['ns'], str)
-        if h['t'] == 'symbol':
+        if h['t'] == '#symbol':
             assert 'ns' in h
             assert isinstance(h['ns'], str)
             assert h['ns']
