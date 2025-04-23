@@ -6,11 +6,11 @@ from enum import auto, Enum, unique
 import filecmp
 import logging
 import math
-from multiprocessing import Manager
 import multiprocessing
 import os
 from pathlib import Path
 import platform
+import queue
 import random
 import shutil
 import signal
@@ -31,7 +31,6 @@ from cvise.utils.error import PassBugError
 from cvise.utils.error import ZeroSizeError
 from cvise.utils.misc import is_readable_file
 from cvise.utils.readkey import KeyLogger
-import psutil
 
 # Hack to use the vendored version of Pebble to guarantee the performance fix is in (>=5.1.1).
 vendor_path = Path(__file__).parent.parent / 'vendor'
@@ -95,9 +94,8 @@ def rmfolder(name):
     except OSError as e:
         pass
 
-def worker_initializer(worker_pid_queue):
+def worker_initializer():
     os.setpgrp()
-    worker_pid_queue.put(os.getpid())
 
 class RmFolderEnvironment:
     def __init__(self, name):
@@ -244,6 +242,38 @@ def get_heuristic_names_for_log(state, pass_):
         return state.get_type()
     return str(pass_)
 
+def create_multiproc_context_wrapper(context, stopped_worker_pids):
+    original_proc_cls = context.Process
+
+    class WrapperProcCls(context.Process):
+        def __init__(self, **kwargs):
+            self.process = original_proc_cls(**kwargs)
+            self.stop_reported = False
+
+        def start(self):
+            self.process.start()
+            self.actual_pid = self.process.pid
+
+        def join(self, *args):
+            self.process.join(*args)
+            self.maybe_report_stopped()
+
+        def is_alive(self):
+            alive = self.process.is_alive()
+            self.maybe_report_stopped()
+            return alive
+
+        def __getattr__(self, name):
+            return getattr(self.process, name)
+
+        def maybe_report_stopped(self):
+            if self.process.exitcode is not None and not self.stop_reported:
+                self.stop_reported = True
+                stopped_worker_pids.put(self.actual_pid)
+
+    context.Process = WrapperProcCls
+    return context
+
 class TestManager:
     GIVEUP_CONSTANT = 50000
     MAX_TIMEOUTS = 0  # TODO: 20
@@ -295,11 +325,9 @@ class TestManager:
         self.tmp_for_best = None
         self.current_pass = None
         self.current_passes = None
-        self.multiproc_context = multiprocessing.get_context('forkserver')
-        self.multiproc_context.set_forkserver_preload(['pebble'])
-        # Using SimpleQueue instead of Queue to avoid deadlocks (the latter uses background threads which, when
-        # terminated at particular timing, can leave resources unfreed).
-        self.worker_pid_queue = self.multiproc_context.SimpleQueue()
+        self.stopped_worker_pids = queue.Queue()
+        self.multiproc_context = create_multiproc_context_wrapper(
+            multiprocessing.get_context('forkserver'), self.stopped_worker_pids)
 
         for test_case in test_cases:
             test_case = Path(test_case)
@@ -524,20 +552,15 @@ class TestManager:
             logging.info(f'Created extra directory {extra_dir} for you to look at later')
 
     def sweep_children_processes(self):
-        # This loop is racy, but it's fine if a particular worker's PID is received in our next call (and SimpleQueue
-        # doesn't provide a non-blocking get operation).
-        while not self.worker_pid_queue.empty():
-            self.worker_pids.append(self.worker_pid_queue.get())
-
-        active_pids = psutil.pids()
-        for pid in self.worker_pids:
-            if pid not in active_pids:
-                try:
-                    os.killpg(pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass  # The whole group just got dead.
-
-        self.worker_pids = [p for p in self.worker_pids if p in active_pids]
+        while True:
+            try:
+                pid = self.stopped_worker_pids.get(block=False)
+            except queue.Empty:
+                break
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass  # The whole group just got dead.
 
     def process_done_futures(self):
         quit_loop = False
@@ -705,7 +728,7 @@ class TestManager:
         assert not self.temporary_folders
         self.future_to_pass = {}
         self.last_finished_order = [None] * len(passes)
-        with pebble.ProcessPool(max_workers=self.parallel_tests, context=self.multiproc_context, initializer=worker_initializer, initargs=(self.worker_pid_queue,)) as pool:
+        with pebble.ProcessPool(max_workers=self.parallel_tests, context=self.multiproc_context, initializer=worker_initializer) as pool:
             order = 1
             next_pass_to_schedule = 0
             pass_job_index = 0
@@ -740,10 +763,9 @@ class TestManager:
                 if len(self.futures) >= self.parallel_tests or not new_transform_possible and self.get_pass_id_to_init() is None:
                     wait(self.futures, return_when=FIRST_COMPLETED)
 
-                if order % 10 == 0:
-                    # Occasionally reclaim system resources - just for the case a timed-out worker wasn't terminated
-                    # when the future timeout was handled below.
-                    self.sweep_children_processes()
+                # Occasionally reclaim system resources - just for the case a timed-out worker wasn't terminated
+                # when the future timeout was handled below.
+                self.sweep_children_processes()
 
                 quit_loop = self.process_done_futures()
                 assert self.finished_transform_jobs <= order
@@ -1016,7 +1038,6 @@ class TestManager:
         # m = Manager()
         # self.pid_queue = m.Queue()
         self.pid_queue = None
-        self.worker_pids = []
         self.create_root()
         pass_key = repr(self.current_pass)
         self.last_state_hint = [None]
@@ -1132,7 +1153,6 @@ class TestManager:
         # m = Manager()
         # self.pid_queue = m.Queue()
         self.pid_queue = None
-        self.worker_pids = []
         if not self.tmp_for_best:
             self.tmp_for_best = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}best-')
         for p in passes:
