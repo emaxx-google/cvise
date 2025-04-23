@@ -110,9 +110,10 @@ fn write_edited_file(file_id: usize, edits: Vec<HintLoc>, dest_path: &Path, src_
         }
     }
     let write_path = if let Some(overridden) = &write_path_override {
-        eprintln!("writing {} bytes to moved file {:?}", new_data.len(), overridden);
+        eprintln!("writing {} bytes (old size {}) to moved file {:?}", new_data.len(), data.len(), overridden);
         overridden
     } else {
+        eprintln!("writing {} bytes (old size {}) to file {:?}", new_data.len(), data.len(), dest_file_paths[file_id]);
         &dest_file_paths[file_id]
     };
 
