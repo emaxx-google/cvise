@@ -667,6 +667,13 @@ def parse_cppmap(test_case, cppmap_path, files, file_to_id):
                         'l': line_start_pos,
                         'r': line_end_pos,
                     })
+                else:
+                    hints.append({
+                        't': 'cppmapmissingheader',
+                        'f': cppmap_file_id,
+                        'l': line_start_pos,
+                        'r': line_end_pos,
+                    })
                 nested_module_empty = False
 
             use_match = re.match(r'\s*use\s+(\S+)\s*', line)
@@ -1340,6 +1347,7 @@ def get_path_to_depth(test_case, external_programs):
     if not orig_command:
         return {}
 
+    resource_dir = get_clang_resource_dir()
     root_file_candidates = list(test_case.rglob('*.cc'))
     root_file = root_file_candidates[0] if root_file_candidates else None
 
