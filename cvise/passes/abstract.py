@@ -127,7 +127,8 @@ class FuzzyBinaryState(BinaryState):
             return None
         self = FuzzyBinaryState()
         self.instances = instances
-        self.chunk = 1 if start_small else self.choose_initial_chunk(instances)
+        self.start_small = start_small
+        self.chunk = 1 if self.start_small else self.choose_initial_chunk(instances)
         self.index = 0
         self.tp = 0
         self.rnd_index = None
@@ -196,10 +197,10 @@ class FuzzyBinaryState(BinaryState):
     def advance(self, success_histories):
         state = copy.copy(self)
         state.dbg_file = None
-        if state.tp == 0 and state.chunk < state.instances:
+        if state.tp == 0 and not self.start_small and state.chunk < state.instances:
             state.tp = 1
             state.prepare_rnd_step(success_histories)
-        elif state.tp == 1 and len(state.instances_per_depth) > 1 and sum(state.instances_per_depth) > 0:
+        elif state.tp == 1 and not self.start_small and len(state.instances_per_depth) > 1 and sum(state.instances_per_depth) > 0:
             state.tp = 2
             state.prepare_rnd_step(success_histories)
         else:
