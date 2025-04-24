@@ -200,7 +200,7 @@ class FuzzyBinaryState(BinaryState):
         if state.tp == 0 and not self.start_small and state.chunk < state.instances:
             state.tp = 1
             state.prepare_rnd_step(success_histories)
-        elif state.tp == 1 and not self.start_small and len(state.instances_per_depth) > 1 and sum(state.instances_per_depth) > 0:
+        elif state.tp == 1 and not self.start_small and len([i for i in state.instances_per_depth if i > 0]) > 1:
             state.tp = 2
             state.prepare_rnd_step(success_histories)
         else:
