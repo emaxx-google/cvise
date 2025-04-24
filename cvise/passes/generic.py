@@ -47,7 +47,6 @@ def join_to_test_case(test_case, path):
 class PolyState(dict):
     def __init__(self):
         self.generation = random.randint(0, 10 ** 9)
-        self.dysfunc = False
 
     @staticmethod
     def start_small(type):
@@ -61,17 +60,8 @@ class PolyState(dict):
         self.instances = instances
         for k, i in instances.items():
             self[k] = FuzzyBinaryState.create(i, pass_repr + ' :: ' + k, start_small=self.start_small(k))
-        self.ptr = 0
-        if not self.increment_ptr_to_suitable():
-            self.dysfunc = True
-            return self
-        self.mark_attempted('attempted')
+        self.ptr = -1
         return self
-
-    def increment_ptr_to_suitable(self):
-        while self.ptr < len(self.types) and (self.get_type().startswith('#') or not self[self.get_type()]):
-            self.ptr += 1
-        return self.ptr < len(self.types)
 
     @staticmethod
     def create_from_hint(instances, last_state_hint, pass_repr):
@@ -84,38 +74,42 @@ class PolyState(dict):
                 self[k] = FuzzyBinaryState.create_from_hint(i, last_state_hint[k])
             else:
                 self[k] = FuzzyBinaryState.create(i, pass_repr + ' :: ' + k, start_small=self.start_small(k))
-        self.ptr = 0
-        if not self.increment_ptr_to_suitable():
-            self.dysfunc = True
-            return self
-        self.mark_attempted('attempted')
+        self.ptr = -1
         return self
 
     def advance(self, success_histories):
-        if self.dysfunc:
-            return None
-
-        tp = self.get_type()
-        type_to_attempted = get_type_to_attempted(self.pass_repr, self.generation)
-        previous_attempts = type_to_attempted.get(tp + '::attempted', [])
-        previous_successes = type_to_attempted.get(tp + '::success', [])
-
         new = copy.copy(self)
+
+        wrapped_around = False
         while True:
-            new[tp] = new[tp].advance(success_histories)
-            if not new[tp]:
+            new.ptr += 1
+            while new.ptr < len(new.types) and (new.get_type().startswith('#') or not new[new.get_type()]):
+                new.ptr += 1
+            if new.ptr == len(new.types):
+                if wrapped_around:
+                    return None
+                wrapped_around = True
+                new.ptr = -1
+                continue
+
+            tp = new.get_type()
+            type_to_attempted = get_type_to_attempted(new.pass_repr, new.generation)
+            previous_attempts = type_to_attempted.get(tp + '::attempted', [])
+            previous_successes = type_to_attempted.get(tp + '::success', [])
+
+            while True:
+                new[tp] = new[tp].advance(success_histories)
+                if not new[tp]:
+                    break
+                already_attempted = any(le == new[tp].begin() and new[tp].end() == ri
+                                        for le, ri in previous_attempts)
+                subset_of_success = any(le <= new[tp].begin() and new[tp].end() <= ri
+                                        for le, ri in previous_successes)
+                if not already_attempted and not subset_of_success:
+                    break
+            if new[tp]:
                 break
-            already_attempted = any(le == new[tp].begin() and new[tp].end() == ri
-                                    for le, ri in previous_attempts)
-            subset_of_success = any(le <= new[tp].begin() and new[tp].end() <= ri
-                                    for le, ri in previous_successes)
-            if not already_attempted and not subset_of_success:
-                break
-        new.ptr += 1
-        if not new.increment_ptr_to_suitable():
-            new.ptr = 0  # cycle through types
-            if not new.increment_ptr_to_suitable():
-                return None
+
         new.mark_attempted('attempted')
         return new
 
@@ -139,8 +133,8 @@ class PolyState(dict):
         return sum(self.instances[self.types[i]] for i in range(self.ptr))
 
     def __repr__(self):
-        if self.dysfunc:
-            return 'PolyState[dysfunc]'
+        if self.ptr == -1:
+            return 'PolyState[zygote]'
         t = self.get_type()
         return t + '::' + repr(self[t])
 
@@ -339,7 +333,7 @@ class GenericPass(AbstractPass):
     def transform(self, test_case, state, process_event_notifier, original_test_case):
         test_case = Path(test_case)
 
-        if not isinstance(state, list) and state.dysfunc:
+        if not isinstance(state, list) and state.ptr == -1:
             return (PassResult.INVALID, state)
 
         if logging.getLogger().isEnabledFor(logging.DEBUG):
