@@ -28,15 +28,6 @@ from cvise.utils.externalprograms import find_external_programs  # noqa: E402
 import psutil  # noqa: E402
 
 
-class DeltaTimeFormatter(logging.Formatter):
-    def format(self, record):  # noqa: A003
-        record.delta = str(datetime.timedelta(seconds=int(record.relativeCreated / 1000)))
-        # pad with one more zero
-        if record.delta[1] == ':':
-            record.delta = '0' + record.delta
-        return super().format(record)
-
-
 script_path = os.path.dirname(os.path.realpath(__file__))
 
 
@@ -316,7 +307,8 @@ if __name__ == '__main__':
         log_config['level'] = getattr(logging, args.log_level.upper())
 
     logging.getLogger().setLevel(log_config['level'])
-    formatter = DeltaTimeFormatter(log_format)
+    start_time = time.time()
+    formatter = misc.DeltaTimeFormatter(start_time, log_format)
     root_logger = logging.getLogger()
 
     if args.log_file is not None:
@@ -427,6 +419,7 @@ if __name__ == '__main__':
         args.skip_after_n_transforms,
         args.stopping_threshold,
     )
+    test_manager.start_time = start_time
 
     reducer = CVise(test_manager, args.skip_interestingness_test_check)
 

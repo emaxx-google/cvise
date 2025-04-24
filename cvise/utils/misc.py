@@ -1,3 +1,5 @@
+import datetime
+import logging
 import os
 import tempfile
 from contextlib import contextmanager
@@ -23,3 +25,17 @@ def CloseableTemporaryFile(mode='w+b', dir=None):
         if not f.closed:
             f.close()
         os.remove(f.name)
+
+
+class DeltaTimeFormatter(logging.Formatter):
+    def __init__(self, start_time, fmt):
+        super().__init__(fmt)
+        self.start_time = start_time
+
+    def format(self, record):  # noqa: A003
+        relative_created = record.created - self.start_time
+        record.delta = str(datetime.timedelta(seconds=int(relative_created)))
+        # pad with one more zero
+        if record.delta[1] == ':':
+            record.delta = '0' + record.delta
+        return super().format(record)

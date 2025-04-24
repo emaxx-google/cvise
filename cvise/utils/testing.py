@@ -29,7 +29,7 @@ from cvise.utils.error import InvalidInterestingnessTestError
 from cvise.utils.error import InvalidTestCaseError
 from cvise.utils.error import PassBugError
 from cvise.utils.error import ZeroSizeError
-from cvise.utils.misc import is_readable_file
+from cvise.utils.misc import is_readable_file, DeltaTimeFormatter
 from cvise.utils.readkey import KeyLogger
 
 # Hack to use the vendored version of Pebble to guarantee the performance fix is in (>=5.1.1).
@@ -94,9 +94,16 @@ def rmfolder(name):
     except OSError as e:
         pass
 
-def worker_initializer(logging_level):
+def worker_initializer(start_time, logging_level):
     os.setpgrp()
+
     logging.getLogger().setLevel(logging_level)
+    log_format = '%(delta)s %(levelname)s %(message)s'
+    formatter = DeltaTimeFormatter(start_time, log_format)
+    root_logger = logging.getLogger()
+    syslog = logging.StreamHandler()
+    syslog.setFormatter(formatter)
+    root_logger.addHandler(syslog)
 
 class RmFolderEnvironment:
     def __init__(self, name):
@@ -743,7 +750,7 @@ class TestManager:
         assert not self.temporary_folders
         self.future_to_pass = {}
         self.last_finished_order = [None] * len(passes)
-        with pebble.ProcessPool(max_workers=self.parallel_tests, context=self.multiproc_context, initializer=worker_initializer, initargs=(logging.getLogger().level,)) as pool:
+        with pebble.ProcessPool(max_workers=self.parallel_tests, context=self.multiproc_context, initializer=worker_initializer, initargs=(self.start_time, logging.getLogger().level,)) as pool:
             order = 1
             next_pass_to_schedule = 0
             pass_job_index = 0
