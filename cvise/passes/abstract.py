@@ -234,21 +234,14 @@ class FuzzyBinaryState(BinaryState):
         if self.tp == 2:
             cand_depths = [i for i, d in enumerate(self.instances_per_depth) if d > 0]
             assert cand_depths, f'self={self} instances_per_depth={self.instances_per_depth}'
-            for _ in range(100):
-                depth_pos = round(random.triangular(0, len(cand_depths)-1, 0))
-                self.rnd_depth = cand_depths[depth_pos]
-                instances_to_choose = sum(self.instances_per_depth[:self.rnd_depth+1])
-                if instances_to_choose > 0:
-                    break
-            else:
-                assert False, f'prepare_rnd_step failed: self={self} instances_per_depth={self.instances_per_depth}'
+            depth_pos = round(random.triangular(0, len(cand_depths)-1, 0))
+            self.rnd_depth = cand_depths[depth_pos]
+            instances_to_choose = sum(self.instances_per_depth[:self.rnd_depth+1])
+            assert instances_to_choose > 0
 
         peak = self.choose_rnd_peak(self.get_success_history(success_histories))
         if peak is None or peak == 0:
             peak = 1
-
-        if self.tp == 2:
-            peak = math.isqrt(peak)
 
         chunk_le = 1 if self.tp == 2 else self.chunk
         chunk_ri = instances_to_choose
