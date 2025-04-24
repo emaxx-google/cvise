@@ -503,6 +503,8 @@ def generate_makefile_hints(test_case, files, file_to_id):
                                     'r': mention_pos + len(token),
                                 })
                             arg_of_option = None
+                        elif token == '$(EXTRA_CFLAGS)':
+                            pass
                         elif i > 0 and token.startswith('-fmodule-name='):
                             name = token.removeprefix('-fmodule-name=')
                             hints.append({
