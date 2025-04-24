@@ -219,7 +219,7 @@ class GenericPass(AbstractPass):
             raise RuntimeError(f'Unknown hint source: arg={self.arg}')
 
         def hint_main_file(h):
-            if h['t'].startswith('delfile::'):
+            if 'n' in h:
                 return h['n'], files[h['n']]
             if 'ns' in h:
                 return len(files), test_case / h['ns']
@@ -885,7 +885,6 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id, external_pr
             logging.debug(f'generate_inclusion_directive_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
             continue
         abs_test_case = test_case.resolve()
-        hints_added = 0
         for line in proc.stdout.splitlines():
             if not line.strip():
                 continue
@@ -897,26 +896,37 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id, external_pr
                 continue  # links from .cppmap have the empty "from_file"
             from_file = Path(from_file)
             to_file = Path(to_file)
-            if from_file.is_relative_to(resource_dir) or to_file.is_relative_to(resource_dir):
+
+            if to_file.is_relative_to(resource_dir):
                 # Ignore #includes to/inside the compiler's resource directory - we never try deleting those headers.
                 continue
-            if not from_file.is_absolute():
-                from_file = abs_test_case / from_file
-            # assert from_file.is_relative_to(abs_test_case), f'Error: discovered #include in the file {from_file} that is outside both the test case {test_case} and the resource dir {resource_dir}; the command was: {shlex.join(command)}'
-            if not from_file.is_relative_to(abs_test_case):
-                logging.info(f'Discovered #include in the file {from_file} that is outside both the test case {test_case} and the resource dir {resource_dir}; the command was: {shlex.join(command)}')
-                continue
-            from_file = test_case / from_file.relative_to(abs_test_case)
-            assert from_file in file_to_id, f'from_file={from_file} file_to_id={file_to_id} line="{line}"'
-            from_line = int(from_line) - 1
             if not to_file.is_absolute():
                 to_file = abs_test_case / to_file
             # assert to_file.is_relative_to(abs_test_case), f'Error: discovered #include from {from_file} (line {from_line}) to the file {to_file} that is outside both the test case {test_case} and the resource dir {resource_dir}; the command was: {shlex.join(command)}'
             if not to_file.is_relative_to(abs_test_case):
-                logging.info(f'Error: discovered #include from {from_file} (line {from_line}) to the file {to_file} that is outside both the test case {test_case} and the resource dir {resource_dir}; the command was: {shlex.join(command)}')
+                logging.info(f'Error: discovered #include from "{from_file}" (line {from_line}) to the file "{to_file}" that is outside both the test case {test_case} and the resource dir {resource_dir}; the command was: {shlex.join(command)}')
+                assert False
                 continue
             to_file = test_case / to_file.relative_to(abs_test_case)
             assert to_file in file_to_id, f'to_file={to_file} file_to_id={file_to_id}'
+
+            if not from_file.is_absolute():
+                from_file = abs_test_case / from_file
+            if from_file.is_relative_to(resource_dir):
+                hints.append({
+                    't': '#fileref',
+                    'n': file_to_id[to_file],
+                    'f': -1,
+                })
+                continue
+            if not from_file.is_relative_to(abs_test_case):
+                logging.info(f'Discovered #include from file "{from_file}" (line {from_line} to file "{to_file}") that is outside both the test case {test_case} and the resource dir {resource_dir}; the command was: {shlex.join(command)}')
+                assert False
+                continue
+            from_file = test_case / from_file.relative_to(abs_test_case)
+            assert from_file in file_to_id, f'from_file={from_file} file_to_id={file_to_id} line="{line}"'
+
+            from_line = int(from_line) - 1
             start_pos, end_pos = get_line_pos_in_file(from_file, from_line)
             hints.append({
                 't': '#fileref',
@@ -925,9 +935,6 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id, external_pr
                 'l': start_pos,
                 'r': end_pos,
             })
-            hints_added += 1
-        if not hints_added and logging.getLogger().isEnabledFor(logging.DEBUG):
-            logging.debug(f'generate_inclusion_directive_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
     return hints
 
 def get_clang_resource_dir():
@@ -991,6 +998,7 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
                         # assert file.is_relative_to(tmp_copy), f'Error - the file {file} is outside the test case {tmp_copy} and outside the resource dir {resource_dir}; env was: {extra_env}'
                         if not file.is_relative_to(tmp_copy):
                             logging.info(f'generate_clang_pcm_lazy_load_hints: File "{file}" is outside the test case {tmp_copy} and outside the resource dir {resource_dir}; env was: {extra_env}')
+                            assert False
                             continue
                         file_rel = file.relative_to(tmp_copy)
                         file = test_case / file_rel
@@ -1111,16 +1119,22 @@ def generate_delete_file_hints(test_case, files, file_to_id, other_init_states):
         return []
     files, depth_per_file, instances_per_file, old_hints = load_hints(states_to_load, test_case, load_all=True)
 
+    imperishable_files = set()
     file_to_locs = {}
     file_to_weight = {}
     for h in old_hints:
         if h['t'] == '#fileref' and 'n' in h:
             file_id = h['n']
-            file_to_locs.setdefault(file_id, []).extend(get_hint_locs(h))
-            file_to_weight[file_id] = file_to_weight.get(file_id, 0) + h.get('w', 1)
+            if h.get('f') == -1:
+                imperishable_files.add(file_id)
+            else:
+                file_to_locs.setdefault(file_id, []).extend(get_hint_locs(h))
+                file_to_weight[file_id] = file_to_weight.get(file_id, 0) + h.get('w', 1)
 
     hints = []
     for file_id, locs in file_to_locs.items():
+        if file_id in imperishable_files:
+            continue
         w = file_to_weight[file_id]
         if 0 < w < 1 and not w.is_integer():
             w = 1
@@ -1134,11 +1148,11 @@ def generate_delete_file_hints(test_case, files, file_to_id, other_init_states):
         hints.append(h)
 
     for file_id, file in enumerate(files):
-        if file_to_id[file] not in file_to_locs:
+        if file_id not in file_to_locs and file_id not in imperishable_files:
             if file.suffix not in ('.makefile',) and file.name not in ('Makefile',):  # Hack
                 hints.append({
                     't': 'delfile::0',
-                    'n': file_to_id[file],
+                    'n': file_id,
                     'multi': [],
                 })
 
@@ -1392,6 +1406,7 @@ def get_path_to_depth(test_case, external_programs):
             # assert path.is_relative_to(test_case.resolve()), f'{path} doesnt belong to {test_case}'
             if not path.is_relative_to(test_case.resolve()):
                 logging.info(f'get_path_to_depth: {path} doesnt belong to {test_case}')
+                assert False, f'{path} doesnt belong to {test_case}'
                 continue
             assert path.exists(), f'doesnt exist: {path}'
             path_and_depth.append((path.resolve(), int(depth)))
@@ -1420,7 +1435,9 @@ def assert_valid_hint(h, files):
             assert 'ns' in h
             assert isinstance(h['ns'], str)
             assert h['ns']
-        if 'l' in h or 'r' in h or 'v' in h:
+        if 'f' in h and h['f'] == -1 and h['t'] == '#fileref':
+            pass  # an imperishable fileref
+        elif 'l' in h or 'r' in h or 'v' in h:
             assert 'multi' not in h
             assert 'f' in h
             assert isinstance(h['f'], int)
@@ -1462,6 +1479,8 @@ def assert_valid_hint(h, files):
 def get_hint_locs(hint):
     if 'multi' in hint:
         return hint['multi']
+    if hint['f'] == -1:
+        return []
     l = {
         'f': hint['f'],
         'l': hint['l'],
