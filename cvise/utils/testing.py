@@ -680,9 +680,10 @@ class TestManager:
                 else:
                     any_change = not filecmp.cmp(self.current_test_case, test_env.test_case_path)
                 if not any_change:
-                    if not self.silent_pass_bug:
-                        if not self.report_pass_bug(test_env, f'pass failed to modify the variant; state={test_env.state}'):
-                            return PassCheckingOutcome.QUIT_LOOP
+                    # Temporarily disable because of rmdir spam.
+                    # if not self.silent_pass_bug:
+                    #     if not self.report_pass_bug(test_env, f'pass failed to modify the variant; state={test_env.state}'):
+                    #         return PassCheckingOutcome.QUIT_LOOP
                     return PassCheckingOutcome.IGNORE
             return PassCheckingOutcome.ACCEPT
 
