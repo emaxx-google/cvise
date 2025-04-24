@@ -10,6 +10,12 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+#[derive(Debug, PartialEq)]
+enum Command {
+    Transform,
+    DryRun,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 struct HintLoc {
     f: u32,
@@ -82,7 +88,7 @@ fn merge_edits(mut edits: Vec<HintLoc>) -> (Vec<HintLoc>, Vec<HintLoc>) {
     (global_edits, merged)
 }
 
-fn write_edited_file(file_id: usize, edits: Vec<HintLoc>, dest_path: &Path, src_file_paths: &Vec<PathBuf>, dest_file_paths: &Vec<PathBuf>) -> i64 {
+fn write_edited_file(command: &Command, file_id: usize, edits: Vec<HintLoc>, dest_path: &Path, src_file_paths: &Vec<PathBuf>, dest_file_paths: &Vec<PathBuf>) -> i64 {
     let read_path = &src_file_paths[file_id];
     let data = fs::read(read_path).unwrap();
 
@@ -117,17 +123,25 @@ fn write_edited_file(file_id: usize, edits: Vec<HintLoc>, dest_path: &Path, src_
         &dest_file_paths[file_id]
     };
 
-    fs::write(write_path, &new_data).unwrap();
+    if command == &Command::Transform {
+        fs::write(write_path, &new_data).unwrap();
+    }
     let reduction = data.len() as i64 - new_data.len() as i64;
     reduction
 }
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let dest_path = Path::new(&args[1]);
+    let command = match args[1].as_str() {
+        "transform" => Command::Transform,
+        "dry-run" => Command::DryRun,
+        _ => panic!(),
+    };
     let src_path = Path::new(&args[2]);
+    let dest_path = if command == Command::Transform { Path::new(&args[3]) } else { Path::new("") };
     let mut file_to_hint_ids = HashMap::new();
-    for i in (3..args.len()).step_by(3) {
+    let hint_sources_arg = if command == Command::Transform { 4 } else { 3 };
+    for i in (hint_sources_arg..args.len()).step_by(3) {
         let path = &args[i];
         let hint_from: u32 = args[i + 1].parse().unwrap();
         let hint_to: u32 = args[i + 2].parse().unwrap();
@@ -184,6 +198,7 @@ fn main() {
     // eprintln!("file_to_edits={:?}", file_to_edits);
 
     // Replicate the directory structure.
+    let mut reduction_file_count = 0;
     for entry in WalkDir::new(src_path)
         .into_iter()
         .filter_map(Result::ok)
@@ -192,11 +207,14 @@ fn main() {
         let dir_rel = entry.path().strip_prefix(src_path).unwrap();
         if dirs_for_deletion.contains(dir_rel) {
             eprintln!("skipping deleted dir {:?}", dir_rel);
+            reduction_file_count += 1;
             continue;
         }
         let dir_dest = dest_path.join(dir_rel);
         eprintln!("creating dir {:?}", dir_dest);
-        fs::create_dir_all(dir_dest).unwrap();
+        if command == Command::Transform {
+            fs::create_dir_all(dir_dest).unwrap();
+        }
     }
 
     let nest = fs::metadata(src_path).unwrap().is_dir();
@@ -208,6 +226,7 @@ fn main() {
         let path_from = &src_file_paths[file_id];
         if files_for_deletion.contains(&(file_id as u32)) {
             reduction += fs::metadata(path_from).unwrap().len() as i64;
+            reduction_file_count += 1;
             eprintln!("skipping deleted file {:?}", path_from);
             continue;
         }
@@ -216,12 +235,14 @@ fn main() {
                 let canon_path_from = fs::canonicalize(path_from).unwrap();
                 let path_to = &dest_file_paths[file_id];
                 eprintln!("creating symlink at {:?} pointing to {:?}", path_to, canon_path_from);
-                symlink(canon_path_from, path_to).unwrap();
+                if command == Command::Transform {
+                    symlink(canon_path_from, path_to).unwrap();
+                }
             }
             Some(edits) => {
-                reduction += write_edited_file(file_id, edits, dest_path, &src_file_paths, &dest_file_paths);
+                reduction += write_edited_file(&command, file_id, edits, dest_path, &src_file_paths, &dest_file_paths);
             }
         }
     }
-    println!("{}", reduction);
+    println!("{} {}", reduction, reduction_file_count);
 }

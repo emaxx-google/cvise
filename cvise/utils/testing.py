@@ -188,6 +188,8 @@ class TestEnvironment:
             self.new_file_count = get_file_count(self.test_case_path)
             self.new_line_count = get_line_count(self.test_case_path)
             self.duration = time.monotonic() - start_time
+            if isinstance(self.state, list):
+                assert self.size_improvement == self.predicted_improv
             return self
         except OSError as e:
             # this can happen when we clean up temporary files for cancelled processes
@@ -573,6 +575,9 @@ class TestManager:
                 continue
 
             if future.done():
+                if future.job_type == JobType.PASS_TRANSFORM and future.merge_comparison_key is not None:
+                    self.running_merges.remove(future.merge_comparison_key)
+
                 if future.exception():
                     # starting with Python 3.11: concurrent.futures.TimeoutError == TimeoutError
                     if type(future.exception()) in (TimeoutError, concurrent.futures.TimeoutError):
@@ -713,14 +718,6 @@ class TestManager:
         pool.stop()
         pool.join()
 
-    def get_state_comparison_key(self, state, improv, improv_file_count):
-        return -improv, -improv_file_count
-
-    def get_state_compact_repr(self, state):
-        if isinstance(state, list):
-            return frozenset(sorted(self.get_state_compact_repr(s) for s in state))
-        return (state.begin(), state.end())
-
     def get_pass_id_to_init(self):
         pass_id_to_init = None
         meta_pass_id_to_init = None
@@ -774,6 +771,7 @@ class TestManager:
             attempted_merges = set()
             self.failed_merges = []
             pulse_counter = 0
+            self.running_merges = []
 
             while any(self.states) or self.futures:
                 # do not create too many states
@@ -829,17 +827,19 @@ class TestManager:
                             improv = env.size_improvement
                             improv_file_count = env.file_count_improvement
                             # assert improv == self.run_test_case_size - get_file_size(env.test_case_path), f'improv={improv} run_test_case_size={self.run_test_case_size} get_file_size(env.test_case_path)={get_file_size(env.test_case_path)} files={list(env.test_case_path.rglob('*'))}'
+                            if not isinstance(env.state, list):
+                                logging.info(f'on_success_observed: improv={improv} state={env.state} finished_transform_jobs={self.finished_transform_jobs}')
                             if hasattr(pass_, 'on_success_observed'):
                                 pass_.on_success_observed(env.state, improv)
                             self.next_successes_hint.append((env.state, pass_, improv, improv_file_count))
                             self.duration_history.append(env.duration)
-                            comparison_key = self.get_state_comparison_key(env.state, improv, improv_file_count)
+                            comparison_key = get_state_comparison_key(improv, improv_file_count)
                             if best_success_improv is None or comparison_key < best_success_comparison_key:
                                 best_success_env = env
                                 best_success_pass = pass_
                                 best_success_improv = improv
                                 best_success_improv_file_count = improv_file_count
-                                best_success_comparison_key = self.get_state_comparison_key(best_success_env.state, best_success_improv, best_success_improv_file_count)
+                                best_success_comparison_key = get_state_comparison_key(best_success_improv, best_success_improv_file_count)
                                 if self.tmp_for_best:
                                     self.folder_tombstone.append(self.tmp_for_best)
                                 self.tmp_for_best = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}best-')
@@ -877,14 +877,18 @@ class TestManager:
                             best_improv_speed = improv_speed
                         if best_file_count_improv_speed is None or file_count_improv_speed > best_file_count_improv_speed:
                             best_file_count_improv_speed = file_count_improv_speed
-                        duration_factor = (self.finished_transform_jobs - job_counter_when_init_finished) // max(self.parallel_tests, len(self.current_passes))
-                        speed_coeff = 0.95 if duration_factor >= 100 else 0.9 if duration_factor >= 20 else 0.8
-                        if improv_speed <= best_improv_speed * speed_coeff and (improv_speed > 0 or file_count_improv_speed < best_file_count_improv_speed * speed_coeff):
-                            should_proceed = True
+                        if (-improv_speed, -file_count_improv_speed) > multiply_comparison_key((-best_improv_speed, -best_file_count_improv_speed), 0.9):
+                            # logging.info(f'self.running_merges={min(self.running_merges)} vs best_success_comparison_key={best_success_comparison_key}')
+                            if not self.running_merges:
+                                should_proceed = True
+                            elif min(self.running_merges) > multiply_comparison_key(best_success_comparison_key, 1.1):
+                                should_proceed = True
+                            # else:
+                            #     logging.info(f'PROLONGING RUN because of merge train {min(self.running_merges)} vs best_success_comparison_key={best_success_comparison_key}')
 
                     if should_proceed:
                         if logging.getLogger().isEnabledFor(logging.DEBUG):
-                            logging.debug(f'run_parallel_tests: proceeding: finished_jobs={self.finished_transform_jobs} failed_merges={len(self.failed_merges)} order={order} improv={best_success_improv} improv_file_count={best_success_improv_file_count} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} comparison_key={self.get_state_comparison_key(best_success_env.state, best_success_improv, best_success_improv_file_count)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed}')
+                            logging.debug(f'run_parallel_tests: proceeding: finished_jobs={self.finished_transform_jobs} failed_merges={len(self.failed_merges)} order={order} improv={best_success_improv} improv_file_count={best_success_improv_file_count} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} comparison_key={get_state_comparison_key(best_success_improv, best_success_improv_file_count)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed}')
                         transform_futures = list(f for f in self.futures if f.job_type == JobType.PASS_TRANSFORM)
                         for pass_id, state in dict((fu.pass_id, fu.state)
                                                 for fu in sorted(transform_futures, key=lambda fu: -fu.order)
@@ -925,39 +929,42 @@ class TestManager:
                     init_finished_when = now
 
                 state = None
+                is_merge = False
                 if self.finished_transform_jobs % 5 == 0 and len(self.next_successes_hint) >= 2:
                     for attempt in range(10):
                         merge_blocklist = set()
                         for failed_state in self.failed_merges:
                             for s in random.sample(failed_state, (len(failed_state) + 1) // 2):
-                                merge_blocklist.add(self.get_state_compact_repr(s))
+                                merge_blocklist.add(get_state_compact_repr(s))
                         merge_cands = [(sta, pa, imp, imp_fc) for sta, pa, imp, imp_fc in self.next_successes_hint
                                         if hasattr(pa, 'supports_merging') and pa.supports_merging() and not isinstance(sta, list) and
-                                        self.get_state_compact_repr(sta) not in merge_blocklist]
+                                        get_state_compact_repr(sta) not in merge_blocklist]
                         merge_train = []
-                        for sta, pa, imp, imp_fc in sorted(merge_cands, key=lambda item: self.get_state_comparison_key(item[0], item[2], item[3])):
+                        for sta, pa, imp, imp_fc in sorted(merge_cands, key=lambda item: get_state_comparison_key(item[2], item[3])):
                             boardable = True
                             cand_state = [s for s, p, i, ifc in merge_train] + [sta]
-                            if merge_train and (self.get_state_compact_repr(cand_state) in self.failed_merges):
+                            if merge_train and (get_state_compact_repr(cand_state) in self.failed_merges):
                                 boardable = False
                             if boardable:
                                 merge_train.append((sta, pa, imp, imp_fc))
                         merge_comparison_key = None
                         if len(merge_train) >= 2:
+                            merge_pass = merge_train[0][1]
                             merged_state = [sta for sta, pa, imp, imp_fc in merge_train]
-                            merge_improv = sum(imp for sta, pa, imp, imp_fc in merge_train)
-                            merge_improv_file_count = sum(imp_fc for sta, pa, imp, imp_fc in merge_train)
-                            # logging.info(f'run_parallel_tests: merge_train={merge_train} merge_improv={merge_improv} in_attempted={merge_improv in attempted_merges}')
-                            merge_repr = self.get_state_compact_repr([sta for sta, pa, imp, imp_fc in merge_train])
+                            merge_improv, merge_improv_file_count = merge_pass.predict_improv(self.current_test_case, merged_state)
+                            # logging.info(f'run_parallel_tests: merge_train={merge_train} merge_improv={merge_improv} merge_improv_file_count={merge_improv_file_count} in_attempted={merge_improv in attempted_merges}')
+                            merge_repr = get_state_compact_repr([sta for sta, pa, imp, imp_fc in merge_train])
                             if (merge_improv > 0 or merge_improv_file_count > 0) and (merge_repr not in attempted_merges):
                                 pass_id = passes.index(merge_train[0][1])
                                 pass_ = passes[pass_id]
-                                merge_comparison_key = self.get_state_comparison_key(merged_state, merge_improv, merge_improv_file_count)
+                                merge_comparison_key = get_state_comparison_key(merge_improv, merge_improv_file_count)
                                 if merge_comparison_key < best_success_comparison_key:
                                     state = merged_state
+                                    is_merge = True
                                     attempted_merges.add(merge_repr)
                                     should_advance = False
                                     any_merge_started = True
+                                    self.running_merges.append(merge_comparison_key)
                         if state or not self.failed_merges:
                             break
 
@@ -991,6 +998,8 @@ class TestManager:
                         self.pid_queue,
                         lazy_input_copying,
                     )
+                    if isinstance(state, list):
+                        test_env.predicted_improv = merge_improv
                     test_env.is_regular_iteration = should_advance
 
                     new_timeout = self.get_timeout()
@@ -1003,6 +1012,7 @@ class TestManager:
                     future.order = order
                     future.pass_id = pass_id
                     future.state = state
+                    future.merge_comparison_key = merge_comparison_key if is_merge else None
                     self.future_to_pass[future] = pass_
                     assert len(self.future_to_pass) <= self.parallel_tests
                     assert future not in self.temporary_folders
@@ -1346,6 +1356,17 @@ class TestManager:
         logging.info('(' + ', '.join(notes) + ')')
         return True
 
+
+def get_state_comparison_key(improv, improv_file_count):
+    return -improv, -improv_file_count
+
+def multiply_comparison_key(key, factor):
+    return key[0] * factor, key[1] * factor
+
+def get_state_compact_repr(state):
+    if isinstance(state, list):
+        return frozenset(sorted(get_state_compact_repr(s) for s in state))
+    return (state.begin(), state.end())
 
 class SetupEnvironment:
     def __init__(self, pass_, test_case, test_cases, save_temps, last_state_hint, other_init_states):

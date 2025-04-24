@@ -125,7 +125,6 @@ class PolyState(dict):
             self[self.get_type()].end()))
 
     def on_success_observed(self, improv):
-        logging.info(f'on_success_observed: improv={improv} state={self}')
         history = self[self.get_type()].get_success_history(success_histories)
         history.append(self.end() - self.begin())
         self.mark_attempted('success')
@@ -310,6 +309,33 @@ class GenericPass(AbstractPass):
         if not isinstance(state, list):
             state.on_success_observed(improv)
 
+    def get_state_hint_sources(self, test_case, state_list):
+        depth_cache = {}
+        sources = []
+        for s in state_list:
+            begin = s.begin()
+            end = s.end()
+            if s[s.get_type()].tp == 2:
+                if s.get_type() not in depth_cache:
+                    void_state = copy.copy(s[s.get_type()])
+                    void_state.tp = 0
+                    void_state.index = 0
+                    void_state.chunk = 0
+                    void_state.extra_file_path = s.extra_file_path
+                    _files, depth_per_file, instances_per_file, _hints = load_hints([void_state], test_case)
+                    depth_cache[s.get_type()] = depth_per_file, instances_per_file
+                depth_per_file, instances_per_file = depth_cache[s.get_type()]
+                if s.get_type() not in instances_per_file:
+                    return None
+                global_shift = s.shift()
+                assert s.get_type() in instances_per_file, f'type={s.get_type()} begin={begin} end={end} global_shift={global_shift} instances_per_file_keys={list(instances_per_file.keys())}'
+                begin, end = recalc_per_depth_ordering(begin-global_shift, end-global_shift, depth_per_file, instances_per_file[s.get_type()], s[s.get_type()].instances_per_depth)
+                begin += global_shift
+                end += global_shift
+                # logging.info(f'RECALC: old_begin={s.begin()} old_end={s.end()} begin={begin} end={end}')
+            sources.append((s.extra_file_path, begin, end))
+        return sources
+
     def transform(self, test_case, state, process_event_notifier, original_test_case):
         test_case = Path(test_case)
 
@@ -325,44 +351,45 @@ class GenericPass(AbstractPass):
 
         command = [
             self.external_programs['hint_tool'],
-            str(test_case),
+            'transform',
             str(original_test_case),
+            str(test_case),
         ]
-        depth_cache = {}
-        for s in state_list:
-            begin = s.begin()
-            end = s.end()
-            if s[s.get_type()].tp == 2:
-                if s.get_type() not in depth_cache:
-                    void_state = copy.copy(s[s.get_type()])
-                    void_state.tp = 0
-                    void_state.index = 0
-                    void_state.chunk = 0
-                    void_state.extra_file_path = s.extra_file_path
-                    files, depth_per_file, instances_per_file, _hints = load_hints([void_state], test_case)
-                    depth_cache[s.get_type()] = depth_per_file, instances_per_file
-                depth_per_file, instances_per_file = depth_cache[s.get_type()]
-                if s.get_type() not in instances_per_file:
-                    return (PassResult.INVALID, state)
-                global_shift = s.shift()
-                assert s.get_type() in instances_per_file, f'type={s.get_type()} begin={begin} end={end} global_shift={global_shift} instances_per_file_keys={list(instances_per_file.keys())}'
-                begin, end = recalc_per_depth_ordering(s.get_type(), begin-global_shift, end-global_shift, files, depth_per_file, instances_per_file[s.get_type()], s[s.get_type()].instances_per_depth)
-                begin += global_shift
-                end += global_shift
-                # logging.info(f'RECALC: old_begin={s.begin()} old_end={s.end()} begin={begin} end={end}')
-            command += [str(s.extra_file_path), str(begin), str(end)]
+        sources = self.get_state_hint_sources(test_case, state_list)
+        if sources is None:
+            return (PassResult.INVALID, state)
+        for extra_file_path, begin, end in sources:
+            command += [str(extra_file_path), str(begin), str(end)]
         stderr = subprocess.PIPE if logging.getLogger().isEnabledFor(logging.DEBUG) else subprocess.DEVNULL
         try:
             proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=stderr, encoding='utf-8', check=True)
         except subprocess.CalledProcessError as e:
             logging.warning(f'hint_tool failed: command:\n{shlex.join(command)}\nstdout:\n{e.stdout}\nstderr:\n{e.stderr}')
             raise e
-        improv = int(proc.stdout.strip())
+        improv, _improv_file_count = proc.stdout.strip().split()
 
         if logging.getLogger().isEnabledFor(logging.DEBUG):
             logging.debug(f'hint_tool stderr:\n{proc.stderr}')
-        state_list[0].improv = improv
+        state_list[0].improv = int(improv)
         return (PassResult.OK, state)
+
+    def predict_improv(self, test_case, state):
+        test_case = Path(test_case)
+        state_list = state if isinstance(state, list) else [state]
+        command = [
+            self.external_programs['hint_tool'],
+            'dry-run',
+            str(test_case),
+        ]
+        for extra_file_path, begin, end in self.get_state_hint_sources(test_case, state_list):
+            command += [str(extra_file_path), str(begin), str(end)]
+        try:
+            proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', check=True)
+        except subprocess.CalledProcessError as e:
+            logging.warning(f'hint_tool failed: command:\n{shlex.join(command)}\nstdout:\n{e.stdout}\nstderr:\n{e.stderr}')
+            raise e
+        improv, improv_file_count = proc.stdout.strip().split()
+        return int(improv), int(improv_file_count)
 
 def load_hints(state_list, test_case, load_all=False):
     hints_to_load = {}
@@ -395,8 +422,7 @@ def load_hints(state_list, test_case, load_all=False):
                         hints.append(json.loads(line))
     return files, depth_per_file, instances_per_file, hints
 
-def recalc_per_depth_ordering(type, begin, end, files, depth_per_file, instances_per_file, instances_per_depth):
-    old_begin, old_end = begin, end
+def recalc_per_depth_ordering(begin, end, depth_per_file, instances_per_file, instances_per_depth):
     for file_id, _ in sorted(enumerate(depth_per_file), key=lambda i_d: (i_d[1], i_d[0])):
         instances_here = instances_per_file[file_id]
         if begin >= instances_here:
@@ -405,7 +431,6 @@ def recalc_per_depth_ordering(type, begin, end, files, depth_per_file, instances
             continue
         end = min(end, instances_here)
         shift = sum(instances_per_file[:file_id])
-        # logging.info(f'recalc_per_depth_ordering: type={type} old_begin={old_begin} old_end={old_end} new_begin={begin+shift} new_end={end+shift} here={"d" + str(depth_per_file[file_id]) + "i" + str(instances_per_file[file_id]) + "=" + str(files[file_id])} instances_per_depth={instances_per_depth}')
         return begin + shift, end + shift
     assert False
 
