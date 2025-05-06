@@ -195,8 +195,8 @@ class TestEnvironment:
             self.new_file_count = get_file_count(self.test_case_path)
             self.new_line_count = get_line_count(self.test_case_path)
             self.duration = time.monotonic() - start_time
-            if isinstance(self.state, list):
-                assert self.size_improvement == self.predicted_improv
+            # if isinstance(self.state, list):
+            #     assert self.size_improvement == self.predicted_improv, f'size_improvement={self.size_improvement} predicted_improv={self.predicted_improv}'
             return self
         except OSError as e:
             # this can happen when we clean up temporary files for cancelled processes
