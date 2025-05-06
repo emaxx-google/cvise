@@ -1166,7 +1166,6 @@ def generate_delete_file_hints(test_case, files, file_to_id, other_init_states):
     if not test_case.is_dir():
         return []
 
-    assert other_init_states
     states_to_load = [s for s in other_init_states if s]
     if not states_to_load:
         return []
@@ -1223,7 +1222,6 @@ def generate_inline_file_hints(test_case, files, file_to_id, other_init_states):
     if not test_case.is_dir():
         return []
 
-    assert other_init_states
     states_to_load = [s for s in other_init_states if s]
     if not states_to_load:
         return []
@@ -1260,7 +1258,6 @@ def generate_rename_file_hints(test_case, files, file_to_id, other_init_states):
     RND_VOCAB = string.ascii_uppercase + string.digits
     RND_LEN = 3
 
-    assert other_init_states
     states_to_load = [s for s in other_init_states if s]
     if not states_to_load:
         return []
@@ -1306,7 +1303,6 @@ def generate_rename_symbol_hints(test_case, files, file_to_id, other_init_states
     RND_MIN_LEN = 1
     RND_MAX_LEN = 3
 
-    assert other_init_states
     states_to_load = [s for s in other_init_states if s]
     if not states_to_load:
         return []
