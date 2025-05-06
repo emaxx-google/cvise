@@ -43,6 +43,14 @@ def join_to_test_case(test_case, path):
     assert test_case.name == Path(path).name
     return test_case
 
+def is_utf8_file(path):
+    try:
+        with open(path) as f:
+            f.read()
+        return True
+    except UnicodeDecodeError:
+        return False
+
 
 class PolyState(dict):
     def __init__(self):
@@ -785,7 +793,8 @@ def generate_line_hints(test_case, files, file_to_id):
                         })
                         line_start_pos = line_end_pos
                 except UnicodeDecodeError as e:
-                    raise RuntimeError(f'Failure while parsing {file}: {e}')
+                    logging.info(f'Non-text file found: {file}')
+                    # Skip non-UTF files in this heuristic.
     return hints
 
 def generate_clex_hints(test_case, files, file_to_id, clex_arg, external_programs):
@@ -1054,18 +1063,23 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
         hint_type = 'lazypcm' if segs else 'lazypcmwhole'
         with open(file) as f:
             line_start_pos = 0
-            for i, line in enumerate(f):
-                line_end_pos = line_start_pos + len(line)
-                while segptr < len(segs) and segs[segptr][1] < i:
-                    segptr += 1
-                if segptr >= len(segs) or not (segs[segptr][0] <= i <= segs[segptr][1]):
-                    hints.append({
-                        't': hint_type,
-                        'f': file_id,
-                        'l': line_start_pos,
-                        'r': line_end_pos,
-                    })
-                line_start_pos = line_end_pos
+            try:
+                for i, line in enumerate(f):
+                    line_end_pos = line_start_pos + len(line)
+                    while segptr < len(segs) and segs[segptr][1] < i:
+                        segptr += 1
+                    if segptr >= len(segs) or not (segs[segptr][0] <= i <= segs[segptr][1]):
+                        hints.append({
+                            't': hint_type,
+                            'f': file_id,
+                            'l': line_start_pos,
+                            'r': line_end_pos,
+                        })
+                    line_start_pos = line_end_pos
+            except UnicodeDecodeError as e:
+                if segs:
+                    logging.info(f'Non-text file found: {file}')
+                    # Skip non-UTF files in this heuristic.
     return hints
 
 def generate_line_markers_hints(test_case, files, file_to_id):
@@ -1124,7 +1138,7 @@ def generate_tree_sitter_delta_hints(test_case, files, file_to_id, external_prog
     command = [str(external_programs['tree-sitter-delta'])]
     if logging.getLogger().isEnabledFor(logging.DEBUG):
         logging.debug(f'generate_tree_sitter_delta_hints: running: {shlex.join(command)}')
-    paths = '\n'.join(str(f) for f in files)
+    paths = '\n'.join(str(f) for f in files if is_utf8_file(f))
     try:
         out = subprocess.check_output(command, input=paths, stderr=subprocess.PIPE, encoding='utf-8')
     except subprocess.CalledProcessError as e:
