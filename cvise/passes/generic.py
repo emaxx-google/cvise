@@ -558,11 +558,20 @@ def generate_makefile_hints(test_case, files, file_to_id):
                                     'r': mention_pos + len(token),
                                 })
                         elif arg_of_option and arg_of_option[0] in ('-iquote', '-isystem', '-I'):
-                            dir_path = test_case / token
-                            if not dir_path.exists() or not list(dir_path.iterdir()):
+                            incl_path = test_case / token
+                            if not incl_path.exists() or incl_path.is_dir() and not list(incl_path.iterdir()):
                                 hints.append({
                                     'f': makefile_file_id,
                                     't': 'makeincldir',
+                                    'l': arg_of_option[1],
+                                    'r': mention_pos + len(token),
+                                })
+                            elif not incl_path.is_dir() and incl_path in file_to_id:
+                                # Sometimes the flags are (mis)used to point to specific files.
+                                hints.append({
+                                    'f': makefile_file_id,
+                                    't': '#fileref',
+                                    'n': file_to_id[incl_path],
                                     'l': arg_of_option[1],
                                     'r': mention_pos + len(token),
                                 })
