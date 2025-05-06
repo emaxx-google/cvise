@@ -219,6 +219,10 @@ class GenericPass(AbstractPass):
         else:
             raise RuntimeError(f'Unknown hint source: arg={self.arg}')
 
+        if hints is None:
+            # Bail out silently if the pass doesn't support the input format at all.
+            return None
+
         def hint_main_file(h):
             if 'n' in h:
                 return h['n'], files[h['n']]
@@ -850,7 +854,7 @@ def generate_topformflat_hints(test_case, files, file_to_id, depth, external_pro
 
 def generate_clang_delta_hints(test_case, files, file_to_id, transformation, external_programs):
     if test_case.is_dir():
-        return []
+        return None
 
     command = [
         str(external_programs['clang_delta']),
@@ -1084,7 +1088,7 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
 
 def generate_line_markers_hints(test_case, files, file_to_id):
     if test_case.is_dir():
-        return []
+        return None
 
     line_regex = re.compile('^\\s*#\\s*[0-9]+')
     path = files[0]
