@@ -8,6 +8,7 @@ use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 use walkdir::WalkDir;
 
 #[derive(Debug, PartialEq)]
@@ -88,7 +89,7 @@ fn merge_edits(mut edits: Vec<HintLoc>) -> (Vec<HintLoc>, Vec<HintLoc>) {
     (global_edits, merged)
 }
 
-fn write_edited_file(command: &Command, file_id: usize, edits: Vec<HintLoc>, dest_path: &Path, src_file_paths: &Vec<PathBuf>, dest_file_paths: &Vec<PathBuf>) -> i64 {
+fn write_edited_file(command: &Command, file_id: usize, edits: Vec<HintLoc>, dest_path: &Path, src_file_paths: &Vec<PathBuf>, dest_file_paths: &Vec<PathBuf>) -> Option<i64> {
     let read_path = &src_file_paths[file_id];
     let data = fs::read(read_path).unwrap();
 
@@ -96,6 +97,10 @@ fn write_edited_file(command: &Command, file_id: usize, edits: Vec<HintLoc>, des
     let mut ptr = 0;
     let (global_edits, merged_edits) = merge_edits(edits);
     for e in merged_edits {
+        if e.l.unwrap() as usize >= data.len() {
+            eprintln!("error: hint {:?} spans beyond end of file {:?}; file size was {}", e, read_path, data.len());
+            return None;
+        }
         new_data.extend(&data[ptr..e.l.unwrap() as usize]);
         if let Some(v) = e.v {
             new_data.extend(v.as_bytes());
@@ -127,10 +132,10 @@ fn write_edited_file(command: &Command, file_id: usize, edits: Vec<HintLoc>, des
         fs::write(write_path, &new_data).unwrap();
     }
     let reduction = data.len() as i64 - new_data.len() as i64;
-    reduction
+    Some(reduction)
 }
 
-fn main() {
+fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
     let command = match args[1].as_str() {
         "transform" => Command::Transform,
@@ -221,11 +226,11 @@ fn main() {
     let src_file_paths: Vec<PathBuf> = files.iter().map(|f| if nest { src_path.join(&f) } else { src_path.to_path_buf() }).collect();
     let dest_file_paths: Vec<PathBuf> = files.iter().map(|f| if nest { dest_path.join(&f) } else { dest_path.to_path_buf() }).collect();
 
-    let mut reduction = 0;
+    let mut total_reduction = 0;
     for file_id in 0..files.len() {
         let path_from = &src_file_paths[file_id];
         if files_for_deletion.contains(&(file_id as u32)) {
-            reduction += fs::metadata(path_from).unwrap().len() as i64;
+            total_reduction += fs::metadata(path_from).unwrap().len() as i64;
             reduction_file_count += 1;
             eprintln!("skipping deleted file {:?}", path_from);
             continue;
@@ -240,9 +245,14 @@ fn main() {
                 }
             }
             Some(edits) => {
-                reduction += write_edited_file(&command, file_id, edits, dest_path, &src_file_paths, &dest_file_paths);
+                if let Some(reduction) = write_edited_file(&command, file_id, edits, dest_path, &src_file_paths, &dest_file_paths) {
+                    total_reduction += reduction;
+                } else {
+                    return ExitCode::from(1);
+                }
             }
         }
     }
-    println!("{} {}", reduction, reduction_file_count);
+    println!("{} {}", total_reduction, reduction_file_count);
+    ExitCode::from(0)
 }

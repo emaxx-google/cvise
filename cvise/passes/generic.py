@@ -370,12 +370,12 @@ class GenericPass(AbstractPass):
             return (PassResult.INVALID, state)
         for extra_file_path, begin, end in sources:
             command += [str(extra_file_path), str(begin), str(end)]
-        stderr = subprocess.PIPE if logging.getLogger().isEnabledFor(logging.DEBUG) else subprocess.DEVNULL
-        try:
-            proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=stderr, encoding='utf-8', check=True)
-        except subprocess.CalledProcessError as e:
-            logging.warning(f'hint_tool failed: command:\n{shlex.join(command)}\nstdout:\n{e.stdout}\nstderr:\n{e.stderr}')
-            raise e
+        proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
+        if proc.returncode == 1:
+            # Graceful error, e.g., a hint spanning beyond the end-of-file.
+            return (PassResult.INVALID, state)
+        if proc.returncode != 0:
+            raise RuntimeError(f'hint_tool failed: command:\n{shlex.join(command)}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
         improv, _improv_file_count = proc.stdout.strip().split()
 
         if logging.getLogger().isEnabledFor(logging.DEBUG):
@@ -393,11 +393,12 @@ class GenericPass(AbstractPass):
         ]
         for extra_file_path, begin, end in self.get_state_hint_sources(test_case, state_list):
             command += [str(extra_file_path), str(begin), str(end)]
-        try:
-            proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', check=True)
-        except subprocess.CalledProcessError as e:
-            logging.warning(f'hint_tool failed: command:\n{shlex.join(command)}\nstdout:\n{e.stdout}\nstderr:\n{e.stderr}')
-            raise e
+        proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
+        if proc.returncode == 1:
+            # Graceful error, e.g., a hint spanning beyond the end-of-file.
+            return 0, 0
+        if proc.returncode != 0:
+            raise RuntimeError(f'hint_tool failed: command:\n{shlex.join(command)}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
         improv, improv_file_count = proc.stdout.strip().split()
         return int(improv), int(improv_file_count)
 
