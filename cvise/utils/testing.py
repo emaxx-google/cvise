@@ -751,317 +751,324 @@ class TestManager:
         self.future_to_pass = {}
         self.last_finished_order = [None] * len(passes)
         with pebble.ProcessPool(max_workers=self.parallel_tests, context=self.multiproc_context, initializer=worker_initializer, initargs=(self.start_time, logging.getLogger().level,)) as pool:
-            order = 1
-            next_pass_to_schedule = 0
-            pass_job_index = 0
-            self.finished_transform_jobs = 0
-            self.timeout_count = 0
-            self.giveup_reported = False
-            success_cnt = 0
-            best_success_env = None
-            best_success_pass = None
-            best_success_improv = None
-            best_success_improv_file_count = None
-            best_success_comparison_key = None
-            measure_start_time = time.monotonic() if self.last_job_update is None else self.last_job_update
-            best_improv_speed = None
-            best_file_count_improv_speed = None
-            any_merge_started = False
-            self.any_merge_completed = False
-            job_counter_when_init_finished = None
-            init_finished_when = None
+            try:
+                order = 1
+                next_pass_to_schedule = 0
+                pass_job_index = 0
+                self.finished_transform_jobs = 0
+                self.timeout_count = 0
+                self.giveup_reported = False
+                success_cnt = 0
+                best_success_env = None
+                best_success_pass = None
+                best_success_improv = None
+                best_success_improv_file_count = None
+                best_success_comparison_key = None
+                measure_start_time = time.monotonic() if self.last_job_update is None else self.last_job_update
+                best_improv_speed = None
+                best_file_count_improv_speed = None
+                any_merge_started = False
+                self.any_merge_completed = False
+                job_counter_when_init_finished = None
+                init_finished_when = None
 
-            successes = [(s, p, i, ifc) for s, p, i, ifc in self.next_successes_hint if not isinstance(s, list)] + self.successes_hint
-            successes.sort(key=lambda i: (-i[2], -i[3]))
-            self.successes_hint = successes[:self.parallel_tests]
-            self.next_successes_hint = []
-            attempted_merges = set()
-            self.failed_merges = []
-            pulse_counter = 0
-            self.running_merges = []
+                successes = [(s, p, i, ifc) for s, p, i, ifc in self.next_successes_hint if not isinstance(s, list)] + self.successes_hint
+                successes.sort(key=lambda i: (-i[2], -i[3]))
+                self.successes_hint = successes[:self.parallel_tests]
+                self.next_successes_hint = []
+                attempted_merges = set()
+                self.failed_merges = []
+                pulse_counter = 0
+                self.running_merges = []
 
-            while any(self.states) or self.futures:
-                # do not create too many states
-                new_transform_possible = any(s not in (None, 'needinit', 'initializing') for s in self.states)
-                if len(self.futures) >= self.parallel_tests or not new_transform_possible and self.get_pass_id_to_init() is None:
-                    wait(self.futures, return_when=FIRST_COMPLETED)
+                while any(self.states) or self.futures:
+                    # do not create too many states
+                    new_transform_possible = any(s not in (None, 'needinit', 'initializing') for s in self.states)
+                    if len(self.futures) >= self.parallel_tests or not new_transform_possible and self.get_pass_id_to_init() is None:
+                        wait(self.futures, return_when=FIRST_COMPLETED)
 
-                # Occasionally reclaim system resources - just for the case a timed-out worker wasn't terminated
-                # when the future timeout was handled below.
-                self.sweep_children_processes()
+                    # Occasionally reclaim system resources - just for the case a timed-out worker wasn't terminated
+                    # when the future timeout was handled below.
+                    self.sweep_children_processes()
 
-                quit_loop = self.process_done_futures()
-                assert self.finished_transform_jobs <= order
-                if quit_loop and len(self.current_passes) == 1:
-                    if success_cnt > 0:
-                        self.current_pass = best_success_pass
-                        if logging.getLogger().isEnabledFor(logging.DEBUG):
-                            logging.debug(f'run_parallel_tests: proceeding on quit_loop: best improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state}')
-                        self.states[0] = best_success_env.state
-                        self.terminate_all(pool)
-                        return best_success_env
-                    else:
-                        success = self.wait_for_first_success()
-                        if logging.getLogger().isEnabledFor(logging.DEBUG):
-                            logging.debug(f'run_parallel_tests: wait_for_first_success returned {success.state if success else None}')
-                        if success:
-                            self.states[0] = success.state
-                        self.terminate_all(pool)
-                        return success
-
-                now = time.monotonic()
-                self.last_job_update = now
-
-                if self.finished_transform_jobs // 1000 != pulse_counter:
-                    pulse_counter = self.finished_transform_jobs // 1000
-                    logging.info(f'pulse: {pulse_counter * 1000} jobs finished')
-
-                tmp_futures = copy.copy(self.futures)
-                for future in tmp_futures:
-                    if future.done() and not future.exception() and future.job_type == JobType.PASS_TRANSFORM:
-                        env = future.result()
-                        assert env
-                        pass_ = self.future_to_pass[future]
-                        assert pass_
-                        self.current_pass = pass_
-                        if isinstance(env.state, list):
-                            self.any_merge_completed = True
-                        outcome = self.check_pass_result(env)
-                        if outcome == PassCheckingOutcome.ACCEPT:
-                            success_cnt += 1
-                            self.finished_transform_jobs += 1
-                            assert self.finished_transform_jobs <= order
-                            improv = env.size_improvement
-                            improv_file_count = env.file_count_improvement
-                            # assert improv == self.run_test_case_size - get_file_size(env.test_case_path), f'improv={improv} run_test_case_size={self.run_test_case_size} get_file_size(env.test_case_path)={get_file_size(env.test_case_path)} files={list(env.test_case_path.rglob('*'))}'
-                            if not isinstance(env.state, list):
-                                logging.info(f'on_success_observed: improv={improv} state={env.state} finished_transform_jobs={self.finished_transform_jobs}')
-                            if hasattr(pass_, 'on_success_observed'):
-                                pass_.on_success_observed(env.state, improv)
-                            self.next_successes_hint.append((env.state, pass_, improv, improv_file_count))
-                            self.duration_history.append(env.duration)
-                            comparison_key = get_state_comparison_key(improv, improv_file_count)
-                            if best_success_improv is None or comparison_key < best_success_comparison_key:
-                                best_success_env = env
-                                best_success_pass = pass_
-                                best_success_improv = improv
-                                best_success_improv_file_count = improv_file_count
-                                best_success_comparison_key = get_state_comparison_key(best_success_improv, best_success_improv_file_count)
-                                if self.tmp_for_best:
-                                    self.folder_tombstone.append(self.tmp_for_best)
-                                self.tmp_for_best = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}best-')
-                                pa = os.path.join(self.tmp_for_best, os.path.basename(future.result().test_case_path))
-                                if logging.getLogger().isEnabledFor(logging.DEBUG):
-                                    logging.debug(f'run_parallel_tests: rename from {future.result().test_case_path} to {pa}')
-                                os.rename(future.result().test_case_path, pa)
-                                best_success_env.test_case = pa
-                                dbg = []
-                                dbg.append(f'{-improv} byte{"s" if abs(improv) != 1 else ""}')
-                                if improv_file_count:
-                                    dbg.append(f'{-improv_file_count} file{"s" if improv_file_count > 1 else ""}')
-                                if len(self.current_passes) > 1:
-                                    logging.info(f'candidate: {", ".join(dbg)} ({get_heuristic_names_for_log(env.state, pass_)})')
-                            self.release_future(future)
-                            improv_speed = best_success_improv / (now - measure_start_time)
-                            file_count_improv_speed = best_success_improv_file_count / (now - measure_start_time)
+                    quit_loop = self.process_done_futures()
+                    assert self.finished_transform_jobs <= order
+                    if quit_loop and len(self.current_passes) == 1:
+                        if success_cnt > 0:
+                            self.current_pass = best_success_pass
                             if logging.getLogger().isEnabledFor(logging.DEBUG):
-                                logging.debug(f'observed success success_cnt={success_cnt} improv={improv} improv_file_count={improv_file_count} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={self.finished_transform_jobs} failed_merges={len(self.failed_merges)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed} comparison_key={comparison_key}')
-                        elif outcome == PassCheckingOutcome.IGNORE:
-                            if isinstance(env.state, list):
-                                self.failed_merges.append(env.state)
-                        self.current_pass = None
-
-                if self.folder_tombstone:
-                    path = self.folder_tombstone.pop(0)
-                    env = RmFolderEnvironment(path)
-                    future = pool.schedule(env.run)
-                    future.job_type = JobType.RMFOLDER
-                    self.futures.append(future)
-                    continue
-
-                pass_id_to_init = self.get_pass_id_to_init()
-                if pass_id_to_init is not None:
-                    pass_id = pass_id_to_init
-                    pass_ = passes[pass_id]
-                    if logging.getLogger().isEnabledFor(logging.DEBUG):
-                        logging.debug(f'Going to init pass {pass_}')
-                    self.states[pass_id] = 'initializing'
-                    env = SetupEnvironment(pass_, self.current_test_case, self.test_cases, self.save_temps, self.last_state_hint[pass_id], other_init_states=self.init_states)
-                    future = pool.schedule(env.run, timeout=self.setup_timeout)
-                    future.job_type = JobType.PASS_NEW
-                    future.pass_id = pass_id
-                    self.futures.append(future)
-                    order += 1
-                    continue
-                if all(s in ('needinit', 'initializing', None) for s in self.states):
-                    continue
-                if job_counter_when_init_finished is None and all(s not in ('needinit', 'initializing') for s in self.states):
-                    job_counter_when_init_finished = self.finished_transform_jobs
-                    init_finished_when = now
-
-                state = None
-                is_merge = False
-                is_merge_considered = False
-                if self.finished_transform_jobs % 5 == 0:
-                    is_merge_considered = True
-                    if len(self.next_successes_hint) >= 2:
-                        for attempt in range(10):
-                            merge_blocklist = set()
-                            for failed_state in self.failed_merges:
-                                for s in random.sample(failed_state, (len(failed_state) + 1) // 2):
-                                    merge_blocklist.add(get_state_compact_repr(s))
-                            merge_cands = [(sta, pa, imp, imp_fc) for sta, pa, imp, imp_fc in self.next_successes_hint
-                                            if hasattr(pa, 'supports_merging') and pa.supports_merging() and not isinstance(sta, list) and
-                                            get_state_compact_repr(sta) not in merge_blocklist]
-                            merge_train = []
-                            for sta, pa, imp, imp_fc in sorted(merge_cands, key=lambda item: get_state_comparison_key(item[2], item[3])):
-                                boardable = True
-                                cand_state = [s for s, p, i, ifc in merge_train] + [sta]
-                                if merge_train and (get_state_compact_repr(cand_state) in self.failed_merges):
-                                    boardable = False
-                                if boardable:
-                                    merge_train.append((sta, pa, imp, imp_fc))
-                            merge_comparison_key = None
-                            if len(merge_train) >= 2:
-                                merge_pass = merge_train[0][1]
-                                merged_state = [sta for sta, pa, imp, imp_fc in merge_train]
-                                merge_improv, merge_improv_file_count = merge_pass.predict_improv(self.current_test_case, merged_state)
-                                # logging.info(f'run_parallel_tests: merge_train={merge_train} merge_improv={merge_improv} merge_improv_file_count={merge_improv_file_count} in_attempted={merge_improv in attempted_merges}')
-                                merge_repr = get_state_compact_repr([sta for sta, pa, imp, imp_fc in merge_train])
-                                if (merge_improv > 0 or merge_improv_file_count > 0) and (merge_repr not in attempted_merges):
-                                    pass_id = passes.index(merge_train[0][1])
-                                    pass_ = passes[pass_id]
-                                    merge_comparison_key = get_state_comparison_key(merge_improv, merge_improv_file_count)
-                                    if merge_comparison_key < best_success_comparison_key:
-                                        state = merged_state
-                                        is_merge = True
-                                        attempted_merges.add(merge_repr)
-                                        should_advance = False
-                                        any_merge_started = True
-                                        self.running_merges.append(merge_comparison_key)
-                            if state or not self.failed_merges:
-                                break
-
-                if not state and any(s not in ('needinit', 'initializing', None) for s in self.states):
-                    pass_job_index += 1
-                    while pass_job_index >= passes[next_pass_to_schedule].jobs or self.states[next_pass_to_schedule] in ('needinit', 'initializing', None):
-                        pass_job_index = 0
-                        if next_pass_to_schedule + 1 < len(passes):
-                            next_pass_to_schedule += 1
+                                logging.debug(f'run_parallel_tests: proceeding on quit_loop: best improv={best_success_improv} from pass={self.current_pass} state={best_success_env.state}')
+                            self.states[0] = best_success_env.state
+                            self.terminate_all(pool)
+                            return best_success_env
                         else:
-                            next_pass_to_schedule = 0
-                    pass_id = next_pass_to_schedule
-                    state = self.states[pass_id]
-                    should_advance = True
-                    pass_ = passes[pass_id]
+                            success = self.wait_for_first_success()
+                            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                                logging.debug(f'run_parallel_tests: wait_for_first_success returned {success.state if success else None}')
+                            if success:
+                                self.states[0] = success.state
+                            self.terminate_all(pool)
+                            return success
 
-                if state:
-                    tmp_parent_dir = self.roots[pass_id]
-                    folder = Path(tempfile.mkdtemp(f'{self.TEMP_PREFIX}job{order}', dir=tmp_parent_dir))
-                    test_case = self.current_test_case
-                    transform = pass_.transform
-                    lazy_input_copying = hasattr(pass_, 'lazy_input_copying') and pass_.lazy_input_copying()
-                    test_env = TestEnvironment(
-                        state,
-                        order,
-                        self.test_script,
-                        folder,
-                        test_case,
-                        self.test_cases,
-                        transform,
-                        self.pid_queue,
-                        lazy_input_copying,
-                    )
-                    if isinstance(state, list):
-                        test_env.predicted_improv = merge_improv
-                    test_env.is_regular_iteration = should_advance
+                    now = time.monotonic()
+                    self.last_job_update = now
 
-                    new_timeout = self.get_timeout()
-                    if new_timeout != self.timeout:
-                        if logging.getLogger().isEnabledFor(logging.DEBUG):
-                            logging.debug(f'changing timeout: new={new_timeout} old={self.timeout}')
-                        self.timeout = new_timeout
-                    future = pool.schedule(test_env.run, timeout=self.timeout)
-                    future.job_type = JobType.PASS_TRANSFORM
-                    future.order = order
-                    future.pass_id = pass_id
-                    future.state = state
-                    future.merge_comparison_key = merge_comparison_key if is_merge else None
-                    self.future_to_pass[future] = pass_
-                    assert len(self.future_to_pass) <= self.parallel_tests
-                    assert future not in self.temporary_folders
-                    self.temporary_folders[future] = folder
-                    assert len(self.temporary_folders) <= self.parallel_tests
-                    self.futures.append(future)
-                    assert len(self.futures) <= self.parallel_tests
-                    # self.pass_statistic.add_executed(self.current_pass)
-                    order += 1
+                    if self.finished_transform_jobs // 1000 != pulse_counter:
+                        pulse_counter = self.finished_transform_jobs // 1000
+                        logging.info(f'pulse: {pulse_counter * 1000} jobs finished')
 
-                    if should_advance:
-                        old_state = copy.copy(state)
-                        state = pass_.advance(self.current_test_case, state)
-                        # logging.info(f'advance: from {old_state} to {state} pass={pass_}')
-                        self.states[pass_id] = state
-                        self.last_state_hint[pass_id] = state
-                        if state is None and len(passes) == 1:
-                            if success_cnt > 0:
-                                self.current_pass = best_success_pass
+                    tmp_futures = copy.copy(self.futures)
+                    for future in tmp_futures:
+                        if future.done() and not future.exception() and future.job_type == JobType.PASS_TRANSFORM:
+                            env = future.result()
+                            assert env
+                            pass_ = self.future_to_pass[future]
+                            assert pass_
+                            self.current_pass = pass_
+                            if isinstance(env.state, list):
+                                self.any_merge_completed = True
+                            outcome = self.check_pass_result(env)
+                            if outcome == PassCheckingOutcome.ACCEPT:
+                                success_cnt += 1
+                                self.finished_transform_jobs += 1
+                                assert self.finished_transform_jobs <= order
+                                improv = env.size_improvement
+                                improv_file_count = env.file_count_improvement
+                                # assert improv == self.run_test_case_size - get_file_size(env.test_case_path), f'improv={improv} run_test_case_size={self.run_test_case_size} get_file_size(env.test_case_path)={get_file_size(env.test_case_path)} files={list(env.test_case_path.rglob('*'))}'
+                                if not isinstance(env.state, list):
+                                    logging.info(f'on_success_observed: improv={improv} state={env.state} finished_transform_jobs={self.finished_transform_jobs}')
+                                if hasattr(pass_, 'on_success_observed'):
+                                    pass_.on_success_observed(env.state, improv)
+                                self.next_successes_hint.append((env.state, pass_, improv, improv_file_count))
+                                self.duration_history.append(env.duration)
+                                comparison_key = get_state_comparison_key(improv, improv_file_count)
+                                if best_success_improv is None or comparison_key < best_success_comparison_key:
+                                    best_success_env = env
+                                    best_success_pass = pass_
+                                    best_success_improv = improv
+                                    best_success_improv_file_count = improv_file_count
+                                    best_success_comparison_key = get_state_comparison_key(best_success_improv, best_success_improv_file_count)
+                                    if self.tmp_for_best:
+                                        self.folder_tombstone.append(self.tmp_for_best)
+                                    self.tmp_for_best = tempfile.mkdtemp(prefix=f'{self.TEMP_PREFIX}best-')
+                                    pa = os.path.join(self.tmp_for_best, os.path.basename(future.result().test_case_path))
+                                    if logging.getLogger().isEnabledFor(logging.DEBUG):
+                                        logging.debug(f'run_parallel_tests: rename from {future.result().test_case_path} to {pa}')
+                                    os.rename(future.result().test_case_path, pa)
+                                    best_success_env.test_case = pa
+                                    dbg = []
+                                    dbg.append(f'{-improv} byte{"s" if abs(improv) != 1 else ""}')
+                                    if improv_file_count:
+                                        dbg.append(f'{-improv_file_count} file{"s" if improv_file_count > 1 else ""}')
+                                    if len(self.current_passes) > 1:
+                                        logging.info(f'candidate: {", ".join(dbg)} ({get_heuristic_names_for_log(env.state, pass_)})')
+                                self.release_future(future)
+                                improv_speed = best_success_improv / (now - measure_start_time)
+                                file_count_improv_speed = best_success_improv_file_count / (now - measure_start_time)
                                 if logging.getLogger().isEnabledFor(logging.DEBUG):
-                                    logging.debug(f'run_parallel_tests: proceeding on end state with best: improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={self.current_pass} state={best_success_env.state}')
-                                self.states[0] = best_success_env.state
-                                self.terminate_all(pool)
-                                return best_success_env
+                                    logging.debug(f'observed success success_cnt={success_cnt} improv={improv} improv_file_count={improv_file_count} is_regular_iteration={env.is_regular_iteration} pass={pass_} state={env.state} order={env.order} finished_jobs={self.finished_transform_jobs} failed_merges={len(self.failed_merges)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed} comparison_key={comparison_key}')
+                            elif outcome == PassCheckingOutcome.IGNORE:
+                                if isinstance(env.state, list):
+                                    self.failed_merges.append(env.state)
+                            self.current_pass = None
+
+                    if self.folder_tombstone:
+                        path = self.folder_tombstone.pop(0)
+                        env = RmFolderEnvironment(path)
+                        future = pool.schedule(env.run)
+                        future.job_type = JobType.RMFOLDER
+                        self.futures.append(future)
+                        continue
+
+                    pass_id_to_init = self.get_pass_id_to_init()
+                    if pass_id_to_init is not None:
+                        pass_id = pass_id_to_init
+                        pass_ = passes[pass_id]
+                        if logging.getLogger().isEnabledFor(logging.DEBUG):
+                            logging.debug(f'Going to init pass {pass_}')
+                        self.states[pass_id] = 'initializing'
+                        env = SetupEnvironment(pass_, self.current_test_case, self.test_cases, self.save_temps, self.last_state_hint[pass_id], other_init_states=self.init_states)
+                        future = pool.schedule(env.run, timeout=self.setup_timeout)
+                        future.job_type = JobType.PASS_NEW
+                        future.pass_id = pass_id
+                        self.futures.append(future)
+                        order += 1
+                        continue
+                    if all(s in ('needinit', 'initializing', None) for s in self.states):
+                        continue
+                    if job_counter_when_init_finished is None and all(s not in ('needinit', 'initializing') for s in self.states):
+                        job_counter_when_init_finished = self.finished_transform_jobs
+                        init_finished_when = now
+
+                    state = None
+                    is_merge = False
+                    is_merge_considered = False
+                    if self.finished_transform_jobs % 5 == 0:
+                        is_merge_considered = True
+                        if len(self.next_successes_hint) >= 2:
+                            for attempt in range(10):
+                                merge_blocklist = set()
+                                for failed_state in self.failed_merges:
+                                    for s in random.sample(failed_state, (len(failed_state) + 1) // 2):
+                                        merge_blocklist.add(get_state_compact_repr(s))
+                                merge_cands = [(sta, pa, imp, imp_fc) for sta, pa, imp, imp_fc in self.next_successes_hint
+                                                if hasattr(pa, 'supports_merging') and pa.supports_merging() and not isinstance(sta, list) and
+                                                get_state_compact_repr(sta) not in merge_blocklist]
+                                merge_train = []
+                                for sta, pa, imp, imp_fc in sorted(merge_cands, key=lambda item: get_state_comparison_key(item[2], item[3])):
+                                    boardable = True
+                                    cand_state = [s for s, p, i, ifc in merge_train] + [sta]
+                                    if merge_train and (get_state_compact_repr(cand_state) in self.failed_merges):
+                                        boardable = False
+                                    if boardable:
+                                        merge_train.append((sta, pa, imp, imp_fc))
+                                merge_comparison_key = None
+                                if len(merge_train) >= 2:
+                                    merge_pass = merge_train[0][1]
+                                    merged_state = [sta for sta, pa, imp, imp_fc in merge_train]
+                                    merge_improv, merge_improv_file_count = merge_pass.predict_improv(self.current_test_case, merged_state)
+                                    # logging.info(f'run_parallel_tests: merge_train={merge_train} merge_improv={merge_improv} merge_improv_file_count={merge_improv_file_count} in_attempted={merge_improv in attempted_merges}')
+                                    merge_repr = get_state_compact_repr([sta for sta, pa, imp, imp_fc in merge_train])
+                                    if (merge_improv > 0 or merge_improv_file_count > 0) and (merge_repr not in attempted_merges):
+                                        pass_id = passes.index(merge_train[0][1])
+                                        pass_ = passes[pass_id]
+                                        merge_comparison_key = get_state_comparison_key(merge_improv, merge_improv_file_count)
+                                        if merge_comparison_key < best_success_comparison_key:
+                                            state = merged_state
+                                            is_merge = True
+                                            attempted_merges.add(merge_repr)
+                                            should_advance = False
+                                            any_merge_started = True
+                                            self.running_merges.append(merge_comparison_key)
+                                if state or not self.failed_merges:
+                                    break
+
+                    if not state and any(s not in ('needinit', 'initializing', None) for s in self.states):
+                        pass_job_index += 1
+                        while pass_job_index >= passes[next_pass_to_schedule].jobs or self.states[next_pass_to_schedule] in ('needinit', 'initializing', None):
+                            pass_job_index = 0
+                            if next_pass_to_schedule + 1 < len(passes):
+                                next_pass_to_schedule += 1
                             else:
-                                success = self.wait_for_first_success()
-                                if logging.getLogger().isEnabledFor(logging.DEBUG):
-                                    logging.debug(f'run_parallel_tests: proceeding on end after wait_for_first_success: state={success.state if success else None}')
-                                if success:
-                                    self.states[0] = success.state
-                                self.terminate_all(pool)
-                                return success
+                                next_pass_to_schedule = 0
+                        pass_id = next_pass_to_schedule
+                        state = self.states[pass_id]
+                        should_advance = True
+                        pass_ = passes[pass_id]
 
-                if success_cnt > 0 and is_merge_considered:
-                    improv_speed = best_success_improv / (now - measure_start_time)
-                    file_count_improv_speed = best_success_improv_file_count / (now - measure_start_time)
-                    should_proceed = not self.futures or len(self.current_passes) == 1
-                    if not should_proceed and job_counter_when_init_finished is not None and \
-                        self.finished_transform_jobs - job_counter_when_init_finished > max(self.parallel_tests, len(self.current_passes)) * 5 and \
-                            (not any_merge_started or self.any_merge_completed) and now - init_finished_when >= 10:
-                        if best_improv_speed is None or improv_speed > best_improv_speed:
-                            if logging.getLogger().isEnabledFor(logging.DEBUG):
-                                logging.debug(f'run_parallel_tests: new best_improv_speed={improv_speed} old={best_improv_speed}')
-                            best_improv_speed = improv_speed
-                        if best_file_count_improv_speed is None or file_count_improv_speed > best_file_count_improv_speed:
-                            best_file_count_improv_speed = file_count_improv_speed
-                        if (-improv_speed, -file_count_improv_speed) > multiply_comparison_key((-best_improv_speed, -best_file_count_improv_speed), 0.9):
-                            # logging.info(f'self.running_merges={min(self.running_merges)} vs best_success_comparison_key={best_success_comparison_key}')
-                            if not self.running_merges:
-                                should_proceed = True
-                            elif min(self.running_merges) > multiply_comparison_key(best_success_comparison_key, 1.1):
-                                should_proceed = True
-                            # else:
-                            #     logging.info(f'PROLONGING RUN because of merge train {min(self.running_merges)} vs best_success_comparison_key={best_success_comparison_key}')
+                    if state:
+                        tmp_parent_dir = self.roots[pass_id]
+                        folder = Path(tempfile.mkdtemp(f'{self.TEMP_PREFIX}job{order}', dir=tmp_parent_dir))
+                        test_case = self.current_test_case
+                        transform = pass_.transform
+                        lazy_input_copying = hasattr(pass_, 'lazy_input_copying') and pass_.lazy_input_copying()
+                        test_env = TestEnvironment(
+                            state,
+                            order,
+                            self.test_script,
+                            folder,
+                            test_case,
+                            self.test_cases,
+                            transform,
+                            self.pid_queue,
+                            lazy_input_copying,
+                        )
+                        if isinstance(state, list):
+                            test_env.predicted_improv = merge_improv
+                        test_env.is_regular_iteration = should_advance
 
-                    if should_proceed:
-                        if logging.getLogger().isEnabledFor(logging.DEBUG):
-                            logging.debug(f'run_parallel_tests: proceeding: finished_jobs={self.finished_transform_jobs} failed_merges={len(self.failed_merges)} order={order} improv={best_success_improv} improv_file_count={best_success_improv_file_count} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} comparison_key={get_state_comparison_key(best_success_improv, best_success_improv_file_count)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed}')
-                        transform_futures = list(f for f in self.futures if f.job_type == JobType.PASS_TRANSFORM)
-                        for pass_id, state in dict((fu.pass_id, fu.state)
-                                                for fu in sorted(transform_futures, key=lambda fu: -fu.order)
-                                                if not isinstance(fu.pass_id, list) and
-                                                   fu.order > (self.last_finished_order[fu.pass_id] or 0)).items():
+                        new_timeout = self.get_timeout()
+                        if new_timeout != self.timeout:
                             if logging.getLogger().isEnabledFor(logging.DEBUG):
-                                logging.debug(f'run_parallel_tests: rewinding {passes[pass_id]} from {self.states[pass_id]} to {state}')
+                                logging.debug(f'changing timeout: new={new_timeout} old={self.timeout}')
+                            self.timeout = new_timeout
+                        future = pool.schedule(test_env.run, timeout=self.timeout)
+                        future.job_type = JobType.PASS_TRANSFORM
+                        future.order = order
+                        future.pass_id = pass_id
+                        future.state = state
+                        future.merge_comparison_key = merge_comparison_key if is_merge else None
+                        self.future_to_pass[future] = pass_
+                        assert len(self.future_to_pass) <= self.parallel_tests
+                        assert future not in self.temporary_folders
+                        self.temporary_folders[future] = folder
+                        assert len(self.temporary_folders) <= self.parallel_tests
+                        self.futures.append(future)
+                        assert len(self.futures) <= self.parallel_tests
+                        # self.pass_statistic.add_executed(self.current_pass)
+                        order += 1
+
+                        if should_advance:
+                            old_state = copy.copy(state)
+                            state = pass_.advance(self.current_test_case, state)
+                            # logging.info(f'advance: from {old_state} to {state} pass={pass_}')
                             self.states[pass_id] = state
-                        self.terminate_all(pool)
-                        return best_success_env
+                            self.last_state_hint[pass_id] = state
+                            if state is None and len(passes) == 1:
+                                if success_cnt > 0:
+                                    self.current_pass = best_success_pass
+                                    if logging.getLogger().isEnabledFor(logging.DEBUG):
+                                        logging.debug(f'run_parallel_tests: proceeding on end state with best: improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={self.current_pass} state={best_success_env.state}')
+                                    self.states[0] = best_success_env.state
+                                    self.terminate_all(pool)
+                                    return best_success_env
+                                else:
+                                    success = self.wait_for_first_success()
+                                    if logging.getLogger().isEnabledFor(logging.DEBUG):
+                                        logging.debug(f'run_parallel_tests: proceeding on end after wait_for_first_success: state={success.state if success else None}')
+                                    if success:
+                                        self.states[0] = success.state
+                                    self.terminate_all(pool)
+                                    return success
 
-            # we are at the end of enumeration
-            self.current_pass = best_success_pass
-            self.terminate_all(pool)
-            if logging.getLogger().isEnabledFor(logging.DEBUG):
-                logging.debug(f'TestManager.run_parallel_tests: }}END: end of enumeration')
-            return best_success_env
+                    if success_cnt > 0 and is_merge_considered:
+                        improv_speed = best_success_improv / (now - measure_start_time)
+                        file_count_improv_speed = best_success_improv_file_count / (now - measure_start_time)
+                        should_proceed = not self.futures or len(self.current_passes) == 1
+                        if not should_proceed and job_counter_when_init_finished is not None and \
+                            self.finished_transform_jobs - job_counter_when_init_finished > max(self.parallel_tests, len(self.current_passes)) * 5 and \
+                                (not any_merge_started or self.any_merge_completed) and now - init_finished_when >= 10:
+                            if best_improv_speed is None or improv_speed > best_improv_speed:
+                                if logging.getLogger().isEnabledFor(logging.DEBUG):
+                                    logging.debug(f'run_parallel_tests: new best_improv_speed={improv_speed} old={best_improv_speed}')
+                                best_improv_speed = improv_speed
+                            if best_file_count_improv_speed is None or file_count_improv_speed > best_file_count_improv_speed:
+                                best_file_count_improv_speed = file_count_improv_speed
+                            if (-improv_speed, -file_count_improv_speed) > multiply_comparison_key((-best_improv_speed, -best_file_count_improv_speed), 0.9):
+                                # logging.info(f'self.running_merges={min(self.running_merges)} vs best_success_comparison_key={best_success_comparison_key}')
+                                if not self.running_merges:
+                                    should_proceed = True
+                                elif min(self.running_merges) > multiply_comparison_key(best_success_comparison_key, 1.1):
+                                    should_proceed = True
+                                # else:
+                                #     logging.info(f'PROLONGING RUN because of merge train {min(self.running_merges)} vs best_success_comparison_key={best_success_comparison_key}')
+
+                        if should_proceed:
+                            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                                logging.debug(f'run_parallel_tests: proceeding: finished_jobs={self.finished_transform_jobs} failed_merges={len(self.failed_merges)} order={order} improv={best_success_improv} improv_file_count={best_success_improv_file_count} is_regular_iteration={best_success_env.is_regular_iteration} from pass={best_success_pass} state={best_success_env.state} comparison_key={get_state_comparison_key(best_success_improv, best_success_improv_file_count)} improv_speed={improv_speed} file_count_improv_speed={file_count_improv_speed} best_improv_speed={best_improv_speed} best_file_count_improv_speed={best_file_count_improv_speed}')
+                            transform_futures = list(f for f in self.futures if f.job_type == JobType.PASS_TRANSFORM)
+                            for pass_id, state in dict((fu.pass_id, fu.state)
+                                                    for fu in sorted(transform_futures, key=lambda fu: -fu.order)
+                                                    if not isinstance(fu.pass_id, list) and
+                                                    fu.order > (self.last_finished_order[fu.pass_id] or 0)).items():
+                                if logging.getLogger().isEnabledFor(logging.DEBUG):
+                                    logging.debug(f'run_parallel_tests: rewinding {passes[pass_id]} from {self.states[pass_id]} to {state}')
+                                self.states[pass_id] = state
+                            self.terminate_all(pool)
+                            return best_success_env
+
+                # we are at the end of enumeration
+                self.current_pass = best_success_pass
+                self.terminate_all(pool)
+                if logging.getLogger().isEnabledFor(logging.DEBUG):
+                    logging.debug(f'TestManager.run_parallel_tests: }}END: end of enumeration')
+                return best_success_env
+
+            except Exception as e:
+                logging.info('Exception caught, aborting the pool')
+                self.terminate_all(pool)
+                self.sweep_children_processes()
+                raise
 
     def run_pass(self, pass_):
         if self.start_with_pass:
