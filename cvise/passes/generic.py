@@ -937,7 +937,7 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id, external_pr
                 logging.info(f'Error: discovered #include from "{from_file}" (line {from_line}) to the file "{to_file}" that is outside both the test case {test_case} and the resource dir {resource_dir}; the command was: {shlex.join(command)}')
                 assert False
                 continue
-            to_file = test_case / to_file.relative_to(abs_test_case)
+            to_file = test_case / to_file.resolve().relative_to(abs_test_case)
             assert to_file in file_to_id, f'to_file={to_file} file_to_id={file_to_id}'
 
             if not from_file.is_absolute():
@@ -953,7 +953,7 @@ def generate_inclusion_directive_hints(test_case, files, file_to_id, external_pr
                 logging.info(f'Discovered #include from file "{from_file}" (line {from_line} to file "{to_file}") that is outside both the test case {test_case} and the resource dir {resource_dir}; the command was: {shlex.join(command)}')
                 assert False
                 continue
-            from_file = test_case / from_file.relative_to(abs_test_case)
+            from_file = test_case / from_file.resolve().relative_to(abs_test_case)
             assert from_file in file_to_id, f'from_file={from_file} file_to_id={file_to_id} line="{line}"'
 
             from_line = int(from_line) - 1
