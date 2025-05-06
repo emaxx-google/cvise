@@ -51,6 +51,9 @@ def is_utf8_file(path):
     except UnicodeDecodeError:
         return False
 
+def is_hint_meta_type(t):
+    return t.startswith('#')
+
 
 class PolyState(dict):
     def __init__(self):
@@ -91,7 +94,7 @@ class PolyState(dict):
         wrapped_around = False
         while True:
             new.ptr += 1
-            while new.ptr < len(new.types) and (new.get_type().startswith('#') or not new[new.get_type()]):
+            while new.ptr < len(new.types) and (is_hint_meta_type(new.get_type()) or not new[new.get_type()]):
                 new.ptr += 1
             if new.ptr == len(new.types):
                 if wrapped_around:
@@ -303,6 +306,7 @@ class GenericPass(AbstractPass):
             state.extra_file_path = self.extra_file_path
             for tp in state.types:
                 state[tp].instances_per_depth = instances_per_depth.get(tp, [])
+            state.has_meta_hints = any(is_hint_meta_type(h['t']) for h in hints)
 
         logging.info(f'Generated hints for arg={self.arg}: {instances}')
 
@@ -797,7 +801,7 @@ def generate_line_hints(test_case, files, file_to_id):
                         })
                         line_start_pos = line_end_pos
                 except UnicodeDecodeError as e:
-                    logging.info(f'Non-text file found: {file}')
+                    logging.info(f'Non-UTF8 file found: {file}')
                     # Skip non-UTF files in this heuristic.
     return hints
 
@@ -1082,7 +1086,7 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
                     line_start_pos = line_end_pos
             except UnicodeDecodeError as e:
                 if segs:
-                    logging.info(f'Non-text file found: {file}')
+                    logging.info(f'Non-UTF8 file found: {file}')
                     # Skip non-UTF files in this heuristic.
     return hints
 

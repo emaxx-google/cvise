@@ -887,7 +887,8 @@ class TestManager:
                         if logging.getLogger().isEnabledFor(logging.DEBUG):
                             logging.debug(f'Going to init pass {pass_}')
                         self.states[pass_id] = 'initializing'
-                        env = SetupEnvironment(pass_, self.current_test_case, self.test_cases, self.save_temps, self.last_state_hint[pass_id], other_init_states=self.init_states)
+                        other_init_states = [s for s in self.init_states if s is not None and hasattr(s, 'has_meta_hints') and s.has_meta_hints]
+                        env = SetupEnvironment(pass_, self.current_test_case, self.test_cases, self.save_temps, self.last_state_hint[pass_id], other_init_states=other_init_states)
                         future = pool.schedule(env.run, timeout=self.setup_timeout)
                         future.job_type = JobType.PASS_NEW
                         future.pass_id = pass_id
