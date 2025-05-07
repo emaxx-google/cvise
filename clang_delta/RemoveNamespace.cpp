@@ -938,7 +938,12 @@ void RemoveNamespace::handleOneNamedDecl(const NamedDecl *ND,
         IsUserLiteral = true;
     }
 
-    TransAssert(IdInfo && "Invalid IdentifierInfo!");
+    if (!IdInfo) {
+      // A decl without an identifier, e.g., in case of "deduction guide for
+      // integer_sequence".
+      return;
+    }
+    // TransAssert(IdInfo && "Invalid IdentifierInfo!");
     NewName += IdInfo->getName();
     // Make sure we have valid suffix for user literals
 #if LLVM_VERSION_MAJOR < 18
