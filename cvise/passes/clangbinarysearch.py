@@ -116,6 +116,9 @@ class ClangBinarySearchPass(AbstractPass):
             self.parse_stderr(state, stderr)
             tmp_file.write(stdout)
             tmp_file.close()
+            if returncode == 0 and not hasattr(state, 'real_num_instances'):
+                logging.warning(f'Unexpected stderr in {self.arg}: {stderr}')
+                return PassResult.ERROR, state
             if returncode == 0:
                 shutil.copy(tmp_file.name, test_case)
                 return (PassResult.OK, state)
