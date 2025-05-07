@@ -15,7 +15,6 @@
    {"pass": "generic", "arg": "topformflat::10"},
    {"pass": "generic", "arg": "clang_delta::replace-function-def-with-decl"},
    {"pass": "generic", "arg": "clang_delta::remove-unused-function"},
-   {"pass": "generic", "arg": "tree_sitter_delta"},
    {"pass": "generic", "arg": "meta::delete-file"}
 ],
 "parallel::main": [

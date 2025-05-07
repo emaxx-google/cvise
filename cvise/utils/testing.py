@@ -904,7 +904,7 @@ class TestManager:
                     state = None
                     is_merge = False
                     is_merge_considered = False
-                    if self.finished_transform_jobs % 5 == 0:
+                    if self.finished_transform_jobs % 5 == 0 and False:  # TEMP!!
                         is_merge_considered = True
                         if len(self.next_successes_hint) >= 2:
                             for attempt in range(10):
@@ -944,88 +944,93 @@ class TestManager:
                                 if state or not self.failed_merges:
                                     break
 
-                    if not state and any(s not in ('needinit', 'initializing', None) for s in self.states):
-                        pass_job_index += 1
-                        while pass_job_index >= passes[next_pass_to_schedule].jobs or self.states[next_pass_to_schedule] in ('needinit', 'initializing', None):
-                            pass_job_index = 0
-                            if next_pass_to_schedule + 1 < len(passes):
-                                next_pass_to_schedule += 1
-                            else:
-                                next_pass_to_schedule = 0
-                        pass_id = next_pass_to_schedule
-                        state = self.states[pass_id]
-                        should_advance = True
-                        pass_ = passes[pass_id]
+                    proceed_with_success = success_cnt > 0 and job_counter_when_init_finished is not None and self.finished_transform_jobs - job_counter_when_init_finished >= 2 * len(passes)
+                    if not proceed_with_success:  # TEMP!!
 
-                    if state:
-                        tmp_parent_dir = self.roots[pass_id]
-                        folder = Path(tempfile.mkdtemp(f'{self.TEMP_PREFIX}job{order}', dir=tmp_parent_dir))
-                        test_case = self.current_test_case
-                        transform = pass_.transform
-                        lazy_input_copying = hasattr(pass_, 'lazy_input_copying') and pass_.lazy_input_copying()
-                        test_env = TestEnvironment(
-                            state,
-                            order,
-                            self.test_script,
-                            folder,
-                            test_case,
-                            self.test_cases,
-                            transform,
-                            self.pid_queue,
-                            lazy_input_copying,
-                        )
-                        if isinstance(state, list):
-                            test_env.predicted_improv = merge_improv
-                        test_env.is_regular_iteration = should_advance
-
-                        new_timeout = self.get_timeout()
-                        if new_timeout != self.timeout:
-                            if logging.getLogger().isEnabledFor(logging.DEBUG):
-                                logging.debug(f'changing timeout: new={new_timeout} old={self.timeout}')
-                            self.timeout = new_timeout
-                        future = pool.schedule(test_env.run, timeout=self.timeout)
-                        future.job_type = JobType.PASS_TRANSFORM
-                        future.order = order
-                        future.pass_id = pass_id
-                        future.state = state
-                        future.merge_comparison_key = merge_comparison_key if is_merge else None
-                        self.future_to_pass[future] = pass_
-                        assert len(self.future_to_pass) <= self.parallel_tests
-                        assert future not in self.temporary_folders
-                        self.temporary_folders[future] = folder
-                        assert len(self.temporary_folders) <= self.parallel_tests
-                        self.futures.append(future)
-                        assert len(self.futures) <= self.parallel_tests
-                        # self.pass_statistic.add_executed(self.current_pass)
-                        order += 1
-
-                        if should_advance:
-                            old_state = copy.copy(state)
-                            state = pass_.advance(self.current_test_case, state)
-                            # logging.info(f'advance: from {old_state} to {state} pass={pass_}')
-                            self.states[pass_id] = state
-                            self.last_state_hint[pass_id] = state
-                            if state is None and len(passes) == 1:
-                                if success_cnt > 0:
-                                    self.current_pass = best_success_pass
-                                    if logging.getLogger().isEnabledFor(logging.DEBUG):
-                                        logging.debug(f'run_parallel_tests: proceeding on end state with best: improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={self.current_pass} state={best_success_env.state}')
-                                    self.states[0] = best_success_env.state
-                                    self.terminate_all(pool)
-                                    return best_success_env
+                        if not state and any(s not in ('needinit', 'initializing', None) for s in self.states):
+                            pass_job_index += 1
+                            while pass_job_index >= passes[next_pass_to_schedule].jobs or self.states[next_pass_to_schedule] in ('needinit', 'initializing', None):
+                                pass_job_index = 0
+                                if next_pass_to_schedule + 1 < len(passes):
+                                    next_pass_to_schedule += 1
                                 else:
-                                    success = self.wait_for_first_success()
-                                    if logging.getLogger().isEnabledFor(logging.DEBUG):
-                                        logging.debug(f'run_parallel_tests: proceeding on end after wait_for_first_success: state={success.state if success else None}')
-                                    if success:
-                                        self.states[0] = success.state
-                                    self.terminate_all(pool)
-                                    return success
+                                    next_pass_to_schedule = 0
+                            pass_id = next_pass_to_schedule
+                            state = self.states[pass_id]
+                            should_advance = True
+                            pass_ = passes[pass_id]
 
-                    if success_cnt > 0 and is_merge_considered:
+                        if state:
+                            tmp_parent_dir = self.roots[pass_id]
+                            folder = Path(tempfile.mkdtemp(f'{self.TEMP_PREFIX}job{order}', dir=tmp_parent_dir))
+                            test_case = self.current_test_case
+                            transform = pass_.transform
+                            lazy_input_copying = hasattr(pass_, 'lazy_input_copying') and pass_.lazy_input_copying()
+                            test_env = TestEnvironment(
+                                state,
+                                order,
+                                self.test_script,
+                                folder,
+                                test_case,
+                                self.test_cases,
+                                transform,
+                                self.pid_queue,
+                                lazy_input_copying,
+                            )
+                            if isinstance(state, list):
+                                test_env.predicted_improv = merge_improv
+                            test_env.is_regular_iteration = should_advance
+
+                            new_timeout = self.get_timeout()
+                            if new_timeout != self.timeout:
+                                if logging.getLogger().isEnabledFor(logging.DEBUG):
+                                    logging.debug(f'changing timeout: new={new_timeout} old={self.timeout}')
+                                self.timeout = new_timeout
+                            future = pool.schedule(test_env.run, timeout=self.timeout)
+                            future.job_type = JobType.PASS_TRANSFORM
+                            future.order = order
+                            future.pass_id = pass_id
+                            future.state = state
+                            future.merge_comparison_key = merge_comparison_key if is_merge else None
+                            self.future_to_pass[future] = pass_
+                            assert len(self.future_to_pass) <= self.parallel_tests
+                            assert future not in self.temporary_folders
+                            self.temporary_folders[future] = folder
+                            assert len(self.temporary_folders) <= self.parallel_tests
+                            self.futures.append(future)
+                            assert len(self.futures) <= self.parallel_tests
+                            # self.pass_statistic.add_executed(self.current_pass)
+                            order += 1
+
+                            if should_advance:
+                                old_state = copy.copy(state)
+                                state = pass_.advance(self.current_test_case, state)
+                                # logging.info(f'advance: from {old_state} to {state} pass={pass_}')
+                                self.states[pass_id] = state
+                                self.last_state_hint[pass_id] = state
+                                if state is None and len(passes) == 1:
+                                    if success_cnt > 0:
+                                        self.current_pass = best_success_pass
+                                        if logging.getLogger().isEnabledFor(logging.DEBUG):
+                                            logging.debug(f'run_parallel_tests: proceeding on end state with best: improv={best_success_improv} is_regular_iteration={best_success_env.is_regular_iteration} from pass={self.current_pass} state={best_success_env.state}')
+                                        self.states[0] = best_success_env.state
+                                        self.terminate_all(pool)
+                                        return best_success_env
+                                    else:
+                                        success = self.wait_for_first_success()
+                                        if logging.getLogger().isEnabledFor(logging.DEBUG):
+                                            logging.debug(f'run_parallel_tests: proceeding on end after wait_for_first_success: state={success.state if success else None}')
+                                        if success:
+                                            self.states[0] = success.state
+                                        self.terminate_all(pool)
+                                        return success
+
+                    # if success_cnt > 0 and is_merge_considered:
+                    if proceed_with_success:  # TEMP!!
                         improv_speed = best_success_improv / (now - measure_start_time)
                         file_count_improv_speed = best_success_improv_file_count / (now - measure_start_time)
                         should_proceed = not self.futures or len(self.current_passes) == 1
+                        should_proceed = True  # TEMP!!
                         if not should_proceed and job_counter_when_init_finished is not None and \
                             self.finished_transform_jobs - job_counter_when_init_finished > max(self.parallel_tests, len(self.current_passes)) * 5 and \
                                 (not any_merge_started or self.any_merge_completed) and now - init_finished_when >= 10:
