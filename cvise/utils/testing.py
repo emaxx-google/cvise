@@ -771,6 +771,7 @@ class TestManager:
                 self.any_merge_completed = False
                 job_counter_when_init_finished = None
                 init_finished_when = None
+                saw_success = [False] * len(passes)
 
                 successes = [(s, p, i, ifc) for s, p, i, ifc in self.next_successes_hint if not isinstance(s, list)] + self.successes_hint
                 successes.sort(key=lambda i: (-i[2], -i[3]))
@@ -842,6 +843,7 @@ class TestManager:
                                 self.next_successes_hint.append((env.state, pass_, improv, improv_file_count))
                                 self.duration_history.append(env.duration)
                                 comparison_key = get_state_comparison_key(improv, improv_file_count)
+                                saw_success[passes.index(pass_)] = True
                                 if best_success_improv is None or comparison_key < best_success_comparison_key:
                                     best_success_env = env
                                     best_success_pass = pass_
@@ -944,7 +946,10 @@ class TestManager:
                                 if state or not self.failed_merges:
                                     break
 
-                    proceed_with_success = success_cnt > 0 and job_counter_when_init_finished is not None and self.finished_transform_jobs - job_counter_when_init_finished >= 2 * len(passes)
+                    proceed_with_success = success_cnt > 0 and (
+                        best_success_improv >= self.run_test_case_size // 100 or
+                        all(self.states[i] is None or saw_success[i] for i in range(len(passes))) or
+                        job_counter_when_init_finished is not None and self.finished_transform_jobs - job_counter_when_init_finished >= 30 * len(passes))
                     if not proceed_with_success:  # TEMP!!
 
                         if not state and any(s not in ('needinit', 'initializing', None) for s in self.states):
