@@ -1,3 +1,24 @@
+cvise (2.11.20250508) plucky; urgency=medium
+
+  Bugfixes:
+  * Fix deadlock: use "forkserver" multiprocessing strategy.
+  * Fix handling of '..' in #include.
+  * Fix handling of files only #include'd by headers in Clang's resource dir.
+  * Fix error when -I/iquote/isystem used with non-dirs.
+  * Work around clangbinarysearch and remove-namespace errors.
+  * Fix removal of EXTRA_CFLAGS from Makefile.
+
+  Improvements:
+  * Obfuscation: file and symbol renaming.
+  * Support non-UTF/non-text files (mostly skip them).
+  * Improve startup time of delfile heuristic.
+  * Better finalization criteria for merge train.
+  * Optimize rm-tok/rm-tok-pattern by disabling binsearch.
+  * New strategy: also try small reductions in files with low #include distance from the root.
+  * Bail out from exceptions/ctrl-c faster.
+
+ -- Maksim Ivanov <emaxx@google.com>  Wed, 09 Apr 2025 12:00:00 +0100
+
 cvise (2.11.20250409) plucky; urgency=medium
 
   * Dynamically adapt timeouts.
