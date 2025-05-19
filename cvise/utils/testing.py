@@ -682,7 +682,7 @@ class TestManager:
                         for path in test_env.test_case_path.rglob('*'):
                             if not path.is_symlink() and not path.is_dir():
                                 orig_path = self.current_test_case / path.relative_to(test_env.test_case_path)
-                                any_change = not filecmp.cmp(path, orig_path)
+                                any_change = not orig_path.exists() or not filecmp.cmp(path, orig_path)
                         for path in self.current_test_case.rglob('*'):
                             dest_path = test_env.test_case_path / path.relative_to(self.current_test_case)
                             if not dest_path.exists():

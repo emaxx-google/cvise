@@ -110,6 +110,10 @@ fn write_edited_file(command: &Command, file_id: usize, edits: Vec<HintLoc>, des
         }
         ptr = e.r.unwrap() as usize;
     }
+    if ptr > data.len() {
+        eprintln!("error: last hint end {} spans beyond end of file {:?}; file size was {}", ptr, read_path, data.len());
+        return None;
+    }
     new_data.extend(&data[ptr..]);
 
     let mut write_path_override = None;

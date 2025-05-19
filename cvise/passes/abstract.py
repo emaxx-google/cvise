@@ -243,7 +243,7 @@ class FuzzyBinaryState(BinaryState):
         if peak is None or peak == 0:
             peak = 1
 
-        chunk_le = 1 if self.tp == 2 else self.chunk
+        chunk_le = 1
         chunk_ri = instances_to_choose
         assert chunk_le <= chunk_ri
         peak = max(peak, chunk_le)
