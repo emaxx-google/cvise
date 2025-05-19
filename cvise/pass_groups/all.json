@@ -72,8 +72,8 @@
    {"pass": "generic", "arg": "clex::rm-tok-pattern-4", "jobs": 32, "exclude": ["slow"]},
    {"pass": "generic", "arg": "meta::delete-file"},
    {"pass": "generic", "arg": "meta::inline-file"},
-   {"pass": "generic", "arg": "meta::rename-file"},
-   {"pass": "generic", "arg": "meta::rename-symbol"}
+   {"pass": "generic", "arg": "meta::rename-file", "renaming": true},
+   {"pass": "generic", "arg": "meta::rename-symbol", "renaming": true}
 ],
 "parallel::last": [
    {"pass": "generic", "arg": "lines"},
