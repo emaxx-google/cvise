@@ -149,7 +149,14 @@ bool TransformationManager::initializeCompilerInstance(std::string &ErrorMsg)
     // ISSUE: it might cause some problems when building AST
     // for a function which has a non-declared callee, e.g.,
     // It results an empty AST for the caller.
-    LangOptions::setLangDefaults(ClangInstance->getLangOpts(), Language::CXX, T, includes, LSTD);
+    // LangOptions::setLangDefaults(ClangInstance->getLangOpts(), Language::CXX, T, includes, LSTD);
+    std::string StdArg = std::string("-std=") + LangStandard::getLangStandardForKind(LSTD).getName();
+    std::vector<const char*> Args;
+    Args.push_back("-xc++");
+    Args.push_back(StdArg.c_str());
+    CompilerInvocation::CreateFromArgs(Invocation,
+                                       Args,
+                                       ClangInstance->getDiagnostics());
   }
   else if(IK.getLanguage() == Language::OpenCL) {
     //Commandline parameters
