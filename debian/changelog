@@ -1,3 +1,8 @@
+cvise (2.11.20250520) plucky; urgency=medium
+
+  Bugfixes:
+  * Fix for cland_delta crash on coroutine code.
+
 cvise (2.11.20250519) plucky; urgency=medium
 
   Bugfixes:
