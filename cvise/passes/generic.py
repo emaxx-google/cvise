@@ -1416,7 +1416,11 @@ def get_ordered_files_list(test_case):
         return [test_case]
 
     files = [f for f in Path(test_case).rglob('*') if not f.is_dir() and not f.is_symlink()]
-    assert all(f.suffix not in ('.pcm', '.o', '.tmp') and f.name != '.ALWAYS' for f in files), f'{files}'
+
+    def is_unexpected_file(f):
+        return f.suffix in ('.pcm', '.o', '.tmp') or f.name == '.ALWAYS'
+    assert all(not is_unexpected_file(f) for f in files), f'Unexpected files found in the input: {", ".join(str(f) for f in files if is_unexpected_file(f))}'
+
     files.sort()
     return files
 
