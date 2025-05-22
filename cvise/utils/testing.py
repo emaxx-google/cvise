@@ -781,7 +781,9 @@ class TestManager:
                 pulse_counter = 0
                 self.running_merges = []
 
-                while any(self.states) or self.futures:
+                while (any(self.states) or self.futures) and not self.skip:
+                    self.maybe_handle_key_presses()
+
                     # do not create too many states
                     new_transform_possible = any(s not in (None, 'needinit', 'initializing') for s in self.states)
                     if len(self.futures) >= self.parallel_tests or not new_transform_possible and self.get_pass_id_to_init() is None:
@@ -1022,27 +1024,30 @@ class TestManager:
                                     self.terminate_all(pool)
                                     return success
 
-                    if success_cnt > 0 and is_merge_considered:
-                        improv_speed = best_success_improv / (now - measure_start_time)
-                        file_count_improv_speed = best_success_improv_file_count / (now - measure_start_time)
-                        should_proceed = not self.futures or len(self.current_passes) == 1
-                        if not should_proceed and job_counter_when_init_finished is not None and \
-                            self.finished_transform_jobs - job_counter_when_init_finished > max(self.parallel_tests, len(self.current_passes)) * 5 and \
-                                (not any_merge_started or self.any_merge_completed) and now - init_finished_when >= 10:
-                            if best_improv_speed is None or improv_speed > best_improv_speed:
-                                if logging.getLogger().isEnabledFor(logging.DEBUG):
-                                    logging.debug(f'run_parallel_tests: new best_improv_speed={improv_speed} old={best_improv_speed}')
-                                best_improv_speed = improv_speed
-                            if best_file_count_improv_speed is None or file_count_improv_speed > best_file_count_improv_speed:
-                                best_file_count_improv_speed = file_count_improv_speed
-                            if (-improv_speed, -file_count_improv_speed) > multiply_comparison_key((-best_improv_speed, -best_file_count_improv_speed), 0.9):
-                                # logging.info(f'self.running_merges={min(self.running_merges)} vs best_success_comparison_key={best_success_comparison_key}')
-                                if not self.running_merges:
-                                    should_proceed = True
-                                elif min(self.running_merges) > multiply_comparison_key(best_success_comparison_key, 1.1):
-                                    should_proceed = True
-                                # else:
-                                #     logging.info(f'PROLONGING RUN because of merge train {min(self.running_merges)} vs best_success_comparison_key={best_success_comparison_key}')
+                    if success_cnt > 0:
+                        should_proceed = self.force_finalize
+                        self.force_finalize = False
+                        if not should_proceed and is_merge_considered:
+                            improv_speed = best_success_improv / (now - measure_start_time)
+                            file_count_improv_speed = best_success_improv_file_count / (now - measure_start_time)
+                            should_proceed = not self.futures or len(self.current_passes) == 1
+                            if not should_proceed and job_counter_when_init_finished is not None and \
+                                self.finished_transform_jobs - job_counter_when_init_finished > max(self.parallel_tests, len(self.current_passes)) * 5 and \
+                                    (not any_merge_started or self.any_merge_completed) and now - init_finished_when >= 10:
+                                if best_improv_speed is None or improv_speed > best_improv_speed:
+                                    if logging.getLogger().isEnabledFor(logging.DEBUG):
+                                        logging.debug(f'run_parallel_tests: new best_improv_speed={improv_speed} old={best_improv_speed}')
+                                    best_improv_speed = improv_speed
+                                if best_file_count_improv_speed is None or file_count_improv_speed > best_file_count_improv_speed:
+                                    best_file_count_improv_speed = file_count_improv_speed
+                                if (-improv_speed, -file_count_improv_speed) > multiply_comparison_key((-best_improv_speed, -best_file_count_improv_speed), 0.9):
+                                    # logging.info(f'self.running_merges={min(self.running_merges)} vs best_success_comparison_key={best_success_comparison_key}')
+                                    if not self.running_merges:
+                                        should_proceed = True
+                                    elif min(self.running_merges) > multiply_comparison_key(best_success_comparison_key, 1.1):
+                                        should_proceed = True
+                                    # else:
+                                    #     logging.info(f'PROLONGING RUN because of merge train {min(self.running_merges)} vs best_success_comparison_key={best_success_comparison_key}')
 
                         if should_proceed:
                             if logging.getLogger().isEnabledFor(logging.DEBUG):
@@ -1070,6 +1075,19 @@ class TestManager:
                 self.terminate_all(pool)
                 self.sweep_children_processes()
                 raise
+
+    def maybe_handle_key_presses(self):
+        if not self.skip_key_off and not self.skip:
+            key = self.key_logger.pressed_key()
+            if key == 's':
+                self.skip = True
+                self.log_key_event('skipping the rest of this pass')
+            elif key == 'd':
+                self.log_key_event('toggle print diff')
+                self.print_diff = not self.print_diff
+            elif key == 'f':
+                self.log_key_event('finalizing the current-best candidate')
+                self.force_finalize = True
 
     def run_pass(self, pass_):
         if self.start_with_pass:
@@ -1101,7 +1119,7 @@ class TestManager:
 
         # self.pass_statistic.start(self.current_pass)
         if not self.skip_key_off:
-            logger = KeyLogger()
+            self.key_logger = KeyLogger()
 
         try:
             for test_case in self.sorted_test_cases:
@@ -1126,19 +1144,12 @@ class TestManager:
                 # create initial state
                 self.states = [self.current_pass.new(self.current_test_case, self.check_sanity)]
                 self.skip = False
+                self.force_finalize = False
                 self.last_job_update = None
 
                 self.timeout_count = 0
                 while self.states[0] is not None and not self.skip:
-                    # Ignore more key presses after skip has been detected
-                    if not self.skip_key_off and not self.skip:
-                        key = logger.pressed_key()
-                        if key == 's':
-                            self.skip = True
-                            self.log_key_event('skipping the rest of this pass')
-                        elif key == 'd':
-                            self.log_key_event('toggle print diff')
-                            self.print_diff = not self.print_diff
+                    self.maybe_handle_key_presses()
 
                     self.run_test_case_size = get_file_size(self.current_test_case)
                     success_env = self.run_parallel_tests(passes=[self.current_pass])
@@ -1214,7 +1225,7 @@ class TestManager:
 
         # self.pass_statistic.start(self.current_pass)
         if not self.skip_key_off:
-            logger = KeyLogger()
+            self.key_logger = KeyLogger()
 
         self.last_state_hint = [None] * len(passes)
         self.successes_hint = []
@@ -1244,18 +1255,11 @@ class TestManager:
                 # create initial state
                 self.init_all_passes(passes)
                 self.skip = False
+                self.force_finalize = False
                 self.last_job_update = None
 
                 while any(self.states) and not self.skip:
-                    # Ignore more key presses after skip has been detected
-                    if not self.skip_key_off and not self.skip:
-                        key = logger.pressed_key()
-                        if key == 's':
-                            self.skip = True
-                            self.log_key_event('skipping the rest of this pass')
-                        elif key == 'd':
-                            self.log_key_event('toggle print diff')
-                            self.print_diff = not self.print_diff
+                    self.maybe_handle_key_presses()
 
                     self.run_test_case_size = get_file_size(self.current_test_case)
                     if logging.getLogger().isEnabledFor(logging.DEBUG):
