@@ -1,12 +1,12 @@
 import atexit
 import copy
 import functools
-import gzip
 import json
 import logging
 import math
 import os
 from pathlib import Path
+import pyzstd
 import random
 import re
 import shlex
@@ -162,7 +162,7 @@ class PolyState(dict):
 class GenericPass(AbstractPass):
     def __init__(self, arg=None, external_programs=None):
         super().__init__(arg, external_programs)
-        self.extra_file_path = tempfile.NamedTemporaryFile(suffix='cviseextra.gz', delete=False).name
+        self.extra_file_path = tempfile.NamedTemporaryFile(prefix='cvise-hints-', suffix='.jsonl.zstd', delete=False).name
         atexit.register(functools.partial(os.unlink, self.extra_file_path))
 
     def check_prerequisites(self):
@@ -283,7 +283,7 @@ class GenericPass(AbstractPass):
                         dbg = contents[c['l']:c['r']].replace('\n', '\\n')
                         logging.debug(f'       DEL {c["l"]}..{c["r"]}: "{dbg}"')
 
-        with gzip.open(self.extra_file_path, 'wt') as f:
+        with pyzstd.open(self.extra_file_path, 'wt') as f:
             f.write(dump_json([str(relative_path(f, test_case)) for f in files]))
             f.write('\n')
             f.write(dump_json(depth_per_file))
@@ -413,7 +413,7 @@ def load_hints(state_list, test_case, load_all=False):
     for extra_file_path, hint_ids in hints_to_load.items():
         min_hint_id = None if load_all or not hint_ids else min(hint_ids)
         max_hint_id = None if load_all or not hint_ids else max(hint_ids)
-        with gzip.open(extra_file_path, 'rt') as f:
+        with pyzstd.open(extra_file_path, 'rt') as f:
             files = json.loads(next(f))
             files = [join_to_test_case(test_case, f) for f in files]
             depth_per_file = json.loads(next(f))

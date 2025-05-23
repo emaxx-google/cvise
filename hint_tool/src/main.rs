@@ -1,4 +1,4 @@
-use flate2::read::GzDecoder;
+use ruzstd;
 use serde::Deserialize;
 use serde_json;
 use std::cmp::max;
@@ -42,7 +42,7 @@ struct Hint {
 
 fn load_hints(path: &str, hint_ids: &HashSet<u32>) -> (Vec<PathBuf>, Vec<Hint>) {
     let file = fs::File::open(path).unwrap();
-    let reader = BufReader::new(GzDecoder::new(file));
+    let reader = BufReader::new(ruzstd::decoding::StreamingDecoder::new(file).unwrap());
     let mut lines = reader.lines();
     let files: Vec<String> = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
     lines.next(); // depth_per_file

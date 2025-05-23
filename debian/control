@@ -14,6 +14,7 @@ Build-Depends: debhelper-compat (= 12),
   python3-pebble,
   python3-psutil,
   python3-pytest <!nocheck>,
+  python3-pyzstd,
   llvm-19-dev, libclang-19-dev, clang-19, clang-format-19,
   unifdef,
 Standards-Version: 4.7.0
