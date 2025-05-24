@@ -267,22 +267,6 @@ class GenericPass(AbstractPass):
                 assert depth_per_file[file_id] < len(instances_per_depth[t])
             instances_per_depth[t][depth_per_file[file_id]] += 1
 
-        if logging.getLogger().isEnabledFor(logging.DEBUG) and False:
-            for hint in hints:
-                logging.debug(f'*** {hint["t"]}')
-                for c in get_hint_locs(hint):
-                    logging.debug(f'    in {files[c["f"]]}:')
-                    with open(files[c["f"]]) as f:
-                        contents = f.read()
-                    if 'v' in c:
-                        dbg1 = contents[max(0, c['l'] - 10): c['l']].replace('\n', '\\n')
-                        dbg2 = contents[c['l']:c['r']].replace('\n', '\\n')
-                        dbg3 = contents[c['r']: min(len(contents), c['r'] + 10)].replace('\n', '\\n')
-                        logging.debug(f'       REP {c["l"]}..{c["r"]} with "{c["v"]}": "{dbg1}" >>> "{dbg2}" <<< "{dbg3}"')
-                    else:
-                        dbg = contents[c['l']:c['r']].replace('\n', '\\n')
-                        logging.debug(f'       DEL {c["l"]}..{c["r"]}: "{dbg}"')
-
         with pyzstd.open(self.extra_file_path, 'wt') as f:
             f.write(dump_json([str(relative_path(f, test_case)) for f in files]))
             f.write('\n')
@@ -1560,3 +1544,19 @@ def merge_chunks(chunks):
         else:
             result.append(c)
     return result
+
+def debug_dump_hints(hints, files):
+    for hint in hints:
+        logging.info(f'*** {hint["t"]}')
+        for c in get_hint_locs(hint):
+            logging.info(f'    in {files[c["f"]]}:')
+            with open(files[c["f"]]) as f:
+                contents = f.read()
+            if 'v' in c:
+                dbg1 = contents[max(0, c['l'] - 10): c['l']].replace('\n', '\\n')
+                dbg2 = contents[c['l']:c['r']].replace('\n', '\\n')
+                dbg3 = contents[c['r']: min(len(contents), c['r'] + 10)].replace('\n', '\\n')
+                logging.info(f'       REP {c["l"]}..{c["r"]} with "{c["v"]}": "{dbg1}" >>> "{dbg2}" <<< "{dbg3}"')
+            else:
+                dbg = contents[c['l']:c['r']].replace('\n', '\\n')
+                logging.info(f'       DEL {c["l"]}..{c["r"]}: "{dbg}"')
