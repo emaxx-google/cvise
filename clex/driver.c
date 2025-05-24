@@ -297,7 +297,7 @@ static void rm_toks(int idx) {
       }
       tok_pos[which % n_toks] = pos;
       if (idx == -1 && which + 1 >= n_toks) {
-        int cut_start = tok_pos[(which + n_toks - 1) % n_toks];
+        int cut_start = tok_pos[(which + 1) % n_toks];
         printf("{\"l\":%d,\"r\":%d}\n", cut_start, end_pos);
       }
       which++;
