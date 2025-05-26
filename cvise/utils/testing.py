@@ -1095,8 +1095,9 @@ class TestManager:
                 self.log_key_event('toggle print diff')
                 self.print_diff = not self.print_diff
             elif key == 'f':
-                self.log_key_event('finalizing the current-best candidate')
-                self.force_finalize = True
+                if not self.force_finalize:
+                    self.log_key_event('finalizing the current-best candidate')
+                    self.force_finalize = True
 
     def run_pass(self, pass_):
         if self.start_with_pass:
