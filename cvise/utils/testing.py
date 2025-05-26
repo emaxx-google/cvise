@@ -783,7 +783,7 @@ class TestManager:
                 pulse_counter = 0
                 self.running_merges = []
 
-                while (any(self.states) or self.futures) and not self.skip:
+                while (any(s is not None for s in self.states) or self.futures) and not self.skip:
                     self.maybe_handle_key_presses()
 
                     # do not create too many states
@@ -908,7 +908,7 @@ class TestManager:
                     state = None
                     is_merge = False
                     is_merge_considered = False
-                    if self.finished_transform_jobs % 5 == 0:
+                    if self.finished_transform_jobs % 5 == 0 and len(self.current_passes) > 1:
                         is_merge_considered = True
                         if len(self.next_successes_hint) >= 2:
                             for attempt in range(10):
@@ -952,10 +952,10 @@ class TestManager:
                                             should_advance = False
                                             any_merge_started = True
                                             self.running_merges.append(merge_comparison_key)
-                                if state or not self.failed_merges:
+                                if state is not None or not self.failed_merges:
                                     break
 
-                    if not state and any(s not in ('needinit', 'initializing', None) for s in self.states):
+                    if state is None and any(s not in ('needinit', 'initializing', None) for s in self.states):
                         pass_job_index += 1
                         while pass_job_index >= passes[next_pass_to_schedule].jobs or self.states[next_pass_to_schedule] in ('needinit', 'initializing', None):
                             pass_job_index = 0
@@ -968,7 +968,7 @@ class TestManager:
                         should_advance = True
                         pass_ = passes[pass_id]
 
-                    if state:
+                    if state is not None:
                         tmp_parent_dir = self.roots[pass_id]
                         folder = Path(tempfile.mkdtemp(f'{self.TEMP_PREFIX}job{order}', dir=tmp_parent_dir))
                         test_case = self.current_test_case
@@ -1267,7 +1267,7 @@ class TestManager:
                 self.force_finalize = False
                 self.last_job_update = None
 
-                while any(self.states) and not self.skip:
+                while any(s is not None for s in self.states) and not self.skip:
                     self.maybe_handle_key_presses()
 
                     self.run_test_case_size = get_file_size(self.current_test_case)
@@ -1370,7 +1370,7 @@ class TestManager:
                 assert self.line_counts[f] == get_line_count(f)
 
         if len(self.current_passes) == 1:
-            assert self.states[0]
+            assert self.states[0] is not None
             self.states[0] = self.current_pass.advance_on_success(test_env.test_case_path, self.states[0])
             # self.pass_statistic.add_success(self.current_pass)
 
