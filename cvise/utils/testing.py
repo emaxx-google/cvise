@@ -44,7 +44,6 @@ sys.path.pop(0)
 pebble.common.SLEEP_UNIT = 0.01
 MAX_PASS_INCREASEMENT_THRESHOLD = 3
 
-
 def get_file_size(path):
     inner_paths = [f for f in Path(path).rglob('*') if not f.is_dir()] if os.path.isdir(path) else [path]
     return sum(f.resolve().stat().st_size for f in inner_paths)
@@ -494,15 +493,16 @@ class TestManager:
 
     @staticmethod
     def diff_files(orig_file, changed_file):
-        with open(orig_file) as f:
-            orig_file_lines = f.readlines()
-
-        with open(changed_file) as f:
-            changed_file_lines = f.readlines()
-
-        diffed_lines = difflib.unified_diff(orig_file_lines, changed_file_lines, str(orig_file), str(changed_file))
-
-        return ''.join(diffed_lines)
+        dest_paths = [f for f in changed_file.rglob('*') if not f.is_dir() and not f.is_symlink()] if changed_file.is_dir() else [changed_file]
+        diffed_lines = []
+        for dest_path in dest_paths:
+            orig_path = orig_file / dest_path.relative_to(changed_file) if orig_file.is_dir() else orig_file
+            with open(orig_path, 'rb') as f:
+                orig_file_lines = f.readlines()
+            with open(dest_path, 'rb') as f:
+                changed_file_lines = f.readlines()
+            diffed_lines += difflib.diff_bytes(difflib.unified_diff, orig_file_lines, changed_file_lines, str(orig_path).encode(), str(dest_path).encode())
+        return ''.join(s.decode(errors='backslashescape') for s in diffed_lines)
 
     def check_sanity(self, verbose=False):
         logging.debug('perform sanity check... ')
