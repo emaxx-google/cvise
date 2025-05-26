@@ -910,13 +910,20 @@ class TestManager:
                         is_merge_considered = True
                         if len(self.next_successes_hint) >= 2:
                             for attempt in range(10):
+                                force_include = set(get_state_compact_repr(s) for s in best_success_env.state) \
+                                    if best_success_env.state and isinstance(best_success_env.state, list) else \
+                                    set([get_state_compact_repr(best_success_env.state)]) if best_success_env else set()
                                 merge_blocklist = set()
                                 for failed_state in self.failed_merges:
-                                    for s in random.sample(failed_state, (len(failed_state) + 1) // 2):
+                                    blocklist_cands = [s for s in failed_state if get_state_compact_repr(s) not in force_include]
+                                    to_block = (len(failed_state) + 1) // 2
+                                    to_block = min(to_block, len(blocklist_cands))
+                                    for s in random.sample(blocklist_cands, to_block):
                                         merge_blocklist.add(get_state_compact_repr(s))
                                 merge_cands = [(sta, pa, imp, imp_fc) for sta, pa, imp, imp_fc in self.next_successes_hint
-                                                if hasattr(pa, 'supports_merging') and pa.supports_merging() and not isinstance(sta, list) and
-                                                get_state_compact_repr(sta) not in merge_blocklist]
+                                                if hasattr(pa, 'supports_merging') and pa.supports_merging() and not isinstance(sta, list)
+                                                and (get_state_compact_repr(sta) not in merge_blocklist or
+                                                     get_state_compact_repr(sta) in force_include)]
                                 merge_train = []
                                 for sta, pa, imp, imp_fc in sorted(merge_cands, key=lambda item: get_state_comparison_key(item[2], item[3])):
                                     boardable = True
