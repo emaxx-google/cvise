@@ -367,6 +367,8 @@ class TestManager:
 
         self.line_counts = {f: get_line_count(f) for f in self.test_cases}
 
+        self.key_logger = None
+
     def get_timeout(self):
         if not self.duration_history:
             return self.timeout
@@ -1125,7 +1127,7 @@ class TestManager:
             raise ZeroSizeError(self.test_cases)
 
         # self.pass_statistic.start(self.current_pass)
-        if not self.skip_key_off:
+        if not self.skip_key_off and not self.key_logger:
             self.key_logger = KeyLogger()
 
         try:
@@ -1231,7 +1233,7 @@ class TestManager:
             raise ZeroSizeError(self.test_cases)
 
         # self.pass_statistic.start(self.current_pass)
-        if not self.skip_key_off:
+        if not self.skip_key_off and not self.key_logger:
             self.key_logger = KeyLogger()
 
         self.last_state_hint = [None] * len(passes)
