@@ -197,6 +197,8 @@ class GenericPass(AbstractPass):
             hints = generate_inclusion_directive_hints(test_case, files, file_to_id, self.external_programs)
         elif self.arg == 'clang_pcm_lazy_load':
             hints = generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id)
+        elif self.arg == 'clang_pcm_minimization_hints':
+            hints = generate_clang_pcm_minimization_hints(test_case, files, file_to_id)
         elif self.arg == 'line_markers':
             hints = generate_line_markers_hints(test_case, files, file_to_id)
         elif self.arg == 'blank':
@@ -1008,7 +1010,7 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
             if logging.getLogger().isEnabledFor(logging.DEBUG):
                 logging.debug(f'generate_clang_pcm_lazy_load_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
 
-            if not Path(tmp_dump.name).exists():
+            if not Path(tmp_dump.name).exists() or not Path(tmp_dump.name).stat().st_size:
                 # Likely an old version of Clang, before the switch was introduced.
                 if logging.getLogger().isEnabledFor(logging.DEBUG):
                     logging.debug(f'generate_clang_pcm_lazy_load_hints: no out file created, exiting')
@@ -1073,6 +1075,127 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
                 if segs:
                     logging.info(f'Non-UTF8 file found: {file}')
                     # Skip non-UTF files in this heuristic.
+    return hints
+
+def generate_clang_pcm_minimization_hints(test_case, files, file_to_id):
+    if not os.environ.get('CLANG'):
+        return []
+    orig_command = get_root_compile_command(test_case)
+    if not orig_command:
+        return []
+    resource_dir = get_clang_resource_dir()
+
+    with tempfile.NamedTemporaryFile() as tmp_dump:
+        with tempfile.TemporaryDirectory(prefix='cvise-clanglazypcm') as tmp_for_copy:
+            tmp_copy = Path(tmp_for_copy) / test_case.name
+            shutil.copytree(test_case, tmp_copy, symlinks=True)
+
+            # Hack to avoid rebuilding PCMs
+            (tmp_copy / '.ALWAYS').touch()
+
+            command = ['make', '-j64']
+            extra_env = {
+                'EXTRA_CFLAGS': f'-fno-crash-diagnostics -Xclang -fallow-pcm-with-compiler-errors -ferror-limit=0 -w',
+            }
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f'generate_clang_pcm_minimization_hints: running: {shlex.join(command)}\nenv: {extra_env}')
+            proc = subprocess.run(command, cwd=tmp_copy, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', env=os.environ.copy() | extra_env)
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f'generate_clang_pcm_minimization_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
+
+            for f in tmp_copy.rglob('*.o'):
+                f.unlink()
+
+            extra_env['EXTRA_CFLAGS'] += f' -Xclang=-dump-minimization-hints={tmp_dump.name}'
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f'generate_clang_pcm_minimization_hints: running: {shlex.join(command)}\nenv: {extra_env}')
+            proc = subprocess.run(command, cwd=tmp_copy, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', env=os.environ.copy() | extra_env)
+            if logging.getLogger().isEnabledFor(logging.DEBUG):
+                logging.debug(f'generate_clang_pcm_minimization_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
+
+            if not Path(tmp_dump.name).exists() or not Path(tmp_dump.name).stat().st_size:
+                # Likely an old version of Clang, before the switch was introduced.
+                if logging.getLogger().isEnabledFor(logging.DEBUG):
+                    logging.debug(f'generate_clang_pcm_minimization_hints: no out file created, exiting')
+                return []
+            with open(tmp_dump.name) as df:
+                clang_hints = json.load(df)
+
+    hints = []
+    required_ranges = {}
+    for item in clang_hints['required_ranges']:
+        file = Path(item['file'])
+        if file.is_relative_to(resource_dir):
+            # Ignore #includes inside the compiler's resource directory - we never try modifying those headers.
+            continue
+        file = tmp_copy / file
+        if not file.is_relative_to(tmp_copy):
+            logging.info(f'generate_clang_pcm_minimization_hints: File "{file}" is outside the test case {tmp_copy} and outside the resource dir {resource_dir}; env was: {extra_env}')
+            continue
+        file_rel = file.resolve().relative_to(tmp_copy)
+        file = test_case / file_rel
+        assert file in file_to_id, f'Unexpected file "{file}"'
+        file_id = file_to_id[file]
+        required_ranges[file_id] = item['range']
+
+    hints = []
+    for file_id, file in enumerate(files):
+        if file.is_symlink() or file.suffix in ('.makefile', '.cppmap') or file.name in ('Makefile',):
+            continue
+
+        lines = []
+        with open(file) as f:
+            line_start_pos = 0
+            try:
+                for line in f:
+                    line_end_pos = line_start_pos + len(line)
+                    lines.append((line_start_pos, line_end_pos))
+                    line_start_pos = line_end_pos
+            except UnicodeDecodeError as e:
+                logging.info(f'Non-UTF8 file found: {file}')
+                # Skip non-UTF files in this heuristic.
+                continue
+
+        ranges = required_ranges.get(file_id, [])
+        cut_line = 0
+        cut_col = 0
+        to_remove = []
+        for range in ranges:
+            from_line = range['from']['line'] - 1
+            from_col = range['from']['column'] - 1
+            to_line = range['to']['line'] - 1
+            to_col = range['to']['column'] - 1
+            while cut_line < from_line:
+                to_remove.append((lines[cut_line][0] + cut_col, lines[cut_line][1]))
+                cut_line += 1
+                cut_col = 0
+            assert cut_line == from_line
+            to_remove.append((lines[cut_line][0] + cut_col, lines[cut_line][0] + from_col))
+            cut_line = to_line
+            cut_col = to_col
+        while cut_line < len(lines):
+            to_remove.append((lines[cut_line][0] + cut_col, lines[cut_line][1]))
+            cut_line += 1
+            cut_col = 0
+        to_remove = [(l, r) for l, r in to_remove if l < r]
+        if not to_remove:
+            continue
+
+        hint_type_prefix = 'clang_pcm_hints' if ranges else 'clang_pcm_hints_unused_file'
+        for pos_l, pos_r in to_remove:
+            hints.append({
+                't': f'{hint_type_prefix}_rowwise',
+                'f': file_id,
+                'l': pos_l,
+                'r': pos_r,
+            })
+        hints.append({
+            't': f'{hint_type_prefix}_filewise',
+            'multi': [
+                {'f': file_id, 'l': pos_l, 'r': pos_r} for pos_l, pos_r in to_remove
+            ],
+        })
+
     return hints
 
 def generate_line_markers_hints(test_case, files, file_to_id):
