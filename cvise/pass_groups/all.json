@@ -17,7 +17,7 @@
    {"pass": "generic", "arg": "clang_delta::replace-function-def-with-decl"},
    {"pass": "generic", "arg": "clang_delta::remove-unused-function"},
    {"pass": "generic", "arg": "tree_sitter_delta"},
-   {"pass": "generic", "arg": "meta::delete-file"}
+   {"pass": "generic", "arg": "delete-file"}
 ],
 "parallel::main": [
    {"pass": "generic", "arg": "makefile"},
@@ -72,10 +72,10 @@
    {"pass": "generic", "arg": "clex::rm-toks-16"},
    {"pass": "generic", "arg": "clex::rm-tok-pattern-8", "jobs": 32, "include": ["slow"]},
    {"pass": "generic", "arg": "clex::rm-tok-pattern-4", "jobs": 32, "exclude": ["slow"]},
-   {"pass": "generic", "arg": "meta::delete-file"},
-   {"pass": "generic", "arg": "meta::inline-file"},
-   {"pass": "generic", "arg": "meta::rename-file", "renaming": true},
-   {"pass": "generic", "arg": "meta::rename-symbol", "renaming": true}
+   {"pass": "generic", "arg": "delete-file"},
+   {"pass": "generic", "arg": "inline-file"},
+   {"pass": "generic", "arg": "rename-file", "renaming": true},
+   {"pass": "generic", "arg": "rename-symbol", "renaming": true}
 ],
 "parallel::last": [
    {"pass": "generic", "arg": "lines"},

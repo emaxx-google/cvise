@@ -174,6 +174,53 @@ class GenericPass(AbstractPass):
     def lazy_input_copying(self):
         return True
 
+    def get_output_hint_types(self):
+        if self.arg == 'makefile':
+            return ['makeincldir', 'makemkdir', 'maketok', '#fileref', '#symbol']
+        elif self.arg == 'cppmaps':
+            return ['#fileref']
+        elif self.arg == 'inclusion_directives':
+            return ['#fileref']
+        elif self.arg == 'clang_pcm_lazy_load':
+            return ['lazypcm', 'lazypcmwhole']
+        elif self.arg == 'clang_pcm_minimization_hints':
+            return ['clang_pcm_hints_unused_file_filewise', 'clang_pcm_hints_filewise', 'clang_pcm_hints_rowwise', 'clang_pcm_hints_unused_file_rowwise']
+        elif self.arg == 'line_markers':
+            return ['linemarker']
+        elif self.arg == 'blank':
+            return ['blankline', 'blankconseq', 'blanktrail', 'blanklead', 'preprcond']
+        elif self.arg == 'lines':
+            return ['line']
+        elif self.arg.startswith('clex::'):
+            return [self.arg.partition('::')[2]]
+        elif self.arg.startswith('topformflat::'):
+            return ['topformflat' + self.arg.partition('::')[2]]
+        elif self.arg.startswith('clang_delta::'):
+            return [self.arg.partition('::')[2]]
+        elif self.arg == 'tree_sitter_delta':
+            return ['treesitfunc']
+        elif self.arg == 'delete-file':
+            return ['delfile::0', 'delfile::1', 'delfile::2', 'rmdir']
+        elif self.arg == 'inline-file':
+            return ['inlinefile']
+        elif self.arg == 'rename-file':
+            return ['renamefile']
+        elif self.arg == 'rename-symbol':
+            return ['renamesymbol']
+        assert False, f'Unexpected arg={self.arg}'
+
+    def get_input_hint_types(self):
+        if self.arg == 'delete-file':
+            return ['#fileref']
+        elif self.arg == 'inline-file':
+            return ['#fileref']
+        elif self.arg == 'rename-file':
+            return ['#fileref']
+        elif self.arg == 'rename-symbol':
+            return ['#fileref', '#symbol']
+        else:
+            return []
+
     def new(self, test_case, check_sanity=None, last_state_hint=None, other_init_states=None):
         test_case = Path(test_case)
 
@@ -213,13 +260,13 @@ class GenericPass(AbstractPass):
             hints = generate_clang_delta_hints(test_case, files, file_to_id, self.arg.partition('::')[2], self.external_programs)
         elif self.arg == 'tree_sitter_delta':
             hints = generate_tree_sitter_delta_hints(test_case, files, file_to_id, self.external_programs)
-        elif self.arg == 'meta::delete-file':
+        elif self.arg == 'delete-file':
             hints = generate_delete_file_hints(test_case, files, file_to_id, other_init_states)
-        elif self.arg == 'meta::inline-file':
+        elif self.arg == 'inline-file':
             hints = generate_inline_file_hints(test_case, files, file_to_id, other_init_states)
-        elif self.arg == 'meta::rename-file':
+        elif self.arg == 'rename-file':
             hints = generate_rename_file_hints(test_case, files, file_to_id, other_init_states)
-        elif self.arg == 'meta::rename-symbol':
+        elif self.arg == 'rename-symbol':
             hints = generate_rename_symbol_hints(test_case, files, file_to_id, other_init_states)
         else:
             raise RuntimeError(f'Unknown hint source: arg={self.arg}')
@@ -237,7 +284,7 @@ class GenericPass(AbstractPass):
                 return h['f'], files[h['f']]
             return h['multi'][0]['f'], files[h['multi'][0]['f']]
         def hint_comparison_key(h):
-            return h['t'], hint_main_file(h)
+            return h['t'], hint_main_file(h), sorted([(l.get('f'), l.get('l'), l.get('r')) for l in get_hint_locs(h)])
 
         for h in hints:
             assert_valid_hint(h, files)

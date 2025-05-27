@@ -728,24 +728,16 @@ class TestManager:
         pool.join()
 
     def get_pass_id_to_init(self):
-        pass_id_to_init = None
-        meta_pass_id_to_init = None
-        meta_requirements_satisfied = True
-        for i, s in enumerate(self.states):
-            is_meta_pass = self.current_passes[i].arg and self.current_passes[i].arg.startswith('meta::')
-            is_meta_requirement = not is_meta_pass and self.current_passes[i].arg and self.current_passes[i].arg not in ('clang_pcm_lazy_load', 'tree_sitter_delta')
-            if is_meta_requirement and s in ('needinit', 'initializing'):
-                meta_requirements_satisfied = False
-            if s == 'needinit':
-                if is_meta_pass and meta_pass_id_to_init is None:
-                    meta_pass_id_to_init = i
-                if not is_meta_pass and pass_id_to_init is None:
-                    pass_id_to_init = i
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            logging.debug(f'pass_id_to_init={pass_id_to_init} meta_pass_id_to_init={meta_pass_id_to_init} meta_requirements_satisfied={meta_requirements_satisfied} states={self.states}')
-        if pass_id_to_init is None and meta_pass_id_to_init is not None and meta_requirements_satisfied:
-            return meta_pass_id_to_init
-        return pass_id_to_init
+        incomplete_hint_types = set()
+        for i, p in enumerate(self.current_passes):
+            # TODO: Also consider failed-to-init passes too.
+            if hasattr(p, 'get_output_hint_types') and self.states[i] in ('needinit', 'initializing'):
+                incomplete_hint_types.update(p.get_output_hint_types())
+        for i, p in enumerate(self.current_passes):
+            if self.states[i] == 'needinit':
+                if not hasattr(p, 'get_input_hint_types') or set(p.get_input_hint_types()).isdisjoint(incomplete_hint_types):
+                    return i
+        return None
 
     def run_parallel_tests(self, passes):
         assert not self.futures
@@ -891,7 +883,12 @@ class TestManager:
                         if logging.getLogger().isEnabledFor(logging.DEBUG):
                             logging.debug(f'Going to init pass {pass_}')
                         self.states[pass_id] = 'initializing'
-                        other_init_states = [s for s in self.init_states if s is not None and hasattr(s, 'has_meta_hints') and s.has_meta_hints]
+                        other_init_states = []
+                        if hasattr(pass_, 'get_input_hint_types'):
+                            wanted_types = set(pass_.get_input_hint_types())
+                            other_init_states = [s for i, s in enumerate(self.init_states)
+                                                 if s is not None and
+                                                 not wanted_types.isdisjoint(set(self.current_passes[i].get_output_hint_types()))]
                         env = SetupEnvironment(pass_, self.current_test_case, self.test_cases, self.save_temps, self.last_state_hint[pass_id], other_init_states=other_init_states)
                         future = pool.schedule(env.run, timeout=self.setup_timeout)
                         future.job_type = JobType.PASS_NEW
