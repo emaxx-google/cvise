@@ -1,3 +1,19 @@
+cvise (2.11.20250527) plucky; urgency=medium
+
+  Bugfixes:
+  * Fix the skippage of some single-file heuristics (e.g., rename-toks).
+  * Fix garbled terminal state after C-Vise exits.
+  * Fix diffs (the 'd' hotkey) for multi-file inputs.
+  * Fix clang_delta regression introduced in 20250520.
+
+  Improvements:
+  * New heuristic, based on Clang 21 "-dump-minimization-hints".
+  * Hotkey 'f' to force proceeding with the currently-best "candidate" (useful
+    when C-Vise spends too much time looking for new candidates).
+  * Optimization of folding (build new fold on top of the previous best).
+  * Optimization of temporary storage (use Zstd instead of GZIP).
+  * Better logging when hitting unexpected #includes.
+
 cvise (2.11.20250520) plucky; urgency=medium
 
   Bugfixes:
