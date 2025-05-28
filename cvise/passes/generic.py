@@ -184,7 +184,7 @@ class GenericPass(AbstractPass):
         elif self.arg == 'clang_pcm_lazy_load':
             return ['lazypcm', 'lazypcmwhole']
         elif self.arg == 'clang_pcm_minimization_hints':
-            return ['clang_pcm_hints_blockwise', 'clang_pcm_hints_filewise', 'clang_pcm_hints_rowwise', 'clang_pcm_hints_unused_file_blockwise', 'clang_pcm_hints_unused_file_filewise', 'clang_pcm_hints_unused_file_rowwise']
+            return ['clang_pcm_hints_filewise', 'clang_pcm_hints_rowwise', 'clang_pcm_hints_unused_file_filewise', 'clang_pcm_hints_unused_file_rowwise']
         elif self.arg.startswith('clang_pcm_minimization_hints_splice_topformflat'):
             return ['clang_pcm_minimization_hints_splice_topformflat' + self.arg.partition('::')[2]]
         elif self.arg == 'line_markers':
@@ -221,7 +221,7 @@ class GenericPass(AbstractPass):
         elif self.arg == 'rename-symbol':
             return ['#fileref', '#symbol']
         elif self.arg.startswith('clang_pcm_minimization_hints_splice_topformflat'):
-            return ['clang_pcm_hints_blockwise', 'clang_pcm_hints_unused_file_blockwise', 'topformflat' + self.arg.partition('::')[2]]
+            return ['clang_pcm_hints_rowwise', 'clang_pcm_hints_unused_file_rowwise', 'topformflat' + self.arg.partition('::')[2]]
         else:
             return []
 
@@ -252,7 +252,7 @@ class GenericPass(AbstractPass):
             hints = generate_clang_pcm_minimization_hints(test_case, files, file_to_id)
         elif self.arg.startswith('clang_pcm_minimization_hints_splice_topformflat'):
             hints = generate_splice_hints(test_case, files, file_to_id,
-                                          ['clang_pcm_hints_blockwise', 'clang_pcm_hints_unused_file_blockwise'],
+                                          ['clang_pcm_hints_rowwise', 'clang_pcm_hints_unused_file_rowwise'],
                                           ['topformflat' + self.arg.partition('::')[2]],
                                           'clang_pcm_minimization_hints_splice_topformflat' + self.arg.partition('::')[2],
                                           other_init_states)
@@ -1204,56 +1204,62 @@ def generate_clang_pcm_minimization_hints(test_case, files, file_to_id):
             continue
 
         lines = []
-        with open(file) as f:
+        line_blocklisted = []
+        with open(file, 'rb') as f:
             line_start_pos = 0
-            try:
-                for line in f:
-                    line_end_pos = line_start_pos + len(line)
-                    lines.append((line_start_pos, line_end_pos))
-                    line_start_pos = line_end_pos
-            except UnicodeDecodeError as e:
-                logging.info(f'Non-UTF8 file found: {file}')
-                # Skip non-UTF files in this heuristic.
-                continue
+            in_preprocessor = False
+            for line in f:
+                line_end_pos = line_start_pos + len(line)
+                lines.append((line_start_pos, line_end_pos))
+
+                if line.lstrip().startswith(b'#'):
+                    in_preprocessor = True
+                line_blocklisted.append(in_preprocessor)
+                if not line.rstrip().endswith(b'\\'):
+                    in_preprocessor = False
+
+                line_start_pos = line_end_pos
 
         ranges = required_ranges.get(file_id, [])
         cut_line = 0
         cut_col = 0
-        blocks_to_remove = []
         lines_to_remove = []
         for range in ranges:
             from_line = range['from']['line'] - 1
             from_col = range['from']['column'] - 1
             to_line = range['to']['line'] - 1
             to_col = range['to']['column'] - 1
-            blocks_to_remove.append((lines[cut_line][0] + cut_col, lines[from_line][0] + from_col))
+            # assert (from_line, from_col) < (to_line, to_col), f'Hint with negative size: {range}'
+            if (from_line, from_col) >= (to_line, to_col):
+                logging.info(f'Ignoring hint with negative size: {range}')
+                continue
+            assert (to_line, to_col) <= (len(lines), 0), f'Hint beyond end of file: {range}, len(lines)={len(lines)}'
+            assert from_col < lines[from_line][1] - lines[from_line][0], f'Hint column number beyond end of line: {range}, line={lines[from_line]}'
+            assert to_col <= lines[to_line][1] - lines[to_line][0], f'Hint column number beyond end of line: {range}, line={lines[to_line]}'
+            assert (cut_line, cut_col) <= (from_line, from_col), f'Hint violating order: range={range}, cut_line={cut_line}, cut_col={cut_col}, file={file}'
             while cut_line < from_line:
-                lines_to_remove.append((lines[cut_line][0] + cut_col, lines[cut_line][1]))
+                if not line_blocklisted[cut_line]:
+                    lines_to_remove.append((lines[cut_line][0] + cut_col, lines[cut_line][1]))
                 cut_line += 1
                 cut_col = 0
             assert cut_line == from_line
-            lines_to_remove.append((lines[cut_line][0] + cut_col, lines[cut_line][0] + from_col))
+            assert cut_col <= from_col
+            if not line_blocklisted[cut_line]:
+                lines_to_remove.append((lines[cut_line][0] + cut_col, lines[cut_line][0] + from_col))
             cut_line = to_line
             cut_col = to_col
-        if cut_line < len(lines):
-            blocks_to_remove.append((lines[cut_line][0] + cut_col, lines[-1][1]))
         while cut_line < len(lines):
-            lines_to_remove.append((lines[cut_line][0] + cut_col, lines[cut_line][1]))
+            if not line_blocklisted[cut_line]:
+                lines_to_remove.append((lines[cut_line][0] + cut_col, lines[cut_line][1]))
             cut_line += 1
             cut_col = 0
-        blocks_to_remove = [(l, r) for l, r in blocks_to_remove if l < r]
+        for l, r in lines_to_remove:
+            assert l <= r
         lines_to_remove = [(l, r) for l, r in lines_to_remove if l < r]
         if not lines_to_remove:
             continue
 
         hint_type_prefix = 'clang_pcm_hints' if ranges else 'clang_pcm_hints_unused_file'
-        for pos_l, pos_r in blocks_to_remove:
-            hints.append({
-                't': f'{hint_type_prefix}_blockwise',
-                'f': file_id,
-                'l': pos_l,
-                'r': pos_r,
-            })
         for pos_l, pos_r in lines_to_remove:
             hints.append({
                 't': f'{hint_type_prefix}_rowwise',
@@ -1264,7 +1270,7 @@ def generate_clang_pcm_minimization_hints(test_case, files, file_to_id):
         hints.append({
             't': f'{hint_type_prefix}_filewise',
             'multi': [
-                {'f': file_id, 'l': pos_l, 'r': pos_r} for pos_l, pos_r in blocks_to_remove
+                {'f': file_id, 'l': pos_l, 'r': pos_r} for pos_l, pos_r in lines_to_remove
             ],
         })
 
@@ -1575,8 +1581,14 @@ def generate_splice_hints(test_case, files, file_to_id, types_left, types_right,
     right_hints = []
     for h in old_hints:
         if h['t'] in types_left:
-            left_hints.append(h)
-        if h['t'] in types_right:
+            if left_hints and left_hints[-1]['multi'][-1]['f'] == h['f'] and left_hints[-1]['multi'][-1]['r'] == h['l']:
+                left_hints[-1]['multi'] += get_hint_locs(h)
+            else:
+                left_hints.append({
+                    't': h['t'],
+                    'multi': get_hint_locs(h),
+                })
+        elif h['t'] in types_right:
             right_hints.append(h)
 
     def starts_before(hint, base_hint):
@@ -1585,9 +1597,23 @@ def generate_splice_hints(test_case, files, file_to_id, types_left, types_right,
         return (hint_loc['f'], hint_loc['l']) < (base_loc['f'], base_loc['l'])
 
     def ends_not_later(hint, base_hint):
-        hint_loc = get_hint_locs(hint)[0]
-        base_loc = get_hint_locs(base_hint)[0]
+        hint_loc = get_hint_locs(hint)[-1]
+        base_loc = get_hint_locs(base_hint)[-1]
         return (hint_loc['f'], hint_loc['r']) <= (base_loc['f'], base_loc['r'])
+
+    cur_file = None
+    cur_file_data = None
+    def trivial_chunk(hint):
+        nonlocal cur_file
+        nonlocal cur_file_data
+        if cur_file != hint['f']:
+            cur_file = hint['f']
+            with open(files[cur_file], 'rb') as f:
+                cur_file_data = f.read()
+        for loc in get_hint_locs(hint):
+            if cur_file_data[loc['l']:loc['r']].lstrip() != b'':
+                return False
+        return True
 
     new_hints = []
     right_hint_ptr = 0
@@ -1595,9 +1621,10 @@ def generate_splice_hints(test_case, files, file_to_id, types_left, types_right,
         while right_hint_ptr < len(right_hints) and starts_before(right_hints[right_hint_ptr], h):
             right_hint_ptr += 1
         while right_hint_ptr < len(right_hints) and ends_not_later(right_hints[right_hint_ptr], h):
-            new_hint = copy.copy(right_hints[right_hint_ptr])
-            new_hint['t'] = result_type
-            new_hints.append(new_hint)
+            if not trivial_chunk(right_hints[right_hint_ptr]):
+                new_hint = copy.copy(right_hints[right_hint_ptr])
+                new_hint['t'] = result_type
+                new_hints.append(new_hint)
             right_hint_ptr += 1
     return new_hints
 
