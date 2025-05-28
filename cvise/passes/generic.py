@@ -893,10 +893,17 @@ def generate_topformflat_hints(test_case, files, file_to_id, depth, external_pro
                 out = subprocess.check_output(command, stderr=subprocess.DEVNULL, encoding='utf-8')
             except subprocess.CalledProcessError as e:
                 raise RuntimeError(f'generate_topformflat_hints failed: command:\n{shlex.join(command)}\nstdout:\n{e.stdout}\nstderr:\n{e.stderr}')
+
+            with open(file, 'rb') as f:
+                file_contents = f.read()
+
             for line in out.splitlines():
                 if line.strip():
                     try:
                         h = json.loads(line)
+                        chunk = file_contents[h['l']:h['r']].lstrip()
+                        if not chunk:
+                            continue
                         h['f'] = file_id
                         hints.append(h)
                     except json.decoder.JSONDecodeError as e:
