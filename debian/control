@@ -27,6 +27,7 @@ Depends: ${shlibs:Depends}, ${misc:Depends}, ${python3:Depends},
   python3-chardet,
   python3-pebble,
   python3-psutil,
+  python3-pyzstd,
   unifdef,
 Recommends: colordiff
 Description: super-parallel Python port of the C-Reduce project
