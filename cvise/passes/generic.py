@@ -493,7 +493,7 @@ def recalc_per_depth_ordering(begin, end, depth_per_file, instances_per_file, in
 
 def generate_makefile_hints(test_case, files, file_to_id):
     if not test_case.is_dir():
-        return []
+        return None
 
     targets = {}
     file_to_generating_targets = {}
@@ -683,7 +683,7 @@ def generate_makefile_hints(test_case, files, file_to_id):
 
 def generate_cppmaps_hints(test_case, files, file_to_id):
     if not test_case.is_dir():
-        return []
+        return None
 
     hints = []
     name_to_cppmaps = {}
@@ -939,7 +939,7 @@ def generate_clang_delta_hints(test_case, files, file_to_id, transformation, ext
 
 def generate_inclusion_directive_hints(test_case, files, file_to_id, external_programs):
     if not test_case.is_dir():
-        return []
+        return None
 
     resource_dir = get_clang_resource_dir()
     hints = []
@@ -1138,6 +1138,8 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
     return hints
 
 def generate_clang_pcm_minimization_hints(test_case, files, file_to_id):
+    if not test_case.is_dir():
+        return None
     if not os.environ.get('CLANG'):
         return []
     orig_command = get_root_compile_command(test_case)
@@ -1349,7 +1351,7 @@ def generate_tree_sitter_delta_hints(test_case, files, file_to_id, external_prog
 
 def generate_delete_file_hints(test_case, files, file_to_id, other_init_states):
     if not test_case.is_dir():
-        return []
+        return None
 
     states_to_load = [s for s in other_init_states if s]
     if not states_to_load:
@@ -1405,7 +1407,7 @@ def generate_delete_file_hints(test_case, files, file_to_id, other_init_states):
 
 def generate_inline_file_hints(test_case, files, file_to_id, other_init_states):
     if not test_case.is_dir():
-        return []
+        return None
 
     states_to_load = [s for s in other_init_states if s]
     if not states_to_load:
@@ -1438,7 +1440,7 @@ def load_text(path, index_l, index_r):
 
 def generate_rename_file_hints(test_case, files, file_to_id, other_init_states):
     if not test_case.is_dir():
-        return []
+        return None
 
     RND_VOCAB = string.ascii_uppercase + string.digits
     RND_LEN = 3
@@ -1570,7 +1572,7 @@ def parse_file_symbols(file_id, path, filerefs):
 
 def generate_splice_hints(test_case, files, file_to_id, types_left, types_right, result_type, other_init_states):
     if not test_case.is_dir():
-        return []
+        return None
 
     states_to_load = [s for s in other_init_states if s]
     if not states_to_load:
