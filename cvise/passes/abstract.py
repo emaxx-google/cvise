@@ -248,9 +248,14 @@ class FuzzyBinaryState(BinaryState):
         assert chunk_le <= chunk_ri
         peak = max(peak, chunk_le)
         peak = min(peak, chunk_ri)
-        self.rnd_chunk = None
-        while self.rnd_chunk is None or self.rnd_chunk < chunk_le or self.rnd_chunk > chunk_ri:
-            self.rnd_chunk = round(random.gauss(peak, peak))
+        if chunk_le == chunk_ri:
+            self.rnd_chunk = chunk_le
+        else:
+            self.rnd_chunk = None
+            while self.rnd_chunk is None or self.rnd_chunk < chunk_le or self.rnd_chunk > chunk_ri:
+                log_mu = math.log(peak)
+                log_sigma = math.log(max(chunk_ri - peak, peak - chunk_le)) / 2
+                self.rnd_chunk = round(math.exp(random.gauss(log_mu, log_sigma)))
         assert self.rnd_chunk > 0
         pos_le = 0
         pos_ri = instances_to_choose - self.rnd_chunk
