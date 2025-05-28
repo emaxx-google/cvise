@@ -178,7 +178,7 @@ class GenericPass(AbstractPass):
         if self.arg == 'makefile':
             return ['makeincldir', 'makemkdir', 'maketok', '#fileref', '#symbol']
         elif self.arg == 'cppmaps':
-            return ['#fileref']
+            return ['#fileref', '#symbol', 'cppmapheader', 'cppmapmissingheader', 'cppmapuse', 'cppmapmod', 'cppmapmodinl', 'cppmapline']
         elif self.arg == 'inclusion_directives':
             return ['#fileref']
         elif self.arg == 'clang_pcm_lazy_load':
@@ -196,7 +196,7 @@ class GenericPass(AbstractPass):
         elif self.arg.startswith('clex::'):
             return [self.arg.partition('::')[2]]
         elif self.arg.startswith('topformflat::'):
-            return ['topformflat' + self.arg.partition('::')[2]]
+            return ['topformflat' + self.arg.partition('::')[2], 'comment']
         elif self.arg.startswith('clang_delta::'):
             return [self.arg.partition('::')[2]]
         elif self.arg == 'tree_sitter_delta':
@@ -292,12 +292,15 @@ class GenericPass(AbstractPass):
                 return len(files), test_case / h['ns']
             if 'f' in h:
                 return h['f'], files[h['f']]
+            if not h['multi']:
+                return -1, ''
             return h['multi'][0]['f'], files[h['multi'][0]['f']]
         def hint_comparison_key(h):
             return h['t'], hint_main_file(h), sorted([(l.get('f'), l.get('l'), l.get('r')) for l in get_hint_locs(h)])
 
+        declared_types = self.get_output_hint_types()
         for h in hints:
-            assert_valid_hint(h, files)
+            assert_valid_hint(h, files, declared_types)
         hints.sort(key=hint_comparison_key)
 
         instances = {}
@@ -1687,11 +1690,12 @@ def get_path_to_depth(test_case, external_programs):
 def dump_json(o):
     return json.dumps(o, separators=(',', ':'), check_circular=False)
 
-def assert_valid_hint(h, files):
+def assert_valid_hint(h, files, declared_types):
     try:
         assert isinstance(h, dict)
         assert 't' in h
         assert isinstance(h['t'], str)
+        assert h['t'] in declared_types, f'type not among declared types ({declared_types})'
         if h['t'].startswith('delfile::') or h['t'] == '#fileref':
             assert 'n' in h or 'ns' in h
             if 'n' in h:
