@@ -6,6 +6,10 @@
  * This file is distributed under the University of Illinois Open Source
  * License.  See the file COPYING for details.
  */
+
+int parser_pos = 0;
+
+#define YY_USER_ACTION parser_pos += yyleng;
 %}
 
 D			[0-9]
@@ -29,113 +33,119 @@ IS			(u|U|l|L)*
 
 %%
 
-"auto"			{ process_token(TOK_KEYWORD); }
-"break"			{ process_token(TOK_KEYWORD); }
-"case"			{ process_token(TOK_KEYWORD); }
-"char"			{ process_token(TOK_KEYWORD); }
-"const"			{ process_token(TOK_KEYWORD); }
-"continue"		{ process_token(TOK_KEYWORD); }
-"default"		{ process_token(TOK_KEYWORD); }
-"do"			{ process_token(TOK_KEYWORD); }
-"double"		{ process_token(TOK_KEYWORD); }
-"else"			{ process_token(TOK_KEYWORD); }
-"enum"			{ process_token(TOK_KEYWORD); }
-"extern"		{ process_token(TOK_KEYWORD); }
-"float"			{ process_token(TOK_KEYWORD); }
-"for"			{ process_token(TOK_KEYWORD); }
-"goto"			{ process_token(TOK_KEYWORD); }
-"if"			{ process_token(TOK_KEYWORD); }
-"int"			{ process_token(TOK_KEYWORD); }
-"long"			{ process_token(TOK_KEYWORD); }
-"register"		{ process_token(TOK_KEYWORD); }
-"return"		{ process_token(TOK_KEYWORD); }
-"short"			{ process_token(TOK_KEYWORD); }
-"signed"		{ process_token(TOK_KEYWORD); }
-"sizeof"		{ process_token(TOK_KEYWORD); }
-"static"		{ process_token(TOK_KEYWORD); }
-"struct"		{ process_token(TOK_KEYWORD); }
-"switch"		{ process_token(TOK_KEYWORD); }
-"typedef"		{ process_token(TOK_KEYWORD); }
-"union"			{ process_token(TOK_KEYWORD); }
-"unsigned"		{ process_token(TOK_KEYWORD); }
-"void"			{ process_token(TOK_KEYWORD); }
-"volatile"		{ process_token(TOK_KEYWORD); }
-"while"			{ process_token(TOK_KEYWORD); }
+"auto"			{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"break"			{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"case"			{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"char"			{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"const"			{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"continue"		{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"default"		{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"do"			{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"double"		{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"else"			{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"enum"			{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"extern"		{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"float"			{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"for"			{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"goto"			{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"if"			{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"int"			{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"long"			{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"register"		{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"return"		{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"short"			{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"signed"		{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"sizeof"		{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"static"		{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"struct"		{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"switch"		{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"typedef"		{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"union"			{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"unsigned"		{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"void"			{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"volatile"		{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
+"while"			{ process_token(TOK_KEYWORD, parser_pos - yyleng); }
 
-{L}({L}|{D})*		{ process_token(TOK_IDENT); }
+{L}({L}|{D})*		{ process_token(TOK_IDENT, parser_pos - yyleng); }
 
-0[xX]{H}+{IS}?		{ process_token(TOK_NUMBER); }
-0{D}+{IS}?		{ process_token(TOK_NUMBER); }
-{D}+{IS}?		{ process_token(TOK_NUMBER); }
-L?'(\\.|[^\\'])+'	{ process_token(TOK_OTHER); }
+0[xX]{H}+{IS}?		{ process_token(TOK_NUMBER, parser_pos - yyleng); }
+0{D}+{IS}?		{ process_token(TOK_NUMBER, parser_pos - yyleng); }
+{D}+{IS}?		{ process_token(TOK_NUMBER, parser_pos - yyleng); }
+L?'(\\.|[^\\'])+'	{ process_token(TOK_OTHER, parser_pos - yyleng); }
 
-{D}+{E}{FS}?		{ process_token(TOK_NUMBER); }
-{D}*"."{D}+({E})?{FS}?	{ process_token(TOK_NUMBER); }
-{D}+"."{D}*({E})?{FS}?	{ process_token(TOK_NUMBER); }
+{D}+{E}{FS}?		{ process_token(TOK_NUMBER, parser_pos - yyleng); }
+{D}*"."{D}+({E})?{FS}?	{ process_token(TOK_NUMBER, parser_pos - yyleng); }
+{D}+"."{D}*({E})?{FS}?	{ process_token(TOK_NUMBER, parser_pos - yyleng); }
 
-L?\"(\\.|[^\\"])*\"	{ process_token(TOK_STRING); }
+L?\"(\\.|[^\\"])*\"	{ process_token(TOK_STRING, parser_pos - yyleng); }
 
-"..."			{ process_token(TOK_OTHER); }
-">>="			{ process_token(TOK_OP); }
-"<<="			{ process_token(TOK_OP); }
-"+="			{ process_token(TOK_OP); }
-"-="			{ process_token(TOK_OP); }
-"*="			{ process_token(TOK_OP); }
-"/="			{ process_token(TOK_OP); }
-"%="			{ process_token(TOK_OP); }
-"&="			{ process_token(TOK_OP); }
-"^="			{ process_token(TOK_OP); }
-"|="			{ process_token(TOK_OP); }
-">>"			{ process_token(TOK_OP); }
-"<<"			{ process_token(TOK_OP); }
-"++"			{ process_token(TOK_OP); }
-"--"			{ process_token(TOK_OP); }
-"->"			{ process_token(TOK_OP); }
-"&&"			{ process_token(TOK_OP); }
-"||"			{ process_token(TOK_OP); }
-"<="			{ process_token(TOK_OP); }
-">="			{ process_token(TOK_OP); }
-"=="			{ process_token(TOK_OP); }
-"!="			{ process_token(TOK_OP); }
-";"			{ process_token(TOK_OP); }
-("{"|"<%")		{ process_token(TOK_OP); }
-("}"|"%>")		{ process_token(TOK_OP); }
-","			{ process_token(TOK_OP); }
-":"			{ process_token(TOK_OP); }
-"="			{ process_token(TOK_OP); }
-"("			{ process_token(TOK_OP); }
-")"			{ process_token(TOK_OP); }
-("["|"<:")		{ process_token(TOK_OP); }
-("]"|":>")		{ process_token(TOK_OP); }
-"."			{ process_token(TOK_OP); }
-"&"			{ process_token(TOK_OP); }
-"!"			{ process_token(TOK_OP); }
-"~"			{ process_token(TOK_OP); }
-"-"			{ process_token(TOK_OP); }
-"+"			{ process_token(TOK_OP); }
-"*"			{ process_token(TOK_OP); }
-"/"			{ process_token(TOK_OP); }
-"%"			{ process_token(TOK_OP); }
-"<"			{ process_token(TOK_OP); }
-">"			{ process_token(TOK_OP); }
-"^"			{ process_token(TOK_OP); }
-"|"			{ process_token(TOK_OP); }
-"?"			{ process_token(TOK_OP); }
-"#"                     { process_token(TOK_OTHER); }
+"..."			{ process_token(TOK_OTHER, parser_pos - yyleng); }
+">>="			{ process_token(TOK_OP, parser_pos - yyleng); }
+"<<="			{ process_token(TOK_OP, parser_pos - yyleng); }
+"+="			{ process_token(TOK_OP, parser_pos - yyleng); }
+"-="			{ process_token(TOK_OP, parser_pos - yyleng); }
+"*="			{ process_token(TOK_OP, parser_pos - yyleng); }
+"/="			{ process_token(TOK_OP, parser_pos - yyleng); }
+"%="			{ process_token(TOK_OP, parser_pos - yyleng); }
+"&="			{ process_token(TOK_OP, parser_pos - yyleng); }
+"^="			{ process_token(TOK_OP, parser_pos - yyleng); }
+"|="			{ process_token(TOK_OP, parser_pos - yyleng); }
+">>"			{ process_token(TOK_OP, parser_pos - yyleng); }
+"<<"			{ process_token(TOK_OP, parser_pos - yyleng); }
+"++"			{ process_token(TOK_OP, parser_pos - yyleng); }
+"--"			{ process_token(TOK_OP, parser_pos - yyleng); }
+"->"			{ process_token(TOK_OP, parser_pos - yyleng); }
+"&&"			{ process_token(TOK_OP, parser_pos - yyleng); }
+"||"			{ process_token(TOK_OP, parser_pos - yyleng); }
+"<="			{ process_token(TOK_OP, parser_pos - yyleng); }
+">="			{ process_token(TOK_OP, parser_pos - yyleng); }
+"=="			{ process_token(TOK_OP, parser_pos - yyleng); }
+"!="			{ process_token(TOK_OP, parser_pos - yyleng); }
+";"			{ process_token(TOK_OP, parser_pos - yyleng); }
+("{"|"<%")		{ process_token(TOK_OP, parser_pos - yyleng); }
+("}"|"%>")		{ process_token(TOK_OP, parser_pos - yyleng); }
+","			{ process_token(TOK_OP, parser_pos - yyleng); }
+":"			{ process_token(TOK_OP, parser_pos - yyleng); }
+"="			{ process_token(TOK_OP, parser_pos - yyleng); }
+"("			{ process_token(TOK_OP, parser_pos - yyleng); }
+")"			{ process_token(TOK_OP, parser_pos - yyleng); }
+("["|"<:")		{ process_token(TOK_OP, parser_pos - yyleng); }
+("]"|":>")		{ process_token(TOK_OP, parser_pos - yyleng); }
+"."			{ process_token(TOK_OP, parser_pos - yyleng); }
+"&"			{ process_token(TOK_OP, parser_pos - yyleng); }
+"!"			{ process_token(TOK_OP, parser_pos - yyleng); }
+"~"			{ process_token(TOK_OP, parser_pos - yyleng); }
+"-"			{ process_token(TOK_OP, parser_pos - yyleng); }
+"+"			{ process_token(TOK_OP, parser_pos - yyleng); }
+"*"			{ process_token(TOK_OP, parser_pos - yyleng); }
+"/"			{ process_token(TOK_OP, parser_pos - yyleng); }
+"%"			{ process_token(TOK_OP, parser_pos - yyleng); }
+"<"			{ process_token(TOK_OP, parser_pos - yyleng); }
+">"			{ process_token(TOK_OP, parser_pos - yyleng); }
+"^"			{ process_token(TOK_OP, parser_pos - yyleng); }
+"|"			{ process_token(TOK_OP, parser_pos - yyleng); }
+"?"			{ process_token(TOK_OP, parser_pos - yyleng); }
+"#"                     { process_token(TOK_OTHER, parser_pos - yyleng); }
 "\\"[ \t]*"\n"          { }
-"\\"                    { process_token(TOK_OTHER); }
+"\\"                    { process_token(TOK_OTHER, parser_pos - yyleng); }
 
 "/*"        {
                      for ( ; ; )  {
                          int c;
-                         while ( (c = input()) != '*' &&
-                                  c != EOF )
-                             ;    /* eat up text of comment */
+                         /* eat up text of comment */
+                         do {
+                            c = input();
+                            ++parser_pos;
+                            if (c == '*' || c == EOF)
+                                break;
+                         } while (c != '*' && c != EOF);
 
                          if ( c == '*' )
                              {
-                             while ( (c = input()) == '*' )
-                                 ;
+                             do {
+                                c = input();
+                                ++parser_pos;
+                             } while (c == '*');
                              if ( c == '/' )
                                  break;    /* found the end */
                              }
@@ -147,11 +157,11 @@ L?\"(\\.|[^\\"])*\"	{ process_token(TOK_STRING); }
                     }
            }
 
-[ \t\v\f]		{ process_token(TOK_WS); }
+[ \t\v\f]		{ process_token(TOK_WS, parser_pos - yyleng); }
 
-[\n]		        { process_token(TOK_NEWLINE); }
+[\n]		        { process_token(TOK_NEWLINE, parser_pos - yyleng); }
 
-.			{ process_token(TOK_UNKNOWN); }
+.			{ process_token(TOK_UNKNOWN, parser_pos - yyleng); }
 
 %%
 

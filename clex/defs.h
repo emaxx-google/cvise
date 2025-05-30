@@ -37,7 +37,7 @@ enum tok_kind {
   TOK_UNKNOWN,
 };
 
-void process_token(enum tok_kind);
+void process_token(enum tok_kind, int parser_pos);
 
 #define OK 51
 #define STOP 71

@@ -32,6 +32,7 @@ struct tok_t {
   char *str;
   enum tok_kind kind;
   int id;
+  int start_pos;
 };
 
 static struct tok_t *tok_list;
@@ -39,7 +40,7 @@ static int toks;
 static int max_toks;
 static const int initial_length = 1;
 
-static int add_tok(char *str, enum tok_kind kind) {
+static int add_tok(char *str, enum tok_kind kind, int tok_pos) {
   assert(str);
   if (toks >= max_toks) {
     max_toks *= 2;
@@ -51,12 +52,13 @@ static int add_tok(char *str, enum tok_kind kind) {
   assert(tok_list[toks].str);
   tok_list[toks].kind = kind;
   tok_list[toks].id = -1;
+  tok_list[toks].start_pos = tok_pos;
   toks++;
   return toks - 1;
 }
 
-void process_token(enum tok_kind kind) {
-  add_tok(yytext, kind);
+void process_token(enum tok_kind kind, int tok_pos) {
+  add_tok(yytext, kind, tok_pos);
   count++;
 }
 
@@ -285,26 +287,24 @@ static void rm_toks(int idx) {
   int matched = 0;
   int which = 0;
   int started = 0;
-  int pos = 0;
   int tok_pos[n_toks];
   for (i = 0; i < toks; i++) {
-    int end_pos = pos + strlen(tok_list[i].str);
     if (tok_list[i].kind != TOK_WS &&
         tok_list[i].kind != TOK_NEWLINE) {
       if (which == idx) {
         started = 1;
         matched = 1;
       }
-      tok_pos[which % n_toks] = pos;
+      tok_pos[which % n_toks] = tok_list[i].start_pos;
       if (idx == -1 && which + 1 >= n_toks) {
         int cut_start = tok_pos[(which + 1) % n_toks];
-        printf("{\"l\":%d,\"r\":%d}\n", cut_start, end_pos);
+        int cut_end = tok_list[i].start_pos + strlen(tok_list[i].str);
+        printf("{\"l\":%d,\"r\":%d}\n", cut_start, cut_end);
       }
       which++;
     }
     if (idx != -1 && (!started || (which > (idx + n_toks))))
       printf("%s", tok_list[i].str);
-    pos = end_pos;
   }
   if (matched || idx == -1) {
     exit(OK);
@@ -360,11 +360,9 @@ static void rm_tok_pattern(int idx) {
   int started = 0;
   int matched = 0;
   int deleted = 0;
-  int pos = 0;
   int tok_pos[n_toks];
   int tok_end_pos[n_toks];
   for (i = 0; i < toks; i++) {
-    int end_pos = pos + strlen(tok_list[i].str);
     if (tok_list[i].kind != TOK_WS &&
         tok_list[i].kind != TOK_NEWLINE) {
       if (idx >= 0 && which == idx) {
@@ -373,8 +371,8 @@ static void rm_tok_pattern(int idx) {
       }
       if (idx >= 0 && which == (idx + n_toks))
         started = 0;
-      tok_pos[which % n_toks] = pos;
-      tok_end_pos[which % n_toks] = end_pos;
+      tok_pos[which % n_toks] = tok_list[i].start_pos;
+      tok_end_pos[which % n_toks] = tok_list[i].start_pos + strlen(tok_list[i].str);
       if (idx < 0 && which + 1 >= n_toks) {
         pat = patterns[n_pattern];
         printf("{\"multi\":[");
@@ -414,7 +412,6 @@ static void rm_tok_pattern(int idx) {
       if (print)
         printf("%s", tok_list[i].str);
     }
-    pos = end_pos;
   }
   if ((matched && deleted) || idx < 0) {
     exit(OK);
