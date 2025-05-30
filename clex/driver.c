@@ -299,7 +299,7 @@ static void rm_toks(int idx) {
       if (idx == -1 && which + 1 >= n_toks) {
         int cut_start = tok_pos[(which + 1) % n_toks];
         int cut_end = tok_list[i].start_pos + strlen(tok_list[i].str);
-        printf("{\"l\":%d,\"r\":%d}\n", cut_start, cut_end);
+        printf("{\"l\":%d,\"r\":%d,\"t\":\"rm-toks-%d\"}\n", cut_start, cut_end, n_toks);
       }
       which++;
     }
@@ -343,6 +343,12 @@ static void rm_tok_pattern(int idx) {
   int n_pattern = idx < 0 ? -idx : (idx & (n_patterns - 1));
   unsigned char pat = patterns[n_pattern];
 
+  int enabled_bits = 0;
+  while (pat) {
+    enabled_bits += pat & 1;
+    pat >>= 1;
+  }
+
 #ifdef _MSC_VER
   free(patterns);
 #endif
@@ -375,7 +381,7 @@ static void rm_tok_pattern(int idx) {
       tok_end_pos[which % n_toks] = tok_list[i].start_pos + strlen(tok_list[i].str);
       if (idx < 0 && which + 1 >= n_toks) {
         pat = patterns[n_pattern];
-        printf("{\"multi\":[");
+        printf("{\"t\":\"rm-tok-pattern-%d\",\"multi\":[", enabled_bits);
         int first = 1;
         for (int j = 1; j <= n_toks; ++j) {
           if (pat & 1) {

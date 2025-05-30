@@ -194,7 +194,12 @@ class GenericPass(AbstractPass):
         elif self.arg == 'lines':
             return ['line']
         elif self.arg.startswith('clex::'):
-            return [self.arg.partition('::')[2]]
+            sub_arg = self.arg.partition('::')[2]
+            if 'rm-tok-pattern' in sub_arg:
+                bits = int(sub_arg.rsplit('-')[-1])
+                return [f'rm-tok-pattern-{i}' for i in range(2, bits+1)]
+            else:
+                return [sub_arg]
         elif self.arg.startswith('topformflat::'):
             return ['topformflat' + self.arg.partition('::')[2], 'comment']
         elif self.arg.startswith('clang_delta::'):
@@ -872,7 +877,6 @@ def generate_clex_hints(test_case, files, file_to_id, clex_arg, external_program
                             h = json.loads(line)
                         except json.decoder.JSONDecodeError as e:
                             raise RuntimeError(f'Error while processing {file}: JSON line "{line}": {e}')
-                        h['t'] = clex_arg
                         if 'multi' in h:
                             for l in h['multi']:
                                 l['f'] = file_id
