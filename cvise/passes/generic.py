@@ -1158,17 +1158,14 @@ def generate_clang_pcm_minimization_hints(test_case, files, file_to_id):
         return []
     resource_dir = get_clang_resource_dir()
 
-    with tempfile.NamedTemporaryFile() as tmp_dump:
-        with tempfile.TemporaryDirectory(prefix='cvise-clanglazypcm') as tmp_for_copy:
+    with tempfile.TemporaryDirectory(prefix='cvise-clangpcmhints') as tmp_dump:
+        with tempfile.TemporaryDirectory(prefix='cvise-clangpcmhints') as tmp_for_copy:
             tmp_copy = Path(tmp_for_copy) / test_case.name
             shutil.copytree(test_case, tmp_copy, symlinks=True)
 
-            # Hack to avoid rebuilding PCMs
-            (tmp_copy / '.ALWAYS').touch()
-
-            command = ['make', '-j64']
+            command = ['make', '-j10']
             extra_env = {
-                'EXTRA_CFLAGS': f'-fno-crash-diagnostics -Xclang -fallow-pcm-with-compiler-errors -ferror-limit=0 -w',
+                'EXTRA_CFLAGS': f'-fno-crash-diagnostics -Xclang -fallow-pcm-with-compiler-errors -ferror-limit=0 -w -Xclang=-dump-minimization-hints=$$(mktemp --tmpdir={tmp_dump})',
             }
             if logging.getLogger().isEnabledFor(logging.DEBUG):
                 logging.debug(f'generate_clang_pcm_minimization_hints: running: {shlex.join(command)}\nenv: {extra_env}')
@@ -1176,27 +1173,22 @@ def generate_clang_pcm_minimization_hints(test_case, files, file_to_id):
             if logging.getLogger().isEnabledFor(logging.DEBUG):
                 logging.debug(f'generate_clang_pcm_minimization_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
 
-            for f in tmp_copy.rglob('*.o'):
-                f.unlink()
-
-            extra_env['EXTRA_CFLAGS'] += f' -Xclang=-dump-minimization-hints={tmp_dump.name}'
-            if logging.getLogger().isEnabledFor(logging.DEBUG):
-                logging.debug(f'generate_clang_pcm_minimization_hints: running: {shlex.join(command)}\nenv: {extra_env}')
-            proc = subprocess.run(command, cwd=tmp_copy, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8', env=os.environ.copy() | extra_env)
-            if logging.getLogger().isEnabledFor(logging.DEBUG):
-                logging.debug(f'generate_clang_pcm_minimization_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
-
-            if not Path(tmp_dump.name).exists() or not Path(tmp_dump.name).stat().st_size:
+            hint_files = list(Path(tmp_dump).iterdir())
+            if not hint_files:
                 # Likely an old version of Clang, before the switch was introduced.
                 if logging.getLogger().isEnabledFor(logging.DEBUG):
-                    logging.debug(f'generate_clang_pcm_minimization_hints: no out file created, exiting')
+                    logging.debug(f'generate_clang_pcm_minimization_hints: no out files created, exiting')
                 return []
-            with open(tmp_dump.name) as df:
-                clang_hints = json.load(df)
+            clang_hints = []
+            for hint_file in hint_files:
+                with open(hint_file) as df:
+                    dump = json.load(df)
+                assert 'required_ranges' in dump, f'Unexpected hint output from Clang: {dump}'
+                clang_hints += dump['required_ranges']
+            # logging.info(f'generate_clang_pcm_minimization_hints: loaded {len(clang_hints)} hints from {len(hint_files)} files')
 
-    hints = []
     required_ranges = {}
-    for item in clang_hints['required_ranges']:
+    for item in clang_hints:
         file = Path(item['file'])
         if file.is_relative_to(resource_dir):
             # Ignore #includes inside the compiler's resource directory - we never try modifying those headers.
@@ -1209,7 +1201,8 @@ def generate_clang_pcm_minimization_hints(test_case, files, file_to_id):
         file = test_case / file_rel
         assert file in file_to_id, f'Unexpected file "{file}"'
         file_id = file_to_id[file]
-        required_ranges[file_id] = item['range']
+        required_ranges.setdefault(file_id, [])
+        required_ranges[file_id] += item['range']
 
     hints = []
     for file_id, file in enumerate(files):
@@ -1233,7 +1226,20 @@ def generate_clang_pcm_minimization_hints(test_case, files, file_to_id):
 
                 line_start_pos = line_end_pos
 
-        ranges = required_ranges.get(file_id, [])
+        unordered_ranges = required_ranges.get(file_id, [])
+        ranges = []
+        for range in sorted(unordered_ranges, key=lambda rng: (rng['from']['line'], rng['from']['column'])):
+            # assert (from_line, from_col) < (to_line, to_col), f'Hint with negative size: {range}'
+            if (range['from']['line'], range['from']['column']) >= (range['to']['line'], range['to']['column']):
+                logging.info(f'Ignoring hint with negative size: {range}')
+                continue
+            if ranges and (range['from']['line'], range['from']['column']) <= (ranges[-1]['to']['line'], ranges[-1]['to']['column']):
+                if (range['to']['line'], range['to']['column']) > (ranges[-1]['to']['line'], ranges[-1]['to']['column']):
+                    ranges[-1]['to'] = range['to']
+            else:
+                ranges.append(range)
+        # logging.info(f'File {file} ranges before:\n{unordered_ranges}\nafter:\n{ranges}')
+
         cut_line = 0
         cut_col = 0
         lines_to_remove = []
@@ -1242,10 +1248,7 @@ def generate_clang_pcm_minimization_hints(test_case, files, file_to_id):
             from_col = range['from']['column'] - 1
             to_line = range['to']['line'] - 1
             to_col = range['to']['column'] - 1
-            # assert (from_line, from_col) < (to_line, to_col), f'Hint with negative size: {range}'
-            if (from_line, from_col) >= (to_line, to_col):
-                logging.info(f'Ignoring hint with negative size: {range}')
-                continue
+            assert (from_line, from_col) < (to_line, to_col), f'Hint with negative size: {range}'
             assert (to_line, to_col) <= (len(lines), 0), f'Hint beyond end of file: {range}, len(lines)={len(lines)}'
             assert from_col < lines[from_line][1] - lines[from_line][0], f'Hint column number beyond end of line: {range}, line={lines[from_line]}'
             assert to_col <= lines[to_line][1] - lines[to_line][0], f'Hint column number beyond end of line: {range}, line={lines[to_line]}'
