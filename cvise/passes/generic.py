@@ -561,7 +561,7 @@ def generate_makefile_hints(test_case, files, file_to_id):
                         })
                         if is_dupl:
                             hints.append({
-                                't': 'via_flat',
+                                't': 'makedupldep',
                                 'f': makefile_file_id,
                                 'l': mention_pos,
                                 'r': mention_pos + len(dep_name),
