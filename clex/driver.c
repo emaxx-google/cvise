@@ -327,9 +327,9 @@ static void rm_tok_pattern(int idx) {
   int n_patterns = 1 << (n_toks - 1);
 
 #ifdef _MSC_VER
-  unsigned char *patterns = calloc(n_patterns, sizeof(unsigned char));
+  unsigned *patterns = calloc(n_patterns, sizeof(unsigned));
 #else
-  unsigned char patterns[n_patterns];
+  unsigned patterns[n_patterns];
 #endif
 
   for (i = 0; i < n_patterns; i++) {
@@ -341,7 +341,7 @@ static void rm_tok_pattern(int idx) {
   }
 
   int n_pattern = idx < 0 ? -idx : (idx & (n_patterns - 1));
-  unsigned char pat = patterns[n_pattern];
+  unsigned pat = patterns[n_pattern];
 
   int enabled_bits = 0;
   while (pat) {
@@ -512,7 +512,7 @@ int main(int argc, char *argv[]) {
     mode = MODE_RM_TOK_PATTERN;
     int res = sscanf(&cmd[15], "%d", &n_toks);
     assert(res == 1);
-    assert(n_toks > 1 && n_toks <= 8);
+    assert(n_toks > 1 && n_toks <= 16);
   } else if (strcmp(cmd, "define") == 0) {
     mode = MODE_DEFINE;
   } else {
