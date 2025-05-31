@@ -1,5 +1,6 @@
 import atexit
 import copy
+import dataclasses
 import functools
 import json
 import logging
@@ -176,7 +177,7 @@ class GenericPass(AbstractPass):
 
     def get_output_hint_types(self):
         if self.arg == 'makefile':
-            return ['makeincldir', 'makemkdir', 'maketok', '#fileref', '#symbol']
+            return ['makedupldep', 'makeduploption', 'makeincldir', 'makemkdir', 'maketok', 'delflattenmodule', '#fileref', '#symbol']
         elif self.arg == 'cppmaps':
             return ['#fileref', '#symbol', 'cppmapheader', 'cppmapmissingheader', 'cppmapuse', 'cppmapmod', 'cppmapmodinl', 'cppmapline']
         elif self.arg == 'inclusion_directives':
@@ -500,6 +501,13 @@ def generate_makefile_hints(test_case, files, file_to_id):
     if not test_case.is_dir():
         return None
 
+    @dataclasses.dataclass
+    class Target:
+        deps: list = dataclasses.field(default_factory=list)
+        rule_locs: list = dataclasses.field(default_factory=list)
+        dependee_locs: list = dataclasses.field(default_factory=list)
+        args_for_folding: list = dataclasses.field(default_factory=list)
+
     targets = {}
     file_to_generating_targets = {}
     file_mentions = {}
@@ -526,8 +534,8 @@ def generate_makefile_hints(test_case, files, file_to_id):
                     phony_targets = line.split(':', maxsplit=2)[1].split()
                 is_special_target = cur_target_name in ['.PHONY', 'clean', '.ALWAYS'] + phony_targets
                 if not is_special_target:
-                    cur_target = targets.setdefault(cur_target_name, [])
-                    cur_target.append({
+                    cur_target = targets.setdefault(cur_target_name, Target())
+                    cur_target.rule_locs.append({
                         'f': makefile_file_id,
                         'l': line_start_pos,
                         'r': line_end_pos,
@@ -539,7 +547,9 @@ def generate_makefile_hints(test_case, files, file_to_id):
                     })
                     for dep_name in line.split(':', maxsplit=2)[1].split():
                         mention_pos = line_start_pos + line.find(dep_name)
-                        targets.setdefault(dep_name, []).append({
+                        is_dupl = dep_name in cur_target.deps
+                        cur_target.deps.append(dep_name)
+                        targets.setdefault(dep_name, Target()).dependee_locs.append({
                             'f': makefile_file_id,
                             'l': mention_pos,
                             'r': mention_pos + len(dep_name),
@@ -549,9 +559,16 @@ def generate_makefile_hints(test_case, files, file_to_id):
                             'l': mention_pos,
                             'r': mention_pos + len(dep_name),
                         })
+                        if is_dupl:
+                            hints.append({
+                                't': 'via_flat',
+                                'f': makefile_file_id,
+                                'l': mention_pos,
+                                'r': mention_pos + len(dep_name),
+                            })
             elif line.startswith('\t') and not is_special_target:
                 assert cur_target
-                cur_target.append({
+                cur_target.rule_locs.append({
                     'f': makefile_file_id,
                     'l': line_start_pos,
                     'r': line_end_pos,
@@ -569,6 +586,7 @@ def generate_makefile_hints(test_case, files, file_to_id):
                 elif tokens and tokens[0] == '$(CLANG)':
                     token_search_pos = 0
                     arg_of_option = None
+                    option_to_locs = {}
                     for i, token in enumerate(tokens):
                         if token == '||':  # hack
                             break
@@ -584,11 +602,15 @@ def generate_makefile_hints(test_case, files, file_to_id):
                             if is_main_file_for_rule:
                                 file_to_generating_targets.setdefault(mentioned_file, []).append(cur_target_name)
                             else:
-                                file_mentions.setdefault(mentioned_file, []).append({
+                                loc = {
                                     'f': makefile_file_id,
                                     'l': mention_pos,
                                     'r': mention_pos + len(token),
-                                })
+                                }
+                                file_mentions.setdefault(mentioned_file, []).append(loc)
+                                option_to_locs.setdefault(token, []).append(loc)
+                                if Path(mentioned_file).suffix in ('.cppmap', '.pcm') and '-fmodule' in token:
+                                    cur_target.args_for_folding.append(token)
                             arg_of_option = None
                         elif token == '$(EXTRA_CFLAGS)':
                             pass
@@ -603,13 +625,18 @@ def generate_makefile_hints(test_case, files, file_to_id):
                             })
                         elif i > 0 and not arg_of_option and token.startswith('--sysroot='):
                             dir_path = test_case / token.removeprefix('--sysroot=')
+                            loc = {
+                                'f': makefile_file_id,
+                                'l': mention_pos,
+                                'r': mention_pos + len(token),
+                            }
                             if not dir_path.exists() or not list(dir_path.iterdir()):
-                                hints.append({
-                                    'f': makefile_file_id,
+                                hint = {
                                     't': 'makeincldir',
-                                    'l': mention_pos,
-                                    'r': mention_pos + len(token),
-                                })
+                                }
+                                set_hint_locs(hint, [loc])
+                                hints.append(hint)
+                            option_to_locs.setdefault(token, []).append(loc)
                         elif i > 0 and not arg_of_option and \
                                 token not in ('-c', '-cc1', '-nostdinc++', '-nostdlib++', '-fno-crash-diagnostics', '-ferror-limit=0', '-w', '-Wno-error', '-Xclang=-emit-module', '-xc++', '-fmodules', '-fno-implicit-modules', '-fno-implicit-module-maps', '-Xclang=-fno-cxx-modules', '-Xclang=-fmodule-map-file-home-is-cwd') and \
                                 not token.startswith('-std='):
@@ -620,32 +647,44 @@ def generate_makefile_hints(test_case, files, file_to_id):
                                 if next_tokens and next_tokens[0] == '-fallow-pcm-with-compiler-errors':
                                     arg_of_option = (token, mention_pos)
                             if not arg_of_option:
-                                token_to_locs.setdefault(token, []).append({
+                                loc = {
                                     'f': makefile_file_id,
                                     'l': mention_pos,
                                     'r': mention_pos + len(token),
-                                })
+                                }
+                                token_to_locs.setdefault(token, []).append(loc)
+                                option_to_locs.setdefault(token, []).append(loc)
                         elif arg_of_option and arg_of_option[0] in ('-iquote', '-isystem', '-I'):
                             incl_path = test_case / token
+                            loc = {
+                                'f': makefile_file_id,
+                                'l': arg_of_option[1],
+                                'r': mention_pos + len(token),
+                            }
                             if not incl_path.exists() or incl_path.is_dir() and not list(incl_path.iterdir()):
-                                hints.append({
-                                    'f': makefile_file_id,
+                                hint = {
                                     't': 'makeincldir',
-                                    'l': arg_of_option[1],
-                                    'r': mention_pos + len(token),
-                                })
+                                }
+                                set_hint_locs(hint, [loc])
+                                hints.append(hint)
                             elif not incl_path.is_dir() and incl_path in file_to_id:
                                 # Sometimes the flags are (mis)used to point to specific files.
-                                hints.append({
-                                    'f': makefile_file_id,
+                                hint = {
                                     't': '#fileref',
                                     'n': file_to_id[incl_path],
-                                    'l': arg_of_option[1],
-                                    'r': mention_pos + len(token),
-                                })
+                                }
+                                set_hint_locs(hint, [loc])
+                                hints.append(hint)
+                            option_to_locs.setdefault(arg_of_option[0] + ' ' + token, []).append(loc)
                             arg_of_option = None
                         else:
                             arg_of_option = None
+                    for option, locs in option_to_locs.items():
+                        if len(locs) > 1:
+                            hints.append({
+                                't': 'makeduploption',
+                                'multi': list(locs[1:]),
+                            })
             else:
                 cur_target = None
                 cur_target_name = None
@@ -660,7 +699,8 @@ def generate_makefile_hints(test_case, files, file_to_id):
             chunks = []
             chunks += file_mentions.get(path, [])
             for target_name in file_to_generating_targets.get(path, []):
-                chunks += targets[target_name]
+                chunks += targets[target_name].rule_locs
+                chunks += targets[target_name].dependee_locs
                 chunks += file_mentions.get(target_name, [])
             assert chunks, f'path={path}'
             h = {
@@ -679,11 +719,37 @@ def generate_makefile_hints(test_case, files, file_to_id):
                     'l': loc['l'],
                     'r': loc['r'],
                 })
+
+            # Removing a .PCM file, but with additionally inserting its dependencies
+            # into the commands where it was used.
+            if Path(path).suffix in ('.pcm',) and path in targets:
+                target = targets[path]
+                chunks = []
+                chunks += target.rule_locs
+                dependee_locs = set(frozenset(l.items()) for l in target.dependee_locs)
+                for dependee_mk in target.dependee_locs:
+                    loc = copy.copy(dependee_mk)
+                    loc['v'] = ' '.join(target.deps)
+                    chunks.append(loc)
+                for dependee_clang in file_mentions.get(path, []):
+                    if frozenset(dependee_clang.items()) in dependee_locs:
+                        continue
+                    loc = copy.copy(dependee_clang)
+                    loc['v'] = ' '.join(target.args_for_folding)
+                    chunks.append(loc)
+                h = {
+                    't': 'delflattenmodule',
+                    'multi': chunks,
+                }
+                hints.append(h)
+
+    # Removal of some command-line parameter from all recipes in the makefile.
     for token, locs in sorted(token_to_locs.items()):
         for chunk in locs:
             h = {'t': 'maketok'}
             set_hint_locs(h, [chunk])
             hints.append(h)
+
     return hints
 
 def generate_cppmaps_hints(test_case, files, file_to_id):
