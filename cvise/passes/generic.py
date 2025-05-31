@@ -1240,7 +1240,7 @@ def generate_clang_pcm_minimization_hints(test_case, files, file_to_id):
                 logging.debug(f'generate_clang_pcm_minimization_hints: stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
 
             hint_files = list(Path(tmp_dump).iterdir())
-            if not hint_files:
+            if not hint_files or not any(p.stat().st_size for p in hint_files):
                 # Likely an old version of Clang, before the switch was introduced.
                 if logging.getLogger().isEnabledFor(logging.DEBUG):
                     logging.debug(f'generate_clang_pcm_minimization_hints: no out files created, exiting')
