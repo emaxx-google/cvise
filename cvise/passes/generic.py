@@ -72,6 +72,7 @@ class PolyState(dict):
         self.instances = instances
         for k, i in instances.items():
             self[k] = FuzzyBinaryState.create(i, pass_repr + ' :: ' + k, start_small=self.start_small(k))
+        self.is_type_attempted = [False] * len(self.types)
         self.ptr = -1
         return self
 
@@ -86,6 +87,7 @@ class PolyState(dict):
                 self[k] = FuzzyBinaryState.create_from_hint(i, last_state_hint[k])
             else:
                 self[k] = FuzzyBinaryState.create(i, pass_repr + ' :: ' + k, start_small=self.start_small(k))
+        self.is_type_attempted = [False] * len(self.types)
         self.ptr = -1
         return self
 
@@ -110,7 +112,10 @@ class PolyState(dict):
             previous_successes = type_to_attempted.get(tp + '::success', [])
 
             while True:
-                new[tp] = new[tp].advance(success_histories)
+                if new.is_type_attempted[new.ptr]:
+                    new[tp] = new[tp].advance(success_histories)
+                else:
+                    new.is_type_attempted[new.ptr] = True
                 if not new[tp]:
                     break
                 already_attempted = any(le == new[tp].begin() and new[tp].end() == ri
