@@ -524,6 +524,7 @@ def generate_makefile_hints(test_case, files, file_to_id):
         return []
     makefile_file_id = file_to_id[makefile_path]
     hints = []
+    flag_hints: dict[str, list[object]] = {}
     with open(makefile_path) as f:
         line_start_pos = 0
         cur_target = None
@@ -619,6 +620,12 @@ def generate_makefile_hints(test_case, files, file_to_id):
                             arg_of_option = None
                         elif token == '$(EXTRA_CFLAGS)':
                             pass
+                        elif i > 0 and token.startswith('-W'):
+                            flag_hints[makefile_file_id].append({
+                                'f': makefile_file_id,
+                                'l': mention_pos,
+                                'r': mention_pos + len(token),
+                            })
                         elif i > 0 and token.startswith('-fmodule-name='):
                             name = token.removeprefix('-fmodule-name=')
                             hints.append({
@@ -747,6 +754,12 @@ def generate_makefile_hints(test_case, files, file_to_id):
                     'multi': chunks,
                 }
                 hints.append(h)
+
+    # Join all hints for the same compiler flag in one multi-hint.
+    for flag_hint_group in flag_hints.values():
+        hints.append({
+            'multi': flag_hint_group
+        })
 
     # Removal of some command-line parameter from all recipes in the makefile.
     for token, locs in sorted(token_to_locs.items()):
