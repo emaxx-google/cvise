@@ -621,7 +621,7 @@ def generate_makefile_hints(test_case, files, file_to_id):
                         elif token == '$(EXTRA_CFLAGS)':
                             pass
                         elif i > 0 and not arg_of_option and token.startswith('-W'):
-                            flag_hints[makefile_file_id].append({
+                            flag_hints[token].setdefault(token, []).append({
                                 'f': makefile_file_id,
                                 'l': mention_pos,
                                 'r': mention_pos + len(token),
