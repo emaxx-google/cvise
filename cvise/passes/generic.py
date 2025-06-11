@@ -182,7 +182,7 @@ class GenericPass(AbstractPass):
 
     def get_output_hint_types(self):
         if self.arg == 'makefile':
-            return ['makedupldep', 'makeduploption', 'makeincldir', 'makemkdir', 'maketok', 'delflattenmodule', '#fileref', '#symbol']
+            return ['makedupldep', 'makeduploption', 'makeincldir', 'makemkdir', 'maketok', 'delflattenmodule', '#fileref', '#symbol', 'delflagall']
         elif self.arg == 'cppmaps':
             return ['#fileref', '#symbol', 'cppmapheader', 'cppmapmissingheader', 'cppmapuse', 'cppmapmod', 'cppmapmodinl', 'cppmapline']
         elif self.arg == 'inclusion_directives':
@@ -620,7 +620,7 @@ def generate_makefile_hints(test_case, files, file_to_id):
                             arg_of_option = None
                         elif token == '$(EXTRA_CFLAGS)':
                             pass
-                        elif i > 0 and token.startswith('-W'):
+                        elif i > 0 and not arg_of_option and token.startswith('-W'):
                             flag_hints[makefile_file_id].append({
                                 'f': makefile_file_id,
                                 'l': mention_pos,
@@ -757,9 +757,11 @@ def generate_makefile_hints(test_case, files, file_to_id):
 
     # Join all hints for the same compiler flag in one multi-hint.
     for flag_hint_group in flag_hints.values():
-        hints.append({
-            'multi': flag_hint_group
-        })
+        if len(flag_hints) > 0:
+            hints.append({
+                't': 'delflagall',
+                'multi': flag_hint_group
+            })
 
     # Removal of some command-line parameter from all recipes in the makefile.
     for token, locs in sorted(token_to_locs.items()):
