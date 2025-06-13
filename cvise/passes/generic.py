@@ -18,9 +18,9 @@ import tempfile
 import types
 
 from cvise.passes.abstract import AbstractPass, BinaryState, FuzzyBinaryState, PassResult
+from .hintutil import apply_hints, get_hint_locs, load_hints
 
-
-EXTERNAL_PROGRAMS = ['calc-include-depth', 'clang_delta', 'clex', 'hint_tool', 'inclusion-graph', 'topformflat', 'tree-sitter-delta']
+EXTERNAL_PROGRAMS = ['calc-include-depth', 'clang_delta', 'clex', 'inclusion-graph', 'topformflat', 'tree-sitter-delta']
 
 success_histories = {}
 type_to_attempted = {}
@@ -416,79 +416,22 @@ class GenericPass(AbstractPass):
             s.improv = 0
             s.set_dbg(None)
 
-        command = [
-            self.external_programs['hint_tool'],
-            'transform',
-            str(original_test_case),
-            str(test_case),
-        ]
-        sources = self.get_state_hint_sources(test_case, state_list)
-        if sources is None:
-            return (PassResult.INVALID, state)
-        for extra_file_path, begin, end in sources:
-            command += [str(extra_file_path), str(begin), str(end)]
-        proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
-        if proc.returncode == 1:
-            # Graceful error, e.g., a hint spanning beyond the end-of-file.
-            return (PassResult.INVALID, state)
-        if proc.returncode != 0:
-            raise RuntimeError(f'hint_tool failed: command:\n{shlex.join(command)}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
-        improv, _improv_file_count = proc.stdout.strip().split()
-
-        if logging.getLogger().isEnabledFor(logging.DEBUG):
-            logging.debug(f'hint_tool stderr:\n{proc.stderr}')
-        state_list[0].improv = int(improv)
+        files, depth_per_file, instances_per_file, hints = load_hints(state_list, test_case)
+        improv, _improv_file_count = apply_hints(hints, files, original_test_case, test_case)
+        if improv is None:
+            raise RuntimeError(f'hint application failed')
+        state_list[0].improv = improv
         return (PassResult.OK, state)
 
     def predict_improv(self, test_case, state):
         test_case = Path(test_case)
         state_list = state if isinstance(state, list) else [state]
-        command = [
-            self.external_programs['hint_tool'],
-            'dry-run',
-            str(test_case),
-        ]
-        for extra_file_path, begin, end in self.get_state_hint_sources(test_case, state_list):
-            command += [str(extra_file_path), str(begin), str(end)]
-        proc = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, encoding='utf-8')
-        if proc.returncode == 1:
+        files, depth_per_file, instances_per_file, hints = load_hints(state_list, test_case)
+        improv, improv_file_count = apply_hints(hints, files, test_case, Path('/dev/null'), dry_run=True)
+        if improv is None:
             # Graceful error, e.g., a hint spanning beyond the end-of-file.
             return 0, 0
-        if proc.returncode != 0:
-            raise RuntimeError(f'hint_tool failed: command:\n{shlex.join(command)}\nstdout:\n{proc.stdout}\nstderr:\n{proc.stderr}')
-        improv, improv_file_count = proc.stdout.strip().split()
-        return int(improv), int(improv_file_count)
-
-def load_hints(state_list, test_case, load_all=False):
-    hints_to_load = {}
-    for s in state_list:
-        set_for_file = hints_to_load.setdefault(s.extra_file_path, set())
-        if not load_all:
-            set_for_file |= set(range(s.begin(), s.end()))
-
-    hints = []
-    for extra_file_path, hint_ids in hints_to_load.items():
-        min_hint_id = None if load_all or not hint_ids else min(hint_ids)
-        max_hint_id = None if load_all or not hint_ids else max(hint_ids)
-        with pyzstd.open(extra_file_path, 'rt') as f:
-            files = json.loads(next(f))
-            files = [join_to_test_case(test_case, f) for f in files]
-            depth_per_file = json.loads(next(f))
-            instances_per_file = json.loads(next(f))
-            if load_all or hint_ids:
-                for i, line in enumerate(f):
-                    should_load = False
-                    if load_all:
-                        should_load = True
-                    else:
-                        if i < min_hint_id:
-                            continue
-                        if i > max_hint_id:
-                            break
-                        should_load = i in hint_ids
-                    if should_load:
-                        hints.append(json.loads(line))
-    return files, depth_per_file, instances_per_file, hints
+        return improv, improv_file_count
 
 def recalc_per_depth_ordering(begin, end, depth_per_file, instances_per_file, instances_per_depth):
     for file_id, _ in sorted(enumerate(depth_per_file), key=lambda i_d: (i_d[1], i_d[0])):
@@ -1876,20 +1819,6 @@ def assert_valid_hint(h, files, declared_types):
             assert False
     except AssertionError as e:
         raise RuntimeError(f'Invalid hint: {h}')
-
-def get_hint_locs(hint):
-    if 'multi' in hint:
-        return hint['multi']
-    if hint['f'] == -1:
-        return []
-    l = {
-        'f': hint['f'],
-        'l': hint['l'],
-        'r': hint['r'],
-    }
-    if 'v' in hint:
-        l['v'] = hint['v']
-    return [l]
 
 def set_hint_locs(hint, locs):
     if len(locs) == 1:
