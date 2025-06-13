@@ -86,6 +86,7 @@ def apply_hints(hints, files, src_path, dest_path, dry_run=False):
     total_reduction = 0
     for file_id, path_to in enumerate(files):
         path_from = join_to_test_case(src_path, relative_path(path_to, dest_path)).resolve()
+        assert path_from.exists(), f'path_from={path_from} doesnt exist; src_path={src_path} dest_path={dest_path} path_to={path_to}'
         if file_id in files_for_deletion:
             # logging.debug(f'skipping deleted file {path_to}')
             total_reduction += path_from.stat().st_size

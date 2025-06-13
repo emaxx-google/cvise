@@ -427,7 +427,7 @@ class GenericPass(AbstractPass):
         test_case = Path(test_case)
         state_list = state if isinstance(state, list) else [state]
         files, depth_per_file, instances_per_file, hints = load_hints(state_list, test_case)
-        improv, improv_file_count = apply_hints(hints, files, test_case, Path('/dev/null'), dry_run=True)
+        improv, improv_file_count = apply_hints(hints, files, test_case, test_case, dry_run=True)
         if improv is None:
             # Graceful error, e.g., a hint spanning beyond the end-of-file.
             return 0, 0
