@@ -1,3 +1,10 @@
+cvise (2.11.20250805) plucky; urgency=medium
+
+  Improvements:
+  * New variant of Clang PCM based heuristic:
+    "clang_toplevel_pcm_minimization_hints".
+  * Rewrite Rust implementation into Python.
+
 cvise (2.11.20250527) plucky; urgency=medium
 
   Bugfixes:
