@@ -191,8 +191,12 @@ class GenericPass(AbstractPass):
             return ['lazypcm', 'lazypcmwhole']
         elif self.arg == 'clang_pcm_minimization_hints':
             return ['clang_pcm_hints_filewise', 'clang_pcm_hints_rowwise', 'clang_pcm_hints_unused_file_filewise', 'clang_pcm_hints_unused_file_rowwise']
+        elif self.arg == 'clang_toplevel_pcm_minimization_hints':
+            return ['clang_toplevel_pcm_hints_filewise', 'clang_toplevel_pcm_hints_rowwise', 'clang_toplevel_pcm_hints_unused_file_filewise', 'clang_toplevel_pcm_hints_unused_file_rowwise']
         elif self.arg.startswith('clang_pcm_minimization_hints_splice_topformflat'):
             return ['clang_pcm_minimization_hints_splice_topformflat' + self.arg.partition('::')[2]]
+        elif self.arg.startswith('clang_toplevel_pcm_minimization_hints_splice_topformflat'):
+            return ['clang_toplevel_pcm_minimization_hints_splice_topformflat' + self.arg.partition('::')[2]]
         elif self.arg == 'line_markers':
             return ['linemarker']
         elif self.arg == 'blank':
@@ -233,6 +237,8 @@ class GenericPass(AbstractPass):
             return ['#fileref', '#symbol']
         elif self.arg.startswith('clang_pcm_minimization_hints_splice_topformflat'):
             return ['clang_pcm_hints_rowwise', 'clang_pcm_hints_unused_file_rowwise', 'topformflat' + self.arg.partition('::')[2]]
+        elif self.arg.startswith('clang_toplevel_pcm_minimization_hints_splice_topformflat'):
+            return ['clang_toplevel_pcm_hints_rowwise', 'clang_toplevel_pcm_hints_unused_file_rowwise', 'topformflat' + self.arg.partition('::')[2]]
         else:
             return []
 
@@ -260,12 +266,20 @@ class GenericPass(AbstractPass):
         elif self.arg == 'clang_pcm_lazy_load':
             hints = generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id)
         elif self.arg == 'clang_pcm_minimization_hints':
-            hints = generate_clang_pcm_minimization_hints(test_case, files, file_to_id)
+            hints = generate_clang_pcm_minimization_hints(test_case, files, file_to_id, toplevel_only=False)
+        elif self.arg == 'clang_toplevel_pcm_minimization_hints':
+            hints = generate_clang_pcm_minimization_hints(test_case, files, file_to_id, toplevel_only=True)
         elif self.arg.startswith('clang_pcm_minimization_hints_splice_topformflat'):
             hints = generate_splice_hints(test_case, files, file_to_id,
                                           ['clang_pcm_hints_rowwise', 'clang_pcm_hints_unused_file_rowwise'],
                                           ['topformflat' + self.arg.partition('::')[2]],
                                           'clang_pcm_minimization_hints_splice_topformflat' + self.arg.partition('::')[2],
+                                          other_init_states)
+        elif self.arg.startswith('clang_toplevel_pcm_minimization_hints_splice_topformflat'):
+            hints = generate_splice_hints(test_case, files, file_to_id,
+                                          ['clang_toplevel_pcm_hints_rowwise', 'clang_toplevel_pcm_hints_unused_file_rowwise'],
+                                          ['topformflat' + self.arg.partition('::')[2]],
+                                          'clang_toplevel_pcm_minimization_hints_splice_topformflat' + self.arg.partition('::')[2],
                                           other_init_states)
         elif self.arg == 'line_markers':
             hints = generate_line_markers_hints(test_case, files, file_to_id)
@@ -1177,7 +1191,7 @@ def generate_clang_pcm_lazy_load_hints(test_case, files, file_to_id):
                     # Skip non-UTF files in this heuristic.
     return hints
 
-def generate_clang_pcm_minimization_hints(test_case, files, file_to_id):
+def generate_clang_pcm_minimization_hints(test_case, files, file_to_id, toplevel_only):
     if not test_case.is_dir():
         return None
     if not os.environ.get('CLANG'):
@@ -1194,7 +1208,8 @@ def generate_clang_pcm_minimization_hints(test_case, files, file_to_id):
 
             command = ['make', '-j10']
             extra_env = {
-                'EXTRA_CFLAGS': f'-fno-crash-diagnostics -Xclang -fallow-pcm-with-compiler-errors -ferror-limit=0 -w -Xclang=-dump-minimization-hints=$$(mktemp --tmpdir={tmp_dump})',
+                'EXTRA_CFLAGS': '-fno-crash-diagnostics -Xclang -fallow-pcm-with-compiler-errors -ferror-limit=0 -w -Xclang=-dump-minimization-hints=' +
+                                (f'{tmp_dump}/dump.json' if toplevel_only else f'$$(mktemp --tmpdir={tmp_dump})'),
             }
             if logging.getLogger().isEnabledFor(logging.DEBUG):
                 logging.debug(f'generate_clang_pcm_minimization_hints: running: {shlex.join(command)}\nenv: {extra_env}')
@@ -1304,7 +1319,8 @@ def generate_clang_pcm_minimization_hints(test_case, files, file_to_id):
         if not lines_to_remove:
             continue
 
-        hint_type_prefix = 'clang_pcm_hints' if ranges else 'clang_pcm_hints_unused_file'
+        toplevel_prefix = '_toplevel' if toplevel_only else ''
+        hint_type_prefix = f'clang{toplevel_prefix}_pcm_hints' if ranges else f'clang{toplevel_prefix}_pcm_hints_unused_file'
         for pos_l, pos_r in lines_to_remove:
             hints.append({
                 't': f'{hint_type_prefix}_rowwise',
