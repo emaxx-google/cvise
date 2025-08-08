@@ -12,6 +12,156 @@
 
 #include <tree_sitter/api.h>
 
+namespace {
+
+class FuncRemover {
+ public:
+  FuncRemover()
+    : Query(nullptr, ts_query_delete) {
+    constexpr char QueryStr[] = R"(
+      [
+        (
+          function_definition
+        ) @capture0
+        (
+          template_declaration
+          (function_definition)
+        ) @capture1
+      ]
+    )";
+    uint32_t ErrorOffset = 0;
+    TSQueryError ErrorType = TSQueryErrorNone;
+    Query.reset(ts_query_new(tree_sitter_cpp(), QueryStr, std::size(QueryStr) - 1,
+                            &ErrorOffset, &ErrorType));
+    if (!Query) {
+      std::cerr << "Failed to init Tree-sitter query: error " << ErrorType
+                << " offset " << ErrorOffset << "\n";
+      std::exit(-1);
+    }
+    // The (empty) hint vocabulary.
+    std::cout << "[]\n";
+  }
+
+  void processFile(TSTree &Tree) {
+    std::unique_ptr<TSQueryCursor, decltype(&ts_query_cursor_delete)> Cursor(
+        ts_query_cursor_new(), ts_query_cursor_delete);
+    ts_query_cursor_exec(Cursor.get(), Query.get(), ts_tree_root_node(&Tree));
+
+    TSQueryMatch Match;
+    uint32_t LastEnd = 0;
+    while (ts_query_cursor_next_match(Cursor.get(), &Match)) {
+      TSNode Node = Match.captures[0].node;
+      uint32_t StartByte = ts_node_start_byte(Node);
+      uint32_t EndByte = ts_node_end_byte(Node);
+      if (StartByte < LastEnd)
+        continue;
+      LastEnd = EndByte;
+      std::cout << "{\"p\":[{\"l\":" << StartByte << ",\"r\":" << EndByte << "}]}\n";
+    }
+  }
+
+ private:
+  std::unique_ptr<TSQuery, decltype(&ts_query_delete)> Query;
+};
+
+class ClassRemover {
+ public:
+  ClassRemover()
+    : Query(nullptr, ts_query_delete) {
+    constexpr char QueryStr[] = R"(
+      [
+        (
+          class_specifier
+          body: (_)
+        ) @capture0
+        (
+          struct_specifier
+          body: (_)
+        ) @capture1
+      ]
+    )";
+    uint32_t ErrorOffset = 0;
+    TSQueryError ErrorType = TSQueryErrorNone;
+    Query.reset(ts_query_new(tree_sitter_cpp(), QueryStr, std::size(QueryStr) - 1,
+                            &ErrorOffset, &ErrorType));
+    if (!Query) {
+      std::cerr << "Failed to init Tree-sitter query: error " << ErrorType
+                << " offset " << ErrorOffset << "\n";
+      std::exit(-1);
+    }
+    // The (empty) hint vocabulary.
+    std::cout << "[]\n";
+  }
+
+  void processFile(TSTree &Tree) {
+    std::unique_ptr<TSQueryCursor, decltype(&ts_query_cursor_delete)> Cursor(
+        ts_query_cursor_new(), ts_query_cursor_delete);
+    ts_query_cursor_exec(Cursor.get(), Query.get(), ts_tree_root_node(&Tree));
+
+    TSQueryMatch Match;
+    uint32_t LastEnd = 0;
+    while (ts_query_cursor_next_match(Cursor.get(), &Match)) {
+      TSNode Node = Match.captures[0].node;
+      uint32_t StartByte = ts_node_start_byte(Node);
+      uint32_t EndByte = ts_node_end_byte(Node);
+      if (StartByte < LastEnd)
+        continue;
+      LastEnd = EndByte;
+      std::cout << "{\"p\":[{\"l\":" << StartByte << ",\"r\":" << EndByte << "}]}\n";
+    }
+  }
+
+ private:
+  std::unique_ptr<TSQuery, decltype(&ts_query_delete)> Query;
+};
+
+class NamespaceRemover {
+ public:
+  NamespaceRemover()
+    : Query(nullptr, ts_query_delete) {
+    constexpr char QueryStr[] = R"(
+      (
+        namespace_definition
+        body: (_)
+      ) @capture0
+    )";
+    uint32_t ErrorOffset = 0;
+    TSQueryError ErrorType = TSQueryErrorNone;
+    Query.reset(ts_query_new(tree_sitter_cpp(), QueryStr, std::size(QueryStr) - 1,
+                            &ErrorOffset, &ErrorType));
+    if (!Query) {
+      std::cerr << "Failed to init Tree-sitter query: error " << ErrorType
+                << " offset " << ErrorOffset << "\n";
+      std::exit(-1);
+    }
+    // The (empty) hint vocabulary.
+    std::cout << "[]\n";
+  }
+
+  void processFile(TSTree &Tree) {
+    std::unique_ptr<TSQueryCursor, decltype(&ts_query_cursor_delete)> Cursor(
+        ts_query_cursor_new(), ts_query_cursor_delete);
+    ts_query_cursor_exec(Cursor.get(), Query.get(), ts_tree_root_node(&Tree));
+
+    TSQueryMatch Match;
+    uint32_t LastEnd = 0;
+    while (ts_query_cursor_next_match(Cursor.get(), &Match)) {
+      TSNode Node = Match.captures[0].node;
+      uint32_t StartByte = ts_node_start_byte(Node);
+      uint32_t EndByte = ts_node_end_byte(Node);
+      if (StartByte < LastEnd)
+        continue;
+      LastEnd = EndByte;
+      std::cout << "{\"p\":[{\"l\":" << StartByte << ",\"r\":" << EndByte << "}]}\n";
+    }
+  }
+
+ private:
+  std::unique_ptr<TSQuery, decltype(&ts_query_delete)> Query;
+};
+
+}
+
 static bool readFile(const std::string &Path, std::string &Contents) {
   std::error_code Error;
   auto Size = std::filesystem::file_size(Path, Error);
@@ -67,6 +217,12 @@ int main(int argc, char *argv[]) {
   // Run heuristics and emit hints.
   if (Transformation == "replace-function-def-with-decl") {
     FuncDefWithDeclReplacer().processFile(Contents, *Tree);
+  } else if (Transformation == "remove-function") {
+    FuncRemover().processFile(*Tree);
+  } else if (Transformation == "remove-class") {
+    ClassRemover().processFile(*Tree);
+  } else if (Transformation == "remove-namespace") {
+    NamespaceRemover().processFile(*Tree);
   } else {
     std::cerr << "Unknown transformation: " << Transformation << "\n";
     return 1;

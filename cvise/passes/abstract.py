@@ -2,6 +2,7 @@ import copy
 from dataclasses import dataclass
 from enum import auto, Enum, unique
 import logging
+import math
 import random
 import shutil
 import subprocess
@@ -93,6 +94,13 @@ class BinaryState:
         if not instances:
             return None
         return BinaryState(instances, chunk=instances, index=0)
+
+    @staticmethod
+    def create_from_sqrt(instances):
+        if not instances:
+            return None
+        chunk = math.isqrt(instances)
+        return BinaryState(instances, chunk=chunk, index=0)
 
     def copy(self):
         return copy.copy(self)

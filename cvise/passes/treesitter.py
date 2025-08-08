@@ -1,6 +1,7 @@
 import json
 import subprocess
 
+from cvise.passes.abstract import BinaryState, SubsegmentState
 from cvise.passes.hint_based import HintBasedPass
 from cvise.utils.hint import HintBundle
 
@@ -32,3 +33,8 @@ class TreeSitterPass(HintBasedPass):
             if not line.isspace():
                 hints.append(json.loads(line))
         return HintBundle(vocabulary=vocab, hints=hints)
+
+    def create_elementary_state(self, hint_count: int):
+        if self.arg in ('remove-class', 'remove-function', 'remove-namespace'):
+            return BinaryState.create_from_sqrt(instances=hint_count)
+        return BinaryState.create(instances=hint_count)
