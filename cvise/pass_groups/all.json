@@ -16,7 +16,7 @@
     {"pass": "treesitter", "arg": "replace-function-def-with-decl", "c": true },
     {"pass": "treesitter", "arg": "remove-class", "c": true },
     {"pass": "treesitter", "arg": "remove-function", "c": true },
-    {"pass": "treesitter", "arg": "remove-namespace", "c": true },
+    {"pass": "treesitter", "arg": "erase-namespace", "c": true },
     {"pass": "clexhints", "arg": "rm-toks-1-to-4"},
     {"pass": "clexhints", "arg": "rm-toks-5-to-8"},
     {"pass": "clexhints", "arg": "rm-toks-9-to-12"},

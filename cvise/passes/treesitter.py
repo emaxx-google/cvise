@@ -35,6 +35,6 @@ class TreeSitterPass(HintBasedPass):
         return HintBundle(vocabulary=vocab, hints=hints)
 
     def create_elementary_state(self, hint_count: int):
-        if self.arg in ('remove-class', 'remove-function', 'remove-namespace'):
+        if self.arg in ('remove-class', 'remove-function', 'erase-namespace'):
             return BinaryState.create_from_sqrt(instances=hint_count)
         return BinaryState.create(instances=hint_count)
