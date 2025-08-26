@@ -102,6 +102,8 @@ Optional packages:
 
 * [pytest](https://docs.pytest.org/en/latest/)
 
+* [pytest-xdist](https://pytest-xdist.readthedocs.io/en/stable/)
+
 * [colordiff](https://www.colordiff.org/)
 
 * [jsonschema](https://pypi.org/project/jsonschema/)
