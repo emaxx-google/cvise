@@ -209,16 +209,34 @@ def _process_main_sleeping(
     assert not sigmonitor.get_future().done()
     try:
         process_ready_event.set()
-        print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] _process_main_sleeping: starting sleep', file=sys.stderr)
+        print(
+            f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] _process_main_sleeping: starting sleep',
+            file=sys.stderr,
+        )
         time.sleep(_SLEEP_INFINITY)
-        print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] _process_main_sleeping: finished sleep', file=sys.stderr)
+        print(
+            f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] _process_main_sleeping: finished sleep',
+            file=sys.stderr,
+        )
     except BaseException as e:
-        print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] _process_main_sleeping: starting get_future', file=sys.stderr)
+        print(
+            f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] _process_main_sleeping: starting get_future',
+            file=sys.stderr,
+        )
         assert type(sigmonitor.get_future().exception(timeout=0)) is type(e)
-        print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] _process_main_sleeping: finished get_future', file=sys.stderr)
-        print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] _process_main_sleeping: starting process_result_queue.put', file=sys.stderr)
+        print(
+            f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] _process_main_sleeping: finished get_future',
+            file=sys.stderr,
+        )
+        print(
+            f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] _process_main_sleeping: starting process_result_queue.put',
+            file=sys.stderr,
+        )
         process_result_queue.put(type(e))
-        print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] _process_main_sleeping: finished process_result_queue.put', file=sys.stderr)
+        print(
+            f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] _process_main_sleeping: finished process_result_queue.put',
+            file=sys.stderr,
+        )
     else:
         process_result_queue.put(None)
 
