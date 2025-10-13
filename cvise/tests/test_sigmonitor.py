@@ -17,7 +17,7 @@ from datetime import datetime, UTC
 import sys
 
 
-_SLEEP_INFINITY = 100 * 1000000
+_SLEEP_INFINITY = 100
 
 
 @pytest.fixture
