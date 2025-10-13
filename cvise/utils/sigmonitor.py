@@ -26,6 +26,9 @@ import signal
 from typing import Optional
 import weakref
 
+from datetime import datetime, UTC
+import sys
+
 
 @enum.unique
 class Mode(enum.Enum):
@@ -50,6 +53,7 @@ def init(mode: Mode) -> None:
 
     global _future
     _future = Future()
+    os.write(sys.stderr.fileno(), f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] sigmonitor.init: initialized handlers\n'.encode())
 
 
 def maybe_retrigger_action() -> None:
@@ -87,6 +91,7 @@ def signal_observed_for_testing() -> bool:
 
 
 def _on_signal(signum: int, frame) -> None:
+    os.write(sys.stderr.fileno(), f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] sigmonitor._on_signal: signum={signum}\n'.encode())
     global _sigint_observed
     global _sigterm_observed
     if signum == signal.SIGTERM:
@@ -95,18 +100,23 @@ def _on_signal(signum: int, frame) -> None:
         _sigint_observed = True
 
     exception = _create_exception(signum)
+    os.write(sys.stderr.fileno(), f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] sigmonitor._on_signal: doing future.done\n'.encode())
     # Set the exception on the future, unless it's already done. We don't use done() because it'd be potentially racy.
     with contextlib.suppress(concurrent.futures.InvalidStateError):
+        os.write(sys.stderr.fileno(), f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] sigmonitor._on_signal: doing future.set_exception\n'.encode())
         _future.set_exception(exception)
+        os.write(sys.stderr.fileno(), f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] sigmonitor._on_signal: did future.set_exception\n'.encode())
 
     if _is_on_demand_mode():
         return
     if _mode == Mode.RAISE_EXCEPTION and not _can_raise_in_frame(frame):
+        os.write(sys.stderr.fileno(), f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] sigmonitor._on_signal: exit due to !_can_raise_in_frame\n'.encode())
         # This is to avoid the "Exception ignored in" log spam.
         return
     # Prefer the standard signal handler in case there's some nontrivial logic in it (e.g., not raising an exception
     # depending on stack frame contents).
     if _mode == Mode.RAISE_EXCEPTION and signum == signal.SIGINT:
+        os.write(sys.stderr.fileno(), f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] sigmonitor._on_signal: doing default_int_handler\n'.encode())
         signal.default_int_handler(signum, frame)
     else:
         _trigger_signal_action(signum, exception)
@@ -124,8 +134,10 @@ def _implicit_maybe_retrigger_action() -> None:
 
 def _trigger_signal_action(signum: int, exception: BaseException) -> None:
     if _mode == Mode.QUICK_EXIT:
+        os.write(sys.stderr.fileno(), f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] sigmonitor._trigger_signal_action: doing _exit\n'.encode())
         os._exit(1)
     else:
+        os.write(sys.stderr.fileno(), f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] sigmonitor._trigger_signal_action: doing raise {type(exception).__name__}\n'.encode())
         raise exception
     # no code after this point - this is unreachable
 

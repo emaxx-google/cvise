@@ -229,7 +229,7 @@ def test_non_ascii_interestingness_test(tmp_path: Path, overridden_subprocess_tm
     shutil.copy(get_source_path('blocksort-part.c'), tmp_path)
     check_cvise(
         'blocksort-part.c',
-        ['-c', r"printf '\xc3\xa4\xff'; gcc -c blocksort-part.c && grep '\<nextHi\>' blocksort-part.c"],
+        ['-c', r"printf '\xc3\xa4\xff'; gcc -c -Wall -Werror blocksort-part.c && grep '\<nextHi\>' blocksort-part.c"],
         ['#define nextHi', '#define nextHi\n', '#undef nextHi', '#undef nextHi\n'],
         tmp_path,
         overridden_subprocess_tmpdir,
