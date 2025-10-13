@@ -53,17 +53,17 @@ def test_raise_exception(
     process_ready_event.wait()
 
     assert proc.pid is not None
-    print(f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] test: doing kill', file=sys.stderr)
+    print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] test: doing kill', file=sys.stderr)
     os.kill(proc.pid, signum)
-    print(f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] test: did kill', file=sys.stderr)
+    print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] test: did kill', file=sys.stderr)
 
     with _assert_duration_less_than(_SLEEP_INFINITY / 2):
-        print(f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] test: doing join', file=sys.stderr)
+        print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] test: doing join', file=sys.stderr)
         proc.join(100)
         if proc.exitcode is None:
             print('FUCK', file=sys.stderr)
             proc.join()
-        print(f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] test: finished join', file=sys.stderr)
+        print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] test: finished join', file=sys.stderr)
     assert not process_result_queue.empty()
     assert process_result_queue.get() == expected_exception
 
@@ -81,12 +81,12 @@ def test_quick_exit(
     process_ready_event.wait()
 
     assert proc.pid is not None
-    print(f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] test: doing kill', file=sys.stderr)
+    print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] test: doing kill', file=sys.stderr)
     os.kill(proc.pid, signum)
 
     with _assert_duration_less_than(_SLEEP_INFINITY / 2):
         proc.join()
-        print(f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] test: finished join', file=sys.stderr)
+        print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] test: finished join', file=sys.stderr)
 
 
 @pytest.mark.parametrize(
@@ -106,12 +106,12 @@ def test_raise_exception_on_demand(
     process_ready_event.wait()
 
     assert proc.pid is not None
-    print(f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] test: doing kill', file=sys.stderr)
+    print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] test: doing kill', file=sys.stderr)
     os.kill(proc.pid, signum)
 
     with _assert_duration_less_than(_SLEEP_INFINITY / 2):
         proc.join()
-        print(f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] test: finished join', file=sys.stderr)
+        print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] test: finished join', file=sys.stderr)
     assert not process_result_queue.empty()
     assert process_result_queue.get() == expected_exception
 
@@ -134,12 +134,12 @@ def test_raise_exception_on_demand_signal_twice(
 
     assert proc.pid is not None
     for _ in range(2):
-        print(f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] test: doing kill', file=sys.stderr)
+        print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] test: doing kill', file=sys.stderr)
         os.kill(proc.pid, signum)
 
     with _assert_duration_less_than(_SLEEP_INFINITY / 2):
         proc.join()
-        print(f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] test: finished join', file=sys.stderr)
+        print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] test: finished join', file=sys.stderr)
     assert not process_result_queue.empty()
     assert process_result_queue.get() == expected_exception
 
@@ -161,12 +161,12 @@ def test_raise_exception_in_del(
     process_ready_event.wait()
 
     assert proc.pid is not None
-    print(f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] test: doing kill', file=sys.stderr)
+    print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] test: doing kill', file=sys.stderr)
     os.kill(proc.pid, signum)
 
     with _assert_duration_less_than(_SLEEP_INFINITY / 2):
         proc.join()
-        print(f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] test: finished join', file=sys.stderr)
+        print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] test: finished join', file=sys.stderr)
     assert not process_result_queue.empty()
     assert process_result_queue.get() == ('del', None)
     assert not process_result_queue.empty()
@@ -190,12 +190,12 @@ def test_raise_exception_in_finalize(
     process_ready_event.wait()
 
     assert proc.pid is not None
-    print(f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] test: doing kill', file=sys.stderr)
+    print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] test: doing kill', file=sys.stderr)
     os.kill(proc.pid, signum)
 
     with _assert_duration_less_than(_SLEEP_INFINITY / 2):
         proc.join()
-        print(f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] test: finished join', file=sys.stderr)
+        print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] test: finished join', file=sys.stderr)
     assert not process_result_queue.empty()
     assert process_result_queue.get() == ('finalize', None)
     assert not process_result_queue.empty()
@@ -209,16 +209,16 @@ def _process_main_sleeping(
     assert not sigmonitor.get_future().done()
     try:
         process_ready_event.set()
-        print(f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] _process_main_sleeping: starting sleep', file=sys.stderr)
+        print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] _process_main_sleeping: starting sleep', file=sys.stderr)
         time.sleep(_SLEEP_INFINITY)
-        print(f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] _process_main_sleeping: finished sleep', file=sys.stderr)
+        print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] _process_main_sleeping: finished sleep', file=sys.stderr)
     except BaseException as e:
-        print(f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] _process_main_sleeping: starting get_future', file=sys.stderr)
+        print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] _process_main_sleeping: starting get_future', file=sys.stderr)
         assert type(sigmonitor.get_future().exception(timeout=0)) is type(e)
-        print(f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] _process_main_sleeping: finished get_future', file=sys.stderr)
-        print(f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] _process_main_sleeping: starting process_result_queue.put', file=sys.stderr)
+        print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] _process_main_sleeping: finished get_future', file=sys.stderr)
+        print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] _process_main_sleeping: starting process_result_queue.put', file=sys.stderr)
         process_result_queue.put(type(e))
-        print(f'[{datetime.now(UTC).isoformat(sep=' ', timespec='milliseconds')}] _process_main_sleeping: finished process_result_queue.put', file=sys.stderr)
+        print(f'[{datetime.now(UTC).isoformat(sep=" ", timespec="milliseconds")}] _process_main_sleeping: finished process_result_queue.put', file=sys.stderr)
     else:
         process_result_queue.put(None)
 
