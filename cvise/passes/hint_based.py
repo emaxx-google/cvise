@@ -276,6 +276,7 @@ class HintBasedPass(AbstractPass):
             test_case, process_event_notifier=process_event_notifier, dependee_hints=dependee_hints
         )
         from cvise.tests.testabstract import validate_hint_bundle
+
         validate_hint_bundle(hints, test_case, set(self.output_hint_types()), str(self))
         r = self.new_from_hints(hints, tmp_dir)
         logging.info(f'{self}.new: }}END: dur={time.monotonic() - st} state={r}')
@@ -325,6 +326,7 @@ class HintBasedPass(AbstractPass):
             test_case, process_event_notifier=process_event_notifier, dependee_hints=dependee_hints
         )
         from cvise.tests.testabstract import validate_hint_bundle
+
         validate_hint_bundle(hints, test_case, set(self.output_hint_types()), str(self))
         r = self.advance_on_success_from_hints(hints, state, new_tmp_dir)
         logging.info(f'{self}.advance_on_success: }}END: dur={time.monotonic() - st} state={r}')

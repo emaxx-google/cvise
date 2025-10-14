@@ -1080,7 +1080,7 @@ class TestManager:
             )
 
             # Next round should reinitialize unfinished passes.
-            if ctx.should_reinit_after_test_case_update():
+            if ctx.should_reinit_after_test_case_update([c for c in self.pass_contexts if c != ctx]):
                 ctx.stage = PassStage.BEFORE_INIT
 
         if len(self.pass_contexts) > 1:

@@ -155,10 +155,14 @@ class _ClangIncludeGraphMultiplexPass(HintBasedPass):
                 if to_node is None:
                     continue
                 from_node = _get_vocab_id(from_path, test_case, vocab, path_to_vocab)
-                assert loc_begin < loc_end, f'from_path={from_path} loc_begin={loc_begin} loc_end={loc_end} to_path={to_path}'
+                assert loc_begin < loc_end, (
+                    f'from_path={from_path} loc_begin={loc_begin} loc_end={loc_end} to_path={to_path}'
+                )
                 if from_node is not None:
                     p = test_case / vocab[from_node].decode()
-                    assert loc_end <= p.stat().st_size, f'from_path={from_path} loc_begin={loc_begin} loc_end={loc_end} to_path={to_path} size={p.stat().st_size}'
+                    assert loc_end <= p.stat().st_size, (
+                        f'from_path={from_path} loc_begin={loc_begin} loc_end={loc_end} to_path={to_path} size={p.stat().st_size}'
+                    )
                 # If a file was included from a file inside test case, create a patch pointing to the include directive;
                 # otherwise leave the hint patchless (e.g., a system/resource dir header including a standard library
                 # header that's included into the test case).

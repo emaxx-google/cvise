@@ -93,12 +93,16 @@ def validate_stored_hints(state: Union[HintState, None], pass_: HintBasedPass, t
         validate_hint_bundle(bundle, test_case, output_types)
 
 
-def validate_hint_bundle(bundle: HintBundle, test_case: Path, allowed_hint_types: Optional[set[bytes]] = None, dbg_name = None) -> None:
+def validate_hint_bundle(
+    bundle: HintBundle, test_case: Path, allowed_hint_types: Optional[set[bytes]] = None, dbg_name=None
+) -> None:
     for hint in bundle.hints:
         try:
             _validate_hint(hint, bundle, test_case, allowed_hint_types)
         except Exception as e:
-            raise ValueError(f'Error validating hint {hint} from pass {dbg_name} (vocabulary: {bundle.vocabulary})') from e
+            raise ValueError(
+                f'Error validating hint {hint} from pass {dbg_name} (vocabulary: {bundle.vocabulary})'
+            ) from e
 
 
 def _validate_hint(hint: Hint, bundle: HintBundle, test_case: Path, allowed_hint_types: Optional[set[bytes]]) -> None:
