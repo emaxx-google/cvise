@@ -4,7 +4,7 @@ from typing import Any
 
 from cvise.passes.clangincludegraph import ClangIncludeGraphPass
 from cvise.passes.hint_based import HintBasedPass
-from cvise.tests.testabstract import validate_stored_hints
+from cvise.tests.testabstract import load_hint_type_extras, validate_stored_hints
 from cvise.utils.externalprograms import find_external_programs
 from cvise.utils.hint import Hint, HintBundle, load_hints
 from cvise.utils.process import ProcessEventNotifier
@@ -57,12 +57,10 @@ a.out:
     )
     p, state = init_pass(tmp_path, input_dir)
     assert state is not None
-    bundle_paths = state.hint_bundle_paths()
 
-    assert b'@fileref' in bundle_paths
-    bundle = load_hints(bundle_paths[b'@fileref'], None, None)
-    refs = {bundle.vocabulary[h.extra] if h.extra else None for h in bundle.hints}
-    assert refs == {b'bar.h', b'foo.h'}
+    assert (
+        load_hint_type_extras(state, b'@fileref') == load_hint_type_extras(state, b'@c-include') == {b'bar.h', b'foo.h'}
+    )
 
 
 def test_multiple_commands(tmp_path: Path):
@@ -85,12 +83,12 @@ program:
     )
     p, state = init_pass(tmp_path, input_dir)
     assert state is not None
-    bundle_paths = state.hint_bundle_paths()
 
-    assert b'@fileref' in bundle_paths
-    bundle = load_hints(bundle_paths[b'@fileref'], None, None)
-    refs = {bundle.vocabulary[h.extra] if h.extra else None for h in bundle.hints}
-    assert refs == {b'bar.h', b'common.h', b'foo.h'}
+    assert (
+        load_hint_type_extras(state, b'@fileref')
+        == load_hint_type_extras(state, b'@c-include')
+        == {b'bar.h', b'common.h', b'foo.h'}
+    )
 
 
 @pytest.mark.parametrize('cmd_flag', ['-Isub', '-I sub', '-iquotesub', '-iquote sub'])
@@ -104,12 +102,8 @@ def test_include_search_path(tmp_path: Path, cmd_flag: str):
     (input_dir / 'Makefile').write_text(f'a.out:\n\tgcc -c {cmd_flag} -Wall main.cc\n')
     p, state = init_pass(tmp_path, input_dir)
     assert state is not None
-    bundle_paths = state.hint_bundle_paths()
 
-    assert b'@fileref' in bundle_paths
-    bundle = load_hints(bundle_paths[b'@fileref'], None, None)
-    refs = {bundle.vocabulary[h.extra] if h.extra else None for h in bundle.hints}
-    assert refs == {b'sub/foo.h'}
+    assert load_hint_type_extras(state, b'@fileref') == load_hint_type_extras(state, b'@c-include') == {b'sub/foo.h'}
 
 
 def test_unrelated_commands(tmp_path: Path):
@@ -129,12 +123,8 @@ foo.txt:
     )
     p, state = init_pass(tmp_path, input_dir)
     assert state is not None
-    bundle_paths = state.hint_bundle_paths()
 
-    assert b'@fileref' in bundle_paths
-    bundle = load_hints(bundle_paths[b'@fileref'], None, None)
-    refs = {bundle.vocabulary[h.extra] if h.extra else None for h in bundle.hints}
-    assert refs == {b'header.hpp'}
+    assert load_hint_type_extras(state, b'@fileref') == load_hint_type_extras(state, b'@c-include') == {b'header.hpp'}
 
 
 def test_unknown_flags(tmp_path: Path):
@@ -151,12 +141,8 @@ a.out:
     )
     p, state = init_pass(tmp_path, input_dir)
     assert state is not None
-    bundle_paths = state.hint_bundle_paths()
 
-    assert b'@fileref' in bundle_paths
-    bundle = load_hints(bundle_paths[b'@fileref'], None, None)
-    refs = {bundle.vocabulary[h.extra] if h.extra else None for h in bundle.hints}
-    assert refs == {b'header.h'}
+    assert load_hint_type_extras(state, b'@fileref') == load_hint_type_extras(state, b'@c-include') == {b'header.h'}
 
 
 def test_some_commands_fail(tmp_path: Path):
@@ -180,12 +166,12 @@ good2.o:
     )
     p, state = init_pass(tmp_path, input_dir)
     assert state is not None
-    bundle_paths = state.hint_bundle_paths()
 
-    assert b'@fileref' in bundle_paths
-    bundle = load_hints(bundle_paths[b'@fileref'], None, None)
-    refs = {bundle.vocabulary[h.extra] if h.extra else None for h in bundle.hints}
-    assert refs == {b'good1.h', b'good2.h'}
+    assert (
+        load_hint_type_extras(state, b'@fileref')
+        == load_hint_type_extras(state, b'@c-include')
+        == {b'good1.h', b'good2.h'}
+    )
 
 
 def test_includes_from_outside(tmp_path: Path):
@@ -204,12 +190,8 @@ a.out:
     )
     p, state = init_pass(tmp_path, input_dir)
     assert state is not None
-    bundle_paths = state.hint_bundle_paths()
 
-    assert b'@fileref' in bundle_paths
-    bundle = load_hints(bundle_paths[b'@fileref'], None, None)
-    refs = {bundle.vocabulary[h.extra] if h.extra else None for h in bundle.hints}
-    assert refs == {b'inside.h'}
+    assert load_hint_type_extras(state, b'@fileref') == load_hint_type_extras(state, b'@c-include') == {b'inside.h'}
 
 
 def test_clang_header_module(tmp_path: Path):
@@ -238,12 +220,12 @@ a.out: mod.pcm
     )
     p, state = init_pass(tmp_path, input_dir)
     assert state is not None
-    bundle_paths = state.hint_bundle_paths()
 
-    assert b'@fileref' in bundle_paths
-    bundle = load_hints(bundle_paths[b'@fileref'], None, None)
-    refs = {bundle.vocabulary[h.extra] if h.extra else None for h in bundle.hints}
-    assert refs == {b'modular1.h', b'modular2.h', b'text.h'}
+    assert (
+        load_hint_type_extras(state, b'@fileref')
+        == load_hint_type_extras(state, b'@c-include')
+        == {b'modular1.h', b'modular2.h', b'text.h'}
+    )
 
 
 def test_clang_header_module_home_is_cwd(tmp_path: Path):
@@ -269,9 +251,9 @@ mod.pcm:
     )
     p, state = init_pass(tmp_path, input_dir)
     assert state is not None
-    bundle_paths = state.hint_bundle_paths()
 
-    assert b'@fileref' in bundle_paths
-    bundle = load_hints(bundle_paths[b'@fileref'], None, None)
-    refs = {bundle.vocabulary[h.extra] if h.extra else None for h in bundle.hints}
-    assert refs == {b'sub/modular.h', b'sub/text.h'}
+    assert (
+        load_hint_type_extras(state, b'@fileref')
+        == load_hint_type_extras(state, b'@c-include')
+        == {b'sub/modular.h', b'sub/text.h'}
+    )
