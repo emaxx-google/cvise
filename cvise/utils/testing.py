@@ -320,13 +320,18 @@ class PassContext:
             and any(not is_special_hint_type(t) for t in self.hint_bundle_paths.keys())
         )
 
-    def should_reinit_after_test_case_update(self) -> bool:
+    def should_reinit_after_test_case_update(self, other_contexts: Sequence[PassContext]) -> bool:
         if self.stage == PassStage.ENUMERATING and self.state is not None:
-            # A pass that hasn't finished enumerating its states has to be reinitialized immediately afterwards.
+            # A pass that hasn't finished enumerating its states has to be reinitialized immediately, to continue the enumeration.
             return True
-        if isinstance(self.pass_, HintBasedPass) and any(is_special_hint_type(tp) for tp in self.pass_.input_hint_types()):
-            # Also reinitialize a pass that generates input data for other passes.
-            return True
+        if isinstance(self.pass_, HintBasedPass):
+            # Also reinitialize a pass if it generates input data for other passes.
+            outputs = set(self.pass_.output_hint_types())
+            for ctx in other_contexts:
+                if ctx.enabled and not ctx.defunct and isinstance(ctx.pass_, HintBasedPass):
+                    inputs = set(ctx.pass_.input_hint_types())
+                    if not outputs.isdisjoint(inputs):
+                        return True
         return False
 
 
@@ -1175,11 +1180,6 @@ class TestManager:
     def schedule_init(self, pass_id: int, ready_hint_types: set[bytes]) -> None:
         ctx = self.pass_contexts[pass_id]
         assert ctx.can_init_now(ready_hint_types)
-        if 'IncludeGraph' in str(ctx.pass_):
-            logging.info(f'schedule_init: {ctx.pass_} ready_hint_types={ready_hint_types}')
-            for c in self.pass_contexts:
-                if '_ClangIncludeGraphMultiplexPass' in str(c.pass_):
-                    logging.info(f'schedule_init: + {c.pass_} stage={c.stage} state={c.state}')
 
         dependee_types = set(ctx.pass_.input_hint_types()) if isinstance(ctx.pass_, HintBasedPass) else set()
         dependee_bundle_paths = []

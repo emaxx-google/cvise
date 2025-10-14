@@ -46,7 +46,7 @@ class FoldingManager:
     # This magic constant is chosen semi-arbitrarily. It shouldn't be too small to let us accumulate enough candidates
     # and attempt merging them. Neither should it be too large since the probability of a successful fold diminishes the
     # more candidates there are; also proceeding with a transformation often unblocks new reduction possibilities.
-    JOB_COUNT_FACTOR = 10
+    JOB_COUNT_FACTOR = 13
 
     def __init__(self):
         self.folding_candidates: list[HintState] = []
