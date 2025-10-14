@@ -19,6 +19,8 @@ from cvise.utils.hint import (
     store_hints,
 )
 
+import logging
+
 _HINTS_FILE_NAME_PREFIX_TEMPLATE = 'hints{type}-'
 _HINTS_FILE_NAME_SUFFIX = '.jsonl.zst'
 
@@ -267,10 +269,15 @@ class HintBasedPass(AbstractPass):
         *args,
         **kwargs,
     ):
+        logging.info(f'{self}.new: BEGIN{{')
         hints = self.generate_hints(
             test_case, process_event_notifier=process_event_notifier, dependee_hints=dependee_hints
         )
-        return self.new_from_hints(hints, tmp_dir)
+        from cvise.tests.testabstract import validate_hint_bundle
+        validate_hint_bundle(hints, test_case, set(self.output_hint_types()), str(self))
+        r = self.new_from_hints(hints, tmp_dir)
+        logging.info(f'{self}.new: }}END: state={r}')
+        return r
 
     def transform(
         self, test_case: Path, state: HintState, original_test_case: Path, written_paths: set[Path], *args, **kwargs
@@ -310,10 +317,15 @@ class HintBasedPass(AbstractPass):
         *args,
         **kwargs,
     ):
+        logging.info(f'{self}.advance_on_success: BEGIN{{')
         hints = self.generate_hints(
             test_case, process_event_notifier=process_event_notifier, dependee_hints=dependee_hints
         )
-        return self.advance_on_success_from_hints(hints, state, new_tmp_dir)
+        from cvise.tests.testabstract import validate_hint_bundle
+        validate_hint_bundle(hints, test_case, set(self.output_hint_types()), str(self))
+        r = self.advance_on_success_from_hints(hints, state, new_tmp_dir)
+        logging.info(f'{self}.advance_on_success: }}END: state={r}')
+        return r
 
     def new_from_hints(self, bundle: HintBundle, tmp_dir: Path) -> HintState | None:
         """Creates a state for pre-generated hints.

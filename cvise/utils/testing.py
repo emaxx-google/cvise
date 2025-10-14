@@ -201,6 +201,7 @@ class TestEnvironment:
             return self
         except Exception:
             logging.exception('Unexpected TestEnvironment::run failure')
+            raise
             return self
 
     def run_test(self, verbose):
@@ -318,6 +319,15 @@ class PassContext:
             and self.state is None
             and any(not is_special_hint_type(t) for t in self.hint_bundle_paths.keys())
         )
+
+    def should_reinit_after_test_case_update(self) -> bool:
+        if self.stage == PassStage.ENUMERATING and self.state is not None:
+            # A pass that hasn't finished enumerating its states has to be reinitialized immediately afterwards.
+            return True
+        if isinstance(self.pass_, HintBasedPass) and any(is_special_hint_type(tp) for tp in self.pass_.input_hint_types()):
+            # Also reinitialize a pass that generates input data for other passes.
+            return True
+        return False
 
 
 @unique
@@ -1065,7 +1075,7 @@ class TestManager:
             )
 
             # Next round should reinitialize unfinished passes.
-            if ctx.stage == PassStage.ENUMERATING and ctx.state is not None:
+            if ctx.should_reinit_after_test_case_update():
                 ctx.stage = PassStage.BEFORE_INIT
 
         if len(self.pass_contexts) > 1:
@@ -1165,6 +1175,11 @@ class TestManager:
     def schedule_init(self, pass_id: int, ready_hint_types: set[bytes]) -> None:
         ctx = self.pass_contexts[pass_id]
         assert ctx.can_init_now(ready_hint_types)
+        if 'IncludeGraph' in str(ctx.pass_):
+            logging.info(f'schedule_init: {ctx.pass_} ready_hint_types={ready_hint_types}')
+            for c in self.pass_contexts:
+                if '_ClangIncludeGraphMultiplexPass' in str(c.pass_):
+                    logging.info(f'schedule_init: + {c.pass_} stage={c.stage} state={c.state}')
 
         dependee_types = set(ctx.pass_.input_hint_types()) if isinstance(ctx.pass_, HintBasedPass) else set()
         dependee_bundle_paths = []

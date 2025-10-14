@@ -101,7 +101,7 @@ class _ClangIncludeGraphMultiplexPass(HintBasedPass):
     """
 
     def __init__(self, modulo: int, external_programs: dict[str, Optional[str]]):
-        super().__init__(external_programs=external_programs)
+        super().__init__(arg=str(modulo), external_programs=external_programs)
         self._modulo = modulo
         self._hint_type = _MULTIPLEX_PASS_HINT_TEMPLATE.format(self._modulo).encode()
 
@@ -155,6 +155,10 @@ class _ClangIncludeGraphMultiplexPass(HintBasedPass):
                 if to_node is None:
                     continue
                 from_node = _get_vocab_id(from_path, test_case, vocab, path_to_vocab)
+                assert loc_begin < loc_end, f'from_path={from_path} loc_begin={loc_begin} loc_end={loc_end} to_path={to_path}'
+                if from_node is not None:
+                    p = test_case / vocab[from_node].decode()
+                    assert loc_end <= p.stat().st_size, f'from_path={from_path} loc_begin={loc_begin} loc_end={loc_end} to_path={to_path} size={p.stat().st_size}'
                 # If a file was included from a file inside test case, create a patch pointing to the include directive;
                 # otherwise leave the hint patchless (e.g., a system/resource dir header including a standard library
                 # header that's included into the test case).
@@ -217,7 +221,7 @@ def _get_vocab_id(path: Path, test_case: Path, vocab: list[bytes], path_to_vocab
     if not path.is_absolute():
         path = test_case / path
     path = path.resolve()
-    if not path.is_relative_to(test_case):
+    if not path.is_relative_to(test_case) or path == test_case:
         return None
     rel_path = path.relative_to(test_case)
     if rel_path in path_to_vocab:

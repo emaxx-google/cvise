@@ -93,12 +93,12 @@ def validate_stored_hints(state: Union[HintState, None], pass_: HintBasedPass, t
         validate_hint_bundle(bundle, test_case, output_types)
 
 
-def validate_hint_bundle(bundle: HintBundle, test_case: Path, allowed_hint_types: Optional[set[bytes]] = None) -> None:
+def validate_hint_bundle(bundle: HintBundle, test_case: Path, allowed_hint_types: Optional[set[bytes]] = None, dbg_name = None) -> None:
     for hint in bundle.hints:
         try:
             _validate_hint(hint, bundle, test_case, allowed_hint_types)
         except Exception as e:
-            raise ValueError(f'Error validating hint {hint}') from e
+            raise ValueError(f'Error validating hint {hint} from pass {dbg_name} (vocabulary: {bundle.vocabulary})') from e
 
 
 def _validate_hint(hint: Hint, bundle: HintBundle, test_case: Path, allowed_hint_types: Optional[set[bytes]]) -> None:
@@ -117,8 +117,9 @@ def _validate_hint(hint: Hint, bundle: HintBundle, test_case: Path, allowed_hint
         if hint.type is not None and bundle.vocabulary[hint.type] in _TYPES_WITH_PATH_EXTRA:
             path = Path(bundle.vocabulary[hint.extra].decode())
             assert not path.is_absolute()
-            assert (test_case / path).exists()
-            assert (test_case / path).is_relative_to(test_case)
+            full_path = test_case / path
+            assert full_path.exists()
+            assert full_path.is_relative_to(test_case)
     for patch in hint.patches:
         assert (patch.left is None) == (patch.right is None)
         assert (patch.path is not None) == test_case.is_dir()
@@ -126,10 +127,13 @@ def _validate_hint(hint: Hint, bundle: HintBundle, test_case: Path, allowed_hint
             assert patch.path < len(bundle.vocabulary)
             path = Path(bundle.vocabulary[patch.path].decode())
             assert not path.is_absolute()
-            assert (test_case / path).exists()
-            assert (test_case / path).is_relative_to(test_case)
+            full_path = test_case / path
+            assert full_path.exists()
+            assert full_path.is_relative_to(test_case)
             if patch.right is not None:
-                assert patch.right <= (test_case / path).stat().st_size
+                assert full_path.is_file(), f'"{path}" is not a file'
+                size = full_path.stat().st_size
+                assert patch.right <= size, f'exceeds file "{path}" size {size}'
         if patch.operation is not None:
             assert patch.operation < len(bundle.vocabulary)
             assert bundle.vocabulary[patch.operation] in _KNOWN_OPERATIONS
@@ -139,6 +143,12 @@ def _validate_hint(hint: Hint, bundle: HintBundle, test_case: Path, allowed_hint
             assert patch.left <= patch.right
         if patch.value is not None:
             assert patch.value < len(bundle.vocabulary)
+            if patch.operation is not None and bundle.vocabulary[patch.operation] == b'paste':
+                path = Path(bundle.vocabulary[patch.value].decode())
+                assert not path.is_absolute()
+                full_path = test_case / path
+                assert full_path.is_relative_to(test_case)
+                assert full_path.is_file(), f'"{path}" is not a file'
 
 
 def load_hint_type_extras(state: HintState, type: bytes) -> set[bytes]:

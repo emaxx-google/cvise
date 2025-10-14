@@ -38,6 +38,7 @@ class InlineIncludesPass(HintBasedPass):
             for hint in bundle.hints:
                 assert hint.extra is not None
                 to_path = Path(bundle.vocabulary[hint.extra].decode())
+                assert to_path
                 inclusions = path_to_inclusions.setdefault(to_path, [])
                 if hint.patches:
                     for patch in hint.patches:
@@ -45,6 +46,7 @@ class InlineIncludesPass(HintBasedPass):
                         assert patch.left is not None
                         assert patch.right is not None
                         from_path = Path(bundle.vocabulary[patch.path].decode())
+                        assert from_path
                         inclusions.append(_IncludeLoc(from_path, patch.left, patch.right))
                 else:
                     inclusions.append(None)
@@ -55,6 +57,8 @@ class InlineIncludesPass(HintBasedPass):
             if len(inclusions) != 1:
                 continue
             loc = inclusions[0]
+            if loc is None:
+                continue
 
             vocab.append(str(to_path).encode())
             header_path_id = len(vocab) - 1
