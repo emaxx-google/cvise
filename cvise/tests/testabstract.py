@@ -11,7 +11,7 @@ from cvise.utils.hint import HINT_SCHEMA_STRICT, Hint, HintBundle, load_hints
 from cvise.utils.process import ProcessEventNotifier
 
 
-_TYPES_WITH_PATH_EXTRA = (b'@fileref',)
+_TYPES_WITH_PATH_EXTRA = (b'@fileref', b'@c-include',)
 _KNOWN_OPERATIONS = (b'rm', b'paste')
 
 
