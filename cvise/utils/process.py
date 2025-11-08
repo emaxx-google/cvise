@@ -83,10 +83,11 @@ class ProcessPool:
         pass
 
     def schedule(self, f, args, timeout):
-        self._recreate_workers_if_needed()
+        if len(self._busy_workers) + len(self._shutdown) == self._worker_count:
+            self._recreate_workers_if_needed()
         assert len(self._busy_workers) < self._worker_count
         for i in range(self._worker_count):
-            if i not in self._busy_workers:
+            if i not in self._busy_workers and i not in self._shutdown:
                 worker_id = i
                 break
         else:
