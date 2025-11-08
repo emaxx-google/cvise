@@ -6,6 +6,7 @@ import filecmp
 import logging
 import math
 import multiprocessing
+import multiprocessing.connection
 import os
 import platform
 import queue
@@ -20,8 +21,6 @@ from dataclasses import dataclass
 from enum import Enum, auto, unique
 from pathlib import Path
 from typing import Any
-
-import pebble
 
 from cvise.cvise import CVise
 from cvise.passes.abstract import AbstractPass, PassResult
@@ -38,7 +37,7 @@ from cvise.utils.error import (
 )
 from cvise.utils.folding import FoldingManager, FoldingStateIn, FoldingStateOut
 from cvise.utils.hint import is_special_hint_type, load_hints
-from cvise.utils.process import MPContextHook, MPTaskLossWorkaround, ProcessEventNotifier, ProcessMonitor
+from cvise.utils.process import MPContextHook, MPTaskLossWorkaround, ProcessEventNotifier, ProcessMonitor, ProcessPool
 from cvise.utils.readkey import KeyLogger
 
 MAX_PASS_INCREASEMENT_THRESHOLD = 3
@@ -413,7 +412,7 @@ class TestManager:
     INIT_TIMEOUT_FACTOR = 10
     # Used for setting the upper boundary on the scheduled task timeouts (see workaround_missing_timeouts()). This
     # factor is normally equal to 1, but durations can grow on a heavily loaded machine.
-    MISSING_TIMEOUT_THRESHOLD = 10
+    MISSING_TIMEOUT_THRESHOLD = 1
 
     def __init__(
         self,
@@ -499,8 +498,8 @@ class TestManager:
         self.mpmanager = multiprocessing.Manager()
         self.process_monitor = ProcessMonitor(self.mpmanager, self.parallel_tests)
         self.mplogger = mplogging.MPLogger(self.parallel_tests)
-        self.worker_pool: pebble.ProcessPool | None = None
-        self.mp_task_loss_workaround = MPTaskLossWorkaround(self.parallel_tests)
+        self.worker_pool = None
+        # self.mp_task_loss_workaround = MPTaskLossWorkaround(self.parallel_tests)
 
     def __enter__(self):
         self.exit_stack.enter_context(self.tmp_dir_manager)
@@ -514,16 +513,12 @@ class TestManager:
 
         worker_initializers = [
             self.mplogger.worker_process_initializer(),
-            self.mp_task_loss_workaround.initialize_in_worker,
+            # self.mp_task_loss_workaround.initialize_in_worker,
         ]
-        self.worker_pool = pebble.ProcessPool(
-            max_workers=self.parallel_tests,
-            initializer=_init_worker_process,
-            initargs=[worker_initializers],
-            context=MPContextHook(self.process_monitor),
-        )
+        self.worker_pool = ProcessPool(self.parallel_tests, MPContextHook(self.process_monitor), worker_initializers)
 
         self.exit_stack.enter_context(self.worker_pool)
+
         self.exit_stack.enter_context(self.mplogger)
         return self
 
@@ -882,7 +877,8 @@ class TestManager:
 
     def cancel_job(self, job: Job) -> None:
         self.mplogger.ignore_logs_from_job(job.order)
-        job.future.cancel()
+        # job.future.cancel()
+        self.worker_pool.cancel(job.future)
 
     def run_parallel_tests(self) -> None:
         assert self.worker_pool
@@ -914,11 +910,13 @@ class TestManager:
                 pass
 
             # no more jobs could be scheduled at the moment - wait for some results
-            wait(
-                [j.future for j in self.jobs] + [sigmonitor.get_future()],
-                return_when=FIRST_COMPLETED,
-                timeout=self.time_till_missing_timeout_workaround(),
-            )
+            # wait(
+            #     [j.future for j in self.jobs] + [sigmonitor.get_future()],
+            #     return_when=FIRST_COMPLETED,
+            #     timeout=self.time_till_missing_timeout_workaround(),
+            # )
+            if all(not j.future.done() for j in self.jobs):
+                self.worker_pool.event_loop(timeout=self.time_till_missing_timeout_workaround())
             sigmonitor.maybe_retrigger_action()
 
             self.workaround_missing_timeouts()
@@ -934,7 +932,7 @@ class TestManager:
                 self.pass_statistic.add_aborted(
                     job.pass_, job.start_time, self.parallel_tests, job.type == JobType.TRANSFORM
                 )
-            self.mp_task_loss_workaround.execute(self.worker_pool)  # only do it if at least one job canceled
+            # self.mp_task_loss_workaround.execute(self.worker_pool)  # only do it if at least one job canceled
             self.release_all_jobs()
 
     def run_passes(self, passes: Sequence[AbstractPass], interleaving: bool):

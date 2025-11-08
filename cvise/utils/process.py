@@ -6,11 +6,13 @@ import collections
 import contextlib
 import heapq
 import multiprocessing
+import multiprocessing.connection
 import multiprocessing.managers
 import os
 import queue
 import shlex
 import subprocess
+import sys
 import threading
 import time
 from collections.abc import Iterator, Mapping
@@ -25,12 +27,126 @@ from cvise.utils import sigmonitor
 
 _mp_task_loss_workaround_obj: MPTaskLossWorkaround | None = None
 
+import logging
+
 
 @unique
 class ProcessEventType(Enum):
     STARTED = auto()
     FINISHED = auto()
     ORPHANED = auto()  # reported instead of FINISHED when worker leaves the child process not terminated
+
+
+class ProcessPool:
+    def __init__(self, worker_count, mp_context, worker_initializers):
+        self._worker_count = worker_count
+        self._mp_context = mp_context
+        self._worker_listener = multiprocessing.connection.Listener(
+            address=None, family='AF_PIPE' if sys.platform == 'win32' else 'AF_UNIX', authkey=None
+        )
+        self._worker_initializers = worker_initializers
+        self._processes = []
+        self._connections = [None] * worker_count
+        self._busy_workers = set()
+        self._futures = [None] * worker_count
+
+    def __enter__(self):
+        for worker_id in range(self._worker_count):
+            p = self._mp_context.Process(
+                target=self._worker_process,
+                args=(worker_id, self._worker_listener.address, self._worker_initializers, f'{worker_id}'),
+            )
+            p.start()
+            self._processes.append(p)
+        for _ in range(self._worker_count):
+            worker_conn = self._worker_listener.accept()
+            worker_id_msg = worker_conn.recv()
+            worker_id = int(worker_id_msg.decode())
+            self._connections[worker_id] = worker_conn
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        # logging.info(f'ProcessPool.__exit__')
+        for p in self._processes:
+            if p:
+                p.terminate()
+        for p in self._processes:
+            if p:
+                p.join()
+        for c in self._connections:
+            c.close()
+        self._worker_listener.close()
+
+    def stop(self):
+        # logging.info(f'ProcessPool.stop')
+        pass
+
+    def schedule(self, f, args, timeout):
+        assert len(self._busy_workers) < self._worker_count
+        for i in range(self._worker_count):
+            if i not in self._busy_workers:
+                worker_id = i
+                break
+        else:
+            raise RuntimeError('No worker found')
+        assert worker_id not in self._busy_workers
+        # logging.info(f'ProcessPool.schedule: sending to worker {worker_id}')
+        self._busy_workers.add(worker_id)
+        self._connections[worker_id].send((f, args))
+        self._futures[worker_id] = Future()
+        return self._futures[worker_id]
+
+    def cancel(self, future: Future):
+        future.cancel()
+        if future not in self._futures:
+            return
+        worker_id = self._futures.index(future)
+        # logging.info(f'ProcessPool.cancel: terminating worker {worker_id}')
+        self._processes[worker_id].terminate()
+        self._processes[worker_id].join()
+        self._connections[worker_id].close()
+        self._busy_workers.remove(worker_id)
+        self._futures[worker_id] = None
+        p = self._mp_context.Process(
+            target=self._worker_process,
+            args=(worker_id, self._worker_listener.address, self._worker_initializers, f'{worker_id}new'),
+        )
+        p.start()
+        self._processes[worker_id] = p
+        self._connections[worker_id] = self._worker_listener.accept()
+        worker_id_msg = self._connections[worker_id].recv()
+        assert int(worker_id_msg.decode()) == worker_id
+
+    def event_loop(self, timeout):
+        to_listen = [self._connections[i] for i in self._busy_workers]
+        assert to_listen
+        ready = multiprocessing.connection.wait(to_listen, timeout=max(timeout, 0))
+        for worker_conn in ready:
+            worker_id = self._connections.index(worker_conn)
+            result = worker_conn.recv()
+            assert self._futures[worker_id] is not None
+            # logging.info(f'ProcessPool.event_loop: result for {worker_id}')
+            self._futures[worker_id].set_result(result)
+            self._futures[worker_id] = None
+            self._busy_workers.remove(worker_id)
+
+    @staticmethod
+    def _worker_process(worker_id, server_address, initializers, dbg):
+        # logging.info(f'worker_process {dbg}: begin')
+        try:
+            server_conn = multiprocessing.connection.Client(server_address, authkey=None)
+            sigmonitor.init(sigmonitor.Mode.QUICK_EXIT)
+            for init in initializers:
+                init()
+            server_conn.send(str(worker_id).encode())
+            while True:
+                f, args = server_conn.recv()
+                # logging.info(f'worker_process {dbg}: starting task')
+                result = f(*args)
+                # logging.info(f'worker_process {dbg}: finishing task: result={result}')
+                server_conn.send(result)
+        except Exception as e:
+            logging.info(f'worker_process {dbg}: exception {e}')
 
 
 class ProcessEvent:
