@@ -45,16 +45,17 @@ class ProcessPool:
             address=None, family='AF_PIPE' if sys.platform == 'win32' else 'AF_UNIX', authkey=None
         )
         self._worker_initializers = worker_initializers
-        self._processes = []
+        self._processes: list[multiprocessing.Process] = []
         self._connections = [None] * worker_count
         self._busy_workers = set()
-        self._futures = [None] * worker_count
+        self._futures: list[Future | None] = [None] * worker_count
+        self._shutdown = []
 
     def __enter__(self):
         for worker_id in range(self._worker_count):
             p = self._mp_context.Process(
                 target=self._worker_process,
-                args=(worker_id, self._worker_listener.address, self._worker_initializers, f'{worker_id}'),
+                args=(worker_id, self._worker_listener.address, self._worker_initializers),
             )
             p.start()
             self._processes.append(p)
@@ -82,6 +83,7 @@ class ProcessPool:
         pass
 
     def schedule(self, f, args, timeout):
+        self._recreate_workers_if_needed()
         assert len(self._busy_workers) < self._worker_count
         for i in range(self._worker_count):
             if i not in self._busy_workers:
@@ -102,20 +104,27 @@ class ProcessPool:
             return
         worker_id = self._futures.index(future)
         # logging.info(f'ProcessPool.cancel: terminating worker {worker_id}')
-        self._processes[worker_id].terminate()
-        self._processes[worker_id].join()
-        self._connections[worker_id].close()
-        self._busy_workers.remove(worker_id)
         self._futures[worker_id] = None
-        p = self._mp_context.Process(
-            target=self._worker_process,
-            args=(worker_id, self._worker_listener.address, self._worker_initializers, f'{worker_id}new'),
-        )
-        p.start()
-        self._processes[worker_id] = p
-        self._connections[worker_id] = self._worker_listener.accept()
-        worker_id_msg = self._connections[worker_id].recv()
-        assert int(worker_id_msg.decode()) == worker_id
+        self._processes[worker_id].terminate()
+        self._busy_workers.remove(worker_id)
+        self._shutdown.append(worker_id)
+
+    def _recreate_workers_if_needed(self):
+        for worker_id in self._shutdown:
+            self._processes[worker_id].join()
+            self._connections[worker_id].close()
+            p = self._mp_context.Process(
+                target=self._worker_process,
+                args=(worker_id, self._worker_listener.address, self._worker_initializers),
+            )
+            p.start()
+            self._processes[worker_id] = p
+        for _ in self._shutdown:
+            worker_conn = self._worker_listener.accept()
+            worker_id_msg = worker_conn.recv()
+            worker_id = int(worker_id_msg.decode())
+            self._connections[worker_id] = worker_conn
+        self._shutdown = []
 
     def event_loop(self, timeout):
         to_listen = [self._connections[i] for i in self._busy_workers]
@@ -131,8 +140,8 @@ class ProcessPool:
             self._busy_workers.remove(worker_id)
 
     @staticmethod
-    def _worker_process(worker_id, server_address, initializers, dbg):
-        # logging.info(f'worker_process {dbg}: begin')
+    def _worker_process(worker_id, server_address, initializers):
+        # logging.info(f'worker_process {worker_id}: begin')
         try:
             server_conn = multiprocessing.connection.Client(server_address, authkey=None)
             sigmonitor.init(sigmonitor.Mode.QUICK_EXIT)
@@ -141,12 +150,12 @@ class ProcessPool:
             server_conn.send(str(worker_id).encode())
             while True:
                 f, args = server_conn.recv()
-                # logging.info(f'worker_process {dbg}: starting task')
+                # logging.info(f'worker_process {worker_id}: starting task')
                 result = f(*args)
-                # logging.info(f'worker_process {dbg}: finishing task: result={result}')
+                # logging.info(f'worker_process {worker_id}: finishing task: result={result}')
                 server_conn.send(result)
         except Exception as e:
-            logging.info(f'worker_process {dbg}: exception {e}')
+            logging.info(f'worker_process {worker_id}: exception {e}')
 
 
 class ProcessEvent:
