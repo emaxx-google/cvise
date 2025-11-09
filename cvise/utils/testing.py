@@ -877,10 +877,11 @@ class TestManager:
 
     def cancel_job(self, job: Job) -> None:
         self.mplogger.ignore_logs_from_job(job.order)
-        # job.future.cancel()
-        self.worker_pool.cancel(job.future)
+        # logging.info(f'cancel_job')
+        job.future.cancel()
 
     def run_parallel_tests(self) -> None:
+        # print(f'run_parallel_tests', file=sys.stderr)
         assert self.worker_pool
         assert not self.jobs
         self.current_batch_start_order = self.order
@@ -910,13 +911,12 @@ class TestManager:
                 pass
 
             # no more jobs could be scheduled at the moment - wait for some results
-            # wait(
-            #     [j.future for j in self.jobs] + [sigmonitor.get_future()],
-            #     return_when=FIRST_COMPLETED,
-            #     timeout=self.time_till_missing_timeout_workaround(),
-            # )
-            if all(not j.future.done() for j in self.jobs):
-                self.worker_pool.event_loop(timeout=self.time_till_missing_timeout_workaround())
+            # logging.info(f'run_parallel_tests: wait on count={len([j.future for j in self.jobs if not j.future.done()])}')
+            wait(
+                [j.future for j in self.jobs] + [sigmonitor.get_future()],
+                return_when=FIRST_COMPLETED,
+                timeout=self.time_till_missing_timeout_workaround(),
+            )
             sigmonitor.maybe_retrigger_action()
 
             self.workaround_missing_timeouts()
@@ -927,6 +927,7 @@ class TestManager:
                 break
 
         if self.jobs:
+            # logging.info(f'run_parallel_tests: canceling count={len(self.jobs)}')
             for job in self.jobs:
                 self.cancel_job(job)
                 self.pass_statistic.add_aborted(
@@ -1048,6 +1049,7 @@ class TestManager:
             sys.exit(1)
 
     def process_result(self) -> None:
+        # logging.info(f'PROCESS_RESULT')
         assert self.success_candidate
         new_test_case = self.success_candidate.test_case_path
         assert new_test_case
@@ -1380,4 +1382,5 @@ def _worker_process_job_wrapper(job_order: int, func: Callable) -> Any:
         # Annotate each log message with the job order, for the log recipient in the main process to discard logs coming
         # from canceled jobs.
         with mplogging.worker_process_job_wrapper(job_order):
+            # logging.info(f'_worker_process_job_wrapper: pid={os.getpid()} order={job_order} func={func} cwd={cwd}')
             return func()
