@@ -100,6 +100,7 @@ class ProcessPool:
         free_worker_pids: collections.deque[int] = collections.deque()
         connecting_worker_pids: set[int] = set()
         busy_worker_pids: set[int] = set()
+        dying_worker_pids: set[int] = set()
         while True:
             task: ProcessPool._Task | None = None
             worker: ProcessPool._Worker | None = None
@@ -108,7 +109,9 @@ class ProcessPool:
             launch_worker: bool = False
             with self._lock:
                 # print(f'ProcessPool.thread: max_worker_count={self._max_worker_count} task_queue={len(self._task_queue)} cancel_term_queue={len(self._cancel_term_queue)} workers={len(workers)} free_worker_pids={len(free_worker_pids)} connecting_worker_pids={len(connecting_worker_pids)} busy_worker_pids={len(busy_worker_pids)}', file=sys.stderr)
-                assert len(workers) == len(connecting_worker_pids) + len(free_worker_pids) + len(busy_worker_pids), f'max_worker_count={self._max_worker_count} task_queue={len(self._task_queue)} cancel_term_queue={len(self._cancel_term_queue)} workers={len(workers)} free_worker_pids={len(free_worker_pids)} connecting_worker_pids={len(connecting_worker_pids)} busy_worker_pids={len(busy_worker_pids)}'
+                assert len(workers) == len(connecting_worker_pids) + len(free_worker_pids) + len(busy_worker_pids) + len(dying_worker_pids), (
+                    f'max_worker_count={self._max_worker_count} task_queue={len(self._task_queue)} cancel_term_queue={len(self._cancel_term_queue)} workers={len(workers)} free_worker_pids={len(free_worker_pids)} connecting_worker_pids={len(connecting_worker_pids)} busy_worker_pids={len(busy_worker_pids)} dying_worker_pids={len(dying_worker_pids)}'
+                )
                 if self._shutdown:
                     break
                 elif self._cancel_term_queue:
@@ -136,8 +139,8 @@ class ProcessPool:
                 if worker.connection:
                     worker.connection.close()
                 worker.process.terminate()
-                worker.process.join()
-                workers.pop(worker_pid)
+                assert worker_pid not in dying_worker_pids
+                dying_worker_pids.add(worker_pid)
                 busy_worker_pids.remove(worker_pid)
                 if worker_pid in free_worker_pids:
                     free_worker_pids.remove(worker_pid)
@@ -173,19 +176,39 @@ class ProcessPool:
                 connecting_worker_pids.add(proc.pid)
                 # print(f'ProcessPool.thread: launched worker pid={proc.pid}', file=sys.stderr)
             else:
-                to_listen = [self._cond_read] + [conn for pid in busy_worker_pids if (conn := workers[pid].connection) is not None]
+                to_listen = [self._cond_read] + [
+                    conn for pid in busy_worker_pids if (conn := workers[pid].connection) is not None
+                ] + [workers[pid].process.sentinel for pid in dying_worker_pids]
                 assert to_listen
                 ready = multiprocessing.connection.wait(to_listen)
-                if self._cond_read in ready:
-                    assert self._cond_read.poll()
-                    self._cond_read.recv()
-                    ready.remove(self._cond_read)
-                finished_pids = []
+                ready_conns = set()
+                joinable_procs = set()
+                for item in ready:
+                    if item == self._cond_read:
+                        assert self._cond_read.poll()
+                        self._cond_read.recv()
+                        ready.remove(self._cond_read)
+                    elif isinstance(item, multiprocessing.connection.Connection):
+                        ready_conns.add(item)
+                    else:
+                        joinable_procs.add(item)
+
+                died_pids = []
+                for pid in dying_worker_pids:
+                    worker = workers[pid]
+                    if worker.process.sentinel in joinable_procs:
+                        died_pids.append(worker.process.pid)
+                        worker.process.join()
+                        workers.pop(pid)
+                for pid in died_pids:
+                    dying_worker_pids.remove(pid)
+
+                task_completed_pids = []
                 for worker_pid in busy_worker_pids:
                     worker = workers[worker_pid]
-                    if worker.connection not in ready:
+                    if worker.connection not in ready_conns:
                         continue
-                    finished_pids.append(worker_pid)
+                    task_completed_pids.append(worker_pid)
                     # print(f'ProcessPool.thread: result for pid={worker_pid} future={worker.active_task_future}', file=sys.stderr)
                     result = worker.connection.recv()
                     future = worker.active_task_future
@@ -197,12 +220,14 @@ class ProcessPool:
                             future.set_result(result)
                     worker.active_task_future = None
                     free_worker_pids.append(worker_pid)
-                assert len(ready) == len(finished_pids)
-                for worker_pid in finished_pids:
+                assert len(ready_conns) == len(task_completed_pids)
+                for worker_pid in task_completed_pids:
                     busy_worker_pids.remove(worker_pid)
 
             assert len(workers) <= self._max_worker_count
-            assert len(workers) == len(connecting_worker_pids) + len(free_worker_pids) + len(busy_worker_pids), f'max_worker_count={self._max_worker_count} task_queue={len(self._task_queue)} cancel_term_queue={len(self._cancel_term_queue)} workers={len(workers)} free_worker_pids={len(free_worker_pids)} connecting_worker_pids={len(connecting_worker_pids)} busy_worker_pids={len(busy_worker_pids)}'
+            assert len(workers) == len(connecting_worker_pids) + len(free_worker_pids) + len(busy_worker_pids) + len(dying_worker_pids), (
+                f'max_worker_count={self._max_worker_count} task_queue={len(self._task_queue)} cancel_term_queue={len(self._cancel_term_queue)} workers={len(workers)} free_worker_pids={len(free_worker_pids)} connecting_worker_pids={len(connecting_worker_pids)} busy_worker_pids={len(busy_worker_pids)} dying_worker_pids={len(dying_worker_pids)}'
+            )
 
         # print(f'ProcessPool.thread: shutdown', file=sys.stderr)
         for worker in workers.values():
@@ -248,6 +273,10 @@ class ProcessPool:
                     server_conn.send(result)
                     # print(f'worker_process pid={pid}: task result sent', file=sys.stderr)
         except EOFError:
+            return
+        except BrokenPipeError:
+            return
+        except ConnectionResetError:
             return
         except Exception as e:
             # print(f'worker_process pid={pid} exception {e}', file=sys.stderr)
@@ -651,7 +680,9 @@ class MPTaskLossWorkaround:
             for task_id, future in enumerate(futures):
                 if task_id not in task_procs:
                     future.cancel()
-            _done, still_running = concurrent.futures.wait(futures, return_when=ALL_COMPLETED, timeout=self._POLL_LOOP_STEP)
+            _done, still_running = concurrent.futures.wait(
+                futures, return_when=ALL_COMPLETED, timeout=self._POLL_LOOP_STEP
+            )
             if not still_running:
                 break
 
