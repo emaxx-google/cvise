@@ -15,8 +15,7 @@ def mp_start_method():
     multiprocessing.set_start_method('forkserver', force=True)
 
     import logging
+
     logging.basicConfig(
-        format='%(asctime)s %(levelname)-8s %(message)s',
-        level=logging.INFO,
-        datefmt='%Y-%m-%d %H:%M:%S',
-        force=True)
+        format='%(asctime)s %(levelname)-8s %(message)s', level=logging.INFO, datefmt='%Y-%m-%d %H:%M:%S', force=True
+    )

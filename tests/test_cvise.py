@@ -29,9 +29,7 @@ def start_cvise(arguments: list[str], tmp_path: Path, overridden_subprocess_tmpd
     new_env = os.environ.copy()
     new_env['TMPDIR'] = str(overridden_subprocess_tmpdir)
 
-    return subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, encoding='utf8', env=new_env, cwd=tmp_path
-    )
+    return subprocess.Popen(cmd, stdout=subprocess.PIPE, encoding='utf8', env=new_env, cwd=tmp_path)
 
 
 def check_cvise(
