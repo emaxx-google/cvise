@@ -37,7 +37,7 @@ from cvise.utils.error import (
 )
 from cvise.utils.folding import FoldingManager, FoldingStateIn, FoldingStateOut
 from cvise.utils.hint import is_special_hint_type, load_hints
-from cvise.utils.process import MPContextHook, MPTaskLossWorkaround, ProcessEventNotifier, ProcessMonitor, ProcessPool
+from cvise.utils.process import ProcessEventNotifier, ProcessMonitor, ProcessPool
 from cvise.utils.readkey import KeyLogger
 
 MAX_PASS_INCREASEMENT_THRESHOLD = 3
@@ -495,8 +495,8 @@ class TestManager:
         )
 
         self.key_logger = None if self.skip_key_off else KeyLogger()
-        self.mpmanager = multiprocessing.Manager()
-        self.process_monitor = ProcessMonitor(self.mpmanager, self.parallel_tests)
+        # self.mpmanager = multiprocessing.Manager()
+        self.process_monitor = ProcessMonitor(self.parallel_tests)
         self.mplogger = mplogging.MPLogger(self.parallel_tests)
         self.worker_pool = None
         # self.mp_task_loss_workaround = MPTaskLossWorkaround(self.parallel_tests)
@@ -513,9 +513,11 @@ class TestManager:
 
         worker_initializers = [
             self.mplogger.worker_process_initializer(),
+            ProcessEventNotifier.initialize_in_worker,
             # self.mp_task_loss_workaround.initialize_in_worker,
         ]
-        self.worker_pool = ProcessPool(self.parallel_tests, MPContextHook(self.process_monitor), worker_initializers)
+        self.worker_pool = ProcessPool(
+            self.parallel_tests, multiprocessing.get_context(), worker_initializers, self.process_monitor)
 
         self.exit_stack.enter_context(self.worker_pool)
 
@@ -1226,7 +1228,8 @@ class TestManager:
                 test_case=self.current_test_case,
                 tmp_dir=tmp_dir,
                 job_timeout=self.timeout,
-                pid_queue=self.process_monitor.pid_queue,
+                # pid_queue=self.process_monitor.pid_queue,
+                pid_queue=None,
                 dependee_bundle_paths=dependee_bundle_paths,
             )
         else:
@@ -1237,7 +1240,8 @@ class TestManager:
                 new_tmp_dir=tmp_dir,
                 pass_succeeded_state=ctx.taken_succeeded_state,
                 job_timeout=self.timeout,
-                pid_queue=self.process_monitor.pid_queue,
+                # pid_queue=self.process_monitor.pid_queue,
+                pid_queue=None,
                 dependee_bundle_paths=dependee_bundle_paths,
             )
         init_timeout = self.INIT_TIMEOUT_FACTOR * self.timeout
@@ -1283,7 +1287,8 @@ class TestManager:
             self.test_cases,
             should_copy_test_cases,
             ctx.pass_.transform,
-            self.process_monitor.pid_queue,
+            # self.process_monitor.pid_queue,
+            None
         )
         future = self.worker_pool.schedule(
             _worker_process_job_wrapper, args=[self.order, env.run], timeout=self.timeout
@@ -1323,7 +1328,8 @@ class TestManager:
             self.test_cases,
             should_copy_test_cases,
             FoldingManager.transform,
-            self.process_monitor.pid_queue,
+            # self.process_monitor.pid_queue,
+            None,
         )
         future = self.worker_pool.schedule(
             _worker_process_job_wrapper, args=[self.order, env.run], timeout=self.timeout

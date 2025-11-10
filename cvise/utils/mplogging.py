@@ -3,11 +3,14 @@
 import copy
 import logging
 import multiprocessing
+import multiprocessing.connection
 import threading
 from collections import deque
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+
+from cvise.utils import sigmonitor
 
 
 class MPLogger:
@@ -90,7 +93,7 @@ class _WorkerProcessInitializer:
     logging_level: int
     queue: multiprocessing.SimpleQueue
 
-    def __call__(self):
+    def __call__(self, server_conn: multiprocessing.connection.Client):
         root = logging.getLogger()
         root.setLevel(self.logging_level)
         root.handlers.clear()
@@ -105,7 +108,9 @@ class _QueueAppendingHandler(logging.Handler):
         self._queue = queue
 
     def emit(self, record: logging.LogRecord) -> None:
-        self._queue.put(self._prepare_record(record))
+        prepared = self._prepare_record(record)
+        with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND):
+            self._queue.put(prepared)
 
     def _prepare_record(self, record: logging.LogRecord) -> logging.LogRecord:
         """Formats the message, removes unpickleable fields and those not necessary for formatting."""
