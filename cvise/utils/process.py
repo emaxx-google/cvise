@@ -175,6 +175,14 @@ class ProcessPool:
                     task = self._task_queue[0]
                 elif len(workers) < self._max_worker_count:
                     launch_worker = True
+                elif self._task_queue and any(t for t in self._task_queue if t.serialized is None):
+                    serialize = True
+                    for t in self._task_queue:
+                        if t.serialized is None:
+                            task = t
+                            break
+                    else:
+                        assert 0
                 elif self._accepted_connections:
                     connect_worker = True
                     worker_conn = self._accepted_connections.pop()
