@@ -185,9 +185,8 @@ class ProcessPool:
                 joinable_procs = set()
                 for item in ready:
                     if item == self._cond_read:
-                        assert self._cond_read.poll()
-                        self._cond_read.recv()
-                        ready.remove(self._cond_read)
+                        while self._cond_read.poll():
+                            self._cond_read.recv()
                     elif isinstance(item, multiprocessing.connection.Connection):
                         ready_conns.add(item)
                     else:
