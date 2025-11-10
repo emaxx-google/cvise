@@ -1006,6 +1006,7 @@ class TestManager:
                                 self.print_diff = not self.print_diff
 
                     self.run_parallel_tests()
+                    # print(f'total jobs count={self.order}', file=sys.stderr)
 
                     is_success = self.success_candidate is not None
                     if is_success:
