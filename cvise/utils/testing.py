@@ -928,11 +928,13 @@ class TestManager:
 
         if self.jobs:
             # logging.info(f'run_parallel_tests: canceling count={len(self.jobs)}')
+            # st = time.monotonic()
             for job in self.jobs:
                 self.cancel_job(job)
                 self.pass_statistic.add_aborted(
                     job.pass_, job.start_time, self.parallel_tests, job.type == JobType.TRANSFORM
                 )
+            # print(f'run_parallel_tests: cancellation time={time.monotonic()-st:.5f}')
             # self.mp_task_loss_workaround.execute(self.worker_pool)  # only do it if at least one job canceled
             self.release_all_jobs()
 
