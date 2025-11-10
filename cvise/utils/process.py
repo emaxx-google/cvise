@@ -10,6 +10,7 @@ import multiprocessing
 import multiprocessing.connection
 import multiprocessing.managers
 import os
+import pickle
 import queue
 import shlex
 import subprocess
@@ -45,6 +46,7 @@ class ProcessPool:
         func: Callable
         args: tuple
         future: Future
+        serialized: bytes | None = None
 
     @dataclass
     class _Worker:
@@ -139,6 +141,7 @@ class ProcessPool:
         while True:
             task: ProcessPool._Task | None = None
             worker: ProcessPool._Worker | None = None
+            serialize: bool = False
             terminate_worker: bool = False
             connect_worker: bool = False
             launch_worker: bool = False
@@ -165,6 +168,11 @@ class ProcessPool:
                 elif self._task_queue and self._accepted_connections:
                     connect_worker = True
                     worker_conn = self._accepted_connections.pop()
+                elif self._task_queue and len(workers) < self._max_worker_count and not connecting_worker_pids:
+                    launch_worker = True
+                elif self._task_queue and self._task_queue[0].serialized is None:
+                    serialize = True
+                    task = self._task_queue[0]
                 elif len(workers) < self._max_worker_count:
                     launch_worker = True
                 elif self._accepted_connections:
@@ -184,7 +192,7 @@ class ProcessPool:
                 busy_worker_pids.remove(worker_pid)
                 if worker_pid in free_worker_pids:
                     free_worker_pids.remove(worker_pid)
-            elif task:
+            elif task and not serialize:
                 assert free_worker_pids
                 worker_pid = free_worker_pids[0]
                 worker = workers[worker_pid]
@@ -197,15 +205,21 @@ class ProcessPool:
                     # print(f'sending task time={now} time_launch_start={worker.time_launch_start} time_launched=+{worker.time_launched-worker.time_launch_start} time_accepted=+{worker.time_accepted-worker.time_launch_start} time_handshaked=+{worker.time_handshaked-worker.time_launch_start}', file=sys.stderr)
                 worker.task_count += 1
                 # print(f'ProcessPool.thread: sending {task.future} to worker pid={worker_pid}', file=sys.stderr)
-                worker.connection.send((task.func, task.args))
+                if task.serialized is not None:
+                    worker.connection.send_bytes(task.serialized)
+                else:
+                    worker.connection.send((task.func, task.args))
                 # print(f'ProcessPool.thread: sent', file=sys.stderr)
                 worker.active_task_future = task.future
                 assert worker_pid not in busy_worker_pids
                 busy_worker_pids.add(worker_pid)
+            elif task and serialize:
+                task.serialized = pickle.dumps((task.func, task.args), protocol=pickle.HIGHEST_PROTOCOL)
             elif connect_worker:
                 assert worker_conn
                 time_accepted = time.monotonic()
                 worker_pid: int = worker_conn.recv()
+                assert worker_pid in connecting_worker_pids
                 connecting_worker_pids.remove(worker_pid)
                 workers[worker_pid].connection = worker_conn
                 workers[worker_pid].time_accepted = time_accepted
