@@ -63,7 +63,10 @@ class ProcessPool:
         self._max_worker_count = max_worker_count
         self._mp_context = mp_context
         self._worker_listener = multiprocessing.connection.Listener(
-            address=None, family='AF_PIPE' if sys.platform == 'win32' else 'AF_UNIX', authkey=None
+            address=None,
+            family='AF_PIPE' if sys.platform == 'win32' else 'AF_UNIX',
+            backlog=max_worker_count,
+            authkey=None,
         )
         self._worker_initializers = worker_initializers
         self._lock = threading.Lock()
@@ -113,8 +116,7 @@ class ProcessPool:
         while True:
             with self._lock:
                 if self._shutdown:
-                    self._accepted_connections.append(None)
-                    return
+                    break
                 if not self._workers_to_connect:
                     self._condition.wait()
                     continue
@@ -125,6 +127,10 @@ class ProcessPool:
             with self._lock:
                 self._accepted_connections.append(conn)
             self._cond_write.send(None)
+
+        with self._lock:
+            self._accepted_connections.append(None)
+        self._cond_write.send(None)
 
     def _pool_thread_main(self):
         try:
