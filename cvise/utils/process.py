@@ -9,6 +9,7 @@ import heapq
 import multiprocessing
 import multiprocessing.connection
 import multiprocessing.managers
+import multiprocessing.reduction
 import os
 import pickle
 import queue
@@ -48,6 +49,7 @@ class ProcessPool:
         future: Future
         time_scheduled: float
         serialized: bytes | None = None
+        time_serialization: float = 0
 
     @dataclass
     class _Worker:
@@ -100,8 +102,8 @@ class ProcessPool:
         self._cond_write.send(None)
 
     def schedule(self, f, args, timeout):
-        # time_scheduled = time.monotonic()
         time_scheduled = None
+        # time_scheduled = time.monotonic()
         future = Future()
         # print(f'ProcessPool.schedule: returning {future}', file=sys.stderr)
         with self._lock:
@@ -235,16 +237,20 @@ class ProcessPool:
                     # print(f'sending task pid={worker_pid} time_scheduled={task.time_scheduled:.1f} now=+{now-task.time_scheduled:.5f} time_launch_start={worker.time_launch_start:.1f} time_launched=+{worker.time_launched-worker.time_launch_start:.5f} time_accepted=+{worker.time_accepted-worker.time_launch_start:.5f} time_handshaked=+{worker.time_handshaked-worker.time_launch_start:.5f}', file=sys.stderr)
                     worker.task_count += 1
                     # print(f'ProcessPool.thread: sending {task.future} to worker pid={worker_pid}', file=sys.stderr)
-                    if task.serialized is not None:
-                        worker.connection.send_bytes(task.serialized)
-                    else:
-                        worker.connection.send((task.func, task.args, task.time_scheduled))
-                    # print(f'ProcessPool.thread: sent', file=sys.stderr)
+                    if task.serialized is None:
+                        # st = time.monotonic()
+                        task.serialized = multiprocessing.reduction.ForkingPickler.dumps((task.func, task.args, task.time_scheduled), protocol=pickle.HIGHEST_PROTOCOL)
+                        # task.time_serialization = time.monotonic() - st
+                    worker.connection.send_bytes(task.serialized)
+                    # print(f'ProcessPool.thread: sent; time_serialization={task.time_serialization:.5f}', file=sys.stderr)
                     worker.active_task_future = task.future
                     assert worker_pid not in busy_worker_pids
                     busy_worker_pids.add(worker_pid)
             elif task and serialize:
-                task.serialized = pickle.dumps((task.func, task.args, task.time_scheduled), protocol=pickle.HIGHEST_PROTOCOL)
+                # st = time.monotonic()
+                # task.serialized = pickle.dumps((task.func, task.args, task.time_scheduled), protocol=pickle.HIGHEST_PROTOCOL)
+                task.serialized = multiprocessing.reduction.ForkingPickler.dumps((task.func, task.args, task.time_scheduled))
+                # task.time_serialization = time.monotonic() - st
             elif connect_worker:
                 assert worker_conn
                 # time_accepted = time.monotonic()
@@ -312,14 +318,20 @@ class ProcessPool:
                         continue
                     task_completed_pids.append(worker_pid)
                     # print(f'ProcessPool.thread: result for pid={worker_pid} future={worker.active_task_future}', file=sys.stderr)
-                    result = worker.connection.recv()
+                    result_bytes = worker.connection.recv_bytes()
+                    # time_conn_read = time.monotonic()
+                    result = multiprocessing.reduction.ForkingPickler.loads(result_bytes)
+                    # time_unplickled = time.monotonic()
                     future = worker.active_task_future
                     assert future is not None
                     with contextlib.suppress(concurrent.futures.InvalidStateError):  # it might've been canceled
                         if isinstance(result, Exception):
                             future.set_exception(result)
                         else:
+                            result, time_scheduled, time_exec_started, time_execed = result
                             future.set_result(result)
+                            # now = time.monotonic()
+                            # print(f'finished task pid={worker_pid} time_scheduled={time_scheduled:.1f} time_till_exec_started=+{time_exec_started-time_scheduled:.5f} time_execed={time_execed-time_exec_started:.5f} time_till_conn_read=+{time_conn_read-time_execed:.5f} time_till_unplickled=+{time_unplickled-time_execed:.5f} time_till_set_future=+{now-time_execed:.5f}')
                     worker.active_task_future = None
                     assert worker_pid not in free_worker_pids
                     free_worker_pids.append(worker_pid)
@@ -367,7 +379,11 @@ class ProcessPool:
                 f, args, time_scheduled = server_conn.recv()
                 # print(f'worker_process pid={pid}: starting task: now-time_scheduled=+{time.monotonic()-time_scheduled:.5f}', file=sys.stderr)
                 try:
+                    time_exec_started = None
+                    # time_exec_started = time.monotonic()
                     result = f(*args)
+                    time_execed = None
+                    # time_execed = time.monotonic()
                     # print(f'worker_process pid={pid}: task finished: {result}', file=sys.stderr)
                 except Exception as e:
                     # print(f'worker_process pid={pid} task exception {e}', file=sys.stderr)
@@ -375,7 +391,7 @@ class ProcessPool:
                     # print(f'worker_process pid={pid}: task exception sent', file=sys.stderr)
                 else:
                     # logging.info(f'worker_process {pid}: finishing task: result={result}')
-                    server_conn.send(result)
+                    server_conn.send((result, time_scheduled, time_exec_started, time_execed))
                     # print(f'worker_process pid={pid}: task result sent', file=sys.stderr)
         except EOFError:
             return
