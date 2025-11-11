@@ -517,7 +517,8 @@ class TestManager:
             # self.mp_task_loss_workaround.initialize_in_worker,
         ]
         self.worker_pool = ProcessPool(
-            self.parallel_tests, multiprocessing.get_context(), worker_initializers, self.process_monitor)
+            self.parallel_tests, multiprocessing.get_context(), worker_initializers, self.process_monitor
+        )
 
         self.exit_stack.enter_context(self.worker_pool)
 
@@ -1288,7 +1289,7 @@ class TestManager:
             should_copy_test_cases,
             ctx.pass_.transform,
             # self.process_monitor.pid_queue,
-            None
+            None,
         )
         future = self.worker_pool.schedule(
             _worker_process_job_wrapper, args=[self.order, env.run], timeout=self.timeout

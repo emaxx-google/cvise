@@ -45,20 +45,13 @@ class ProcessPool:
         func: Callable
         args: tuple
         future: Future
-        time_scheduled: float
         serialized: bytes | None = None
-        time_pickle: float = 0
 
     @dataclass
     class _Worker:
-        process: multiprocessing.Process
+        process: multiprocessing.Process | None
         connection: multiprocessing.connection.Connection | None
         active_task_future: Future | None
-        time_launch_start: float = 0
-        time_launched: float = 0
-        time_accepted: float = 0
-        time_handshaked: float = 0
-        task_count: int = 0
 
     def __init__(self, max_worker_count, mp_context, worker_initializers, process_monitor):
         self._max_worker_count = max_worker_count
@@ -94,19 +87,15 @@ class ProcessPool:
         self._worker_listener.close()
 
     def stop(self):
-        # print(f'ProcessPool.stop', file=sys.stderr)
         with self._lock:
             self._shutdown = True
             self._condition.notify()
         self._cond_write.send(None)
 
     def schedule(self, f, args, timeout):
-        time_scheduled = None
-        time_scheduled = time.monotonic()
         future = Future()
-        # print(f'ProcessPool.schedule: future={future}', file=sys.stderr)
         with self._lock:
-            self._task_queue.append(ProcessPool._Task(func=f, args=args, future=future, time_scheduled=time_scheduled))
+            self._task_queue.append(ProcessPool._Task(func=f, args=args, future=future))
         self._cond_write.send(None)
         return future
 
@@ -117,7 +106,6 @@ class ProcessPool:
             logging.exception('_listener_thread_main exception')
 
     def _listener_thread_main2(self):
-        total_accept = 0
         while True:
             with self._lock:
                 if self._shutdown:
@@ -128,9 +116,7 @@ class ProcessPool:
                 assert self._workers_to_connect > 0
                 self._workers_to_connect -= 1
 
-            st = time.monotonic()
             conn = self._worker_listener.accept()
-            total_accept += time.monotonic() - st
             with self._lock:
                 self._accepted_connections.append(conn)
             self._cond_write.send(None)
@@ -138,7 +124,6 @@ class ProcessPool:
         with self._lock:
             self._accepted_connections.append(None)
         self._cond_write.send(None)
-        print(f'_listener_thread_main: total_accept={total_accept}', file=sys.stderr)
 
     def _pool_thread_main(self):
         try:
@@ -152,13 +137,6 @@ class ProcessPool:
         connecting_worker_pids: set[int] = set()
         busy_worker_pids: set[int] = set()
         dying_worker_pids: set[int] = set()
-        total_input_pickle = 0
-        total_input_unpickle = 0
-        total_result_pickle = 0
-        total_result_unpickle = 0
-        total_exec = 0
-        total_schedule_to_result = 0
-        total_until_exec_started = 0
         while True:
             task: ProcessPool._Task | None = None
             worker: ProcessPool._Worker | None = None
@@ -190,7 +168,11 @@ class ProcessPool:
                         terminate_workers.append(worker)
                     if not terminate_workers:
                         continue
-                elif self._task_queue and free_worker_pids and len(busy_worker_pids) + len(dying_worker_pids) < self._max_worker_count:
+                elif (
+                    self._task_queue
+                    and free_worker_pids
+                    and len(busy_worker_pids) + len(dying_worker_pids) < self._max_worker_count
+                ):
                     l1 = len(self._task_queue)
                     l2 = len(free_worker_pids)
                     l3 = self._max_worker_count - len(busy_worker_pids) - len(dying_worker_pids)
@@ -200,7 +182,11 @@ class ProcessPool:
                 elif self._task_queue and self._accepted_connections:
                     connect_worker = True
                     worker_conn = self._accepted_connections.popleft()
-                elif self._task_queue and len(workers) - len(dying_worker_pids) < self._max_worker_count and not connecting_worker_pids:
+                elif (
+                    self._task_queue
+                    and len(workers) - len(dying_worker_pids) < self._max_worker_count
+                    and not connecting_worker_pids
+                ):
                     launch_worker = True
                 elif self._task_queue and self._task_queue[0].serialized is None:
                     serialize = True
@@ -224,9 +210,6 @@ class ProcessPool:
                     assert worker
                     worker_pid: int | None = worker.process.pid
                     assert worker_pid is not None
-                    # print(f'terminating worker pid={worker_pid}', file=sys.stderr)
-                    if worker.connection:
-                        worker.connection.close()
                     worker.process.terminate()
                     assert worker_pid not in dying_worker_pids
                     dying_worker_pids.add(worker_pid)
@@ -238,42 +221,30 @@ class ProcessPool:
                     assert free_worker_pids
                     worker_pid = free_worker_pids[0]
                     worker = workers[worker_pid]
-                    task.future.add_done_callback(lambda future, pid=worker_pid: self._schedule_term_if_needed(pid, future))
+                    task.future.add_done_callback(
+                        lambda future, pid=worker_pid: self._schedule_term_if_needed(pid, future)
+                    )
                     if task.future.cancelled():
                         continue
                     free_worker_pids.popleft()
-                    now = time.monotonic()
-                    # print(f'sending task pid={worker_pid} time_scheduled={task.time_scheduled:.1f} now=+{now-task.time_scheduled:.5f} time_launch_start={worker.time_launch_start:.1f} time_launched=+{worker.time_launched-worker.time_launch_start:.5f} time_accepted=+{worker.time_accepted-worker.time_launch_start:.5f} time_handshaked=+{worker.time_handshaked-worker.time_launch_start:.5f}', file=sys.stderr)
-                    worker.task_count += 1
                     if task.serialized is None:
-                        st = time.monotonic()
-                        task.serialized = multiprocessing.reduction.ForkingPickler.dumps((task.func, task.args, task.time_scheduled))
-                        task.time_pickle = time.monotonic() - st
-                    total_input_pickle += task.time_pickle
+                        task.serialized = multiprocessing.reduction.ForkingPickler.dumps((task.func, task.args))
+                    assert task.serialized is not None
                     worker.connection.send_bytes(task.serialized)
-                    # print(f'ProcessPool.thread: sent; time_pickle={task.time_pickle:.5f}', file=sys.stderr)
                     worker.active_task_future = task.future
                     assert worker_pid not in busy_worker_pids
                     busy_worker_pids.add(worker_pid)
             elif task and serialize:
-                st = time.monotonic()
-                task.serialized = multiprocessing.reduction.ForkingPickler.dumps((task.func, task.args, task.time_scheduled))
-                task.time_pickle = time.monotonic() - st
+                task.serialized = multiprocessing.reduction.ForkingPickler.dumps((task.func, task.args))
             elif connect_worker:
                 assert worker_conn
-                time_accepted = time.monotonic()
                 worker_pid: int = worker_conn.recv()
                 assert worker_pid in connecting_worker_pids
                 connecting_worker_pids.remove(worker_pid)
                 workers[worker_pid].connection = worker_conn
-                workers[worker_pid].time_accepted = time_accepted
-                workers[worker_pid].time_handshaked = time.monotonic()
                 assert worker_pid not in free_worker_pids
                 free_worker_pids.append(worker_pid)
-                # print(f'connected to worker pid={worker_pid}', file=sys.stderr)
             elif launch_worker:
-                # print(f'launching worker', file=sys.stderr)
-                time_launch_start = time.monotonic()
                 with self._lock:
                     self._workers_to_connect += 1
                     self._condition.notify()
@@ -284,15 +255,14 @@ class ProcessPool:
                 proc.start()
                 assert proc.pid is not None
                 workers[proc.pid] = ProcessPool._Worker(process=proc, connection=None, active_task_future=None)
-                workers[proc.pid].time_launch_start = time_launch_start
-                workers[proc.pid].time_launched = time.monotonic()
                 connecting_worker_pids.add(proc.pid)
                 self._process_monitor.on_worker_started(proc.pid)
             else:
                 to_listen = (
                     [self._cond_read]
                     + [conn for pid in busy_worker_pids if (conn := workers[pid].connection) is not None]
-                    + [workers[pid].process.sentinel for pid in dying_worker_pids]
+                    + [conn for pid in dying_worker_pids if (conn := workers[pid].connection) is not None]
+                    + [proc.sentinel for pid in dying_worker_pids if (proc := workers[pid].process) is not None]
                 )
                 assert to_listen
                 ready = multiprocessing.connection.wait(to_listen)
@@ -309,54 +279,44 @@ class ProcessPool:
                     else:
                         joinable_procs.add(item)
 
-                died_pids = []
+                worker_pids_to_delete: list[int] = []
                 for pid in dying_worker_pids:
                     worker = workers[pid]
-                    if worker.process.sentinel in joinable_procs:
-                        died_pids.append(worker.process.pid)
-                        worker.process.join()
-                        workers.pop(pid)
-                        self._process_monitor.on_worker_stopped(pid)
-                for pid in died_pids:
-                    dying_worker_pids.remove(pid)
+                    if worker.process is None or worker.process.sentinel not in joinable_procs:
+                        continue
+                    worker.process.join()
+                    worker.process = None
+                    if worker.connection is None:
+                        worker_pids_to_delete.append(pid)
 
-                task_completed_pids = []
-                for worker_pid in busy_worker_pids:
-                    worker = workers[worker_pid]
+                for pid in dying_worker_pids:
+                    worker = workers[pid]
+                    if worker.connection is None or worker.connection not in ready_conns:
+                        continue
+                    try:
+                        message = worker.connection.recv()
+                    except (EOFError, OSError):
+                        if worker.process is None:
+                            worker_pids_to_delete.append(pid)
+                    else:
+                        self._handle_message_from_worker(worker, message)
+
+                for pid in worker_pids_to_delete:
+                    workers.pop(pid)
+                    self._process_monitor.on_worker_stopped(pid)
+                dying_worker_pids.difference_update(worker_pids_to_delete)
+
+                worker_pids_to_unbusy = []
+                for pid in busy_worker_pids:
+                    worker = workers[pid]
+                    assert worker.connection is not None
                     if worker.connection not in ready_conns:
                         continue
-                    # print(f'ProcessPool.thread: result for pid={worker_pid} future={worker.active_task_future}', file=sys.stderr)
-                    result_bytes = worker.connection.recv_bytes()
-                    time_conn_read = time.monotonic()
-                    result = multiprocessing.reduction.ForkingPickler.loads(result_bytes)
-                    time_unpickled = time.monotonic()
-                    if isinstance(result, ProcessEvent):
-                        self._process_monitor.on_process_event_from_worker(result)
-                        continue
-                    total_result_unpickle += time_unpickled - time_conn_read
-                    task_completed_pids.append(worker_pid)
-                    future = worker.active_task_future
-                    assert future is not None
-                    with contextlib.suppress(concurrent.futures.InvalidStateError):  # it might've been canceled
-                        if isinstance(result, Exception):
-                            future.set_exception(result)
-                        else:
-                            result, time_scheduled, time_received, time_unpickled, time_exec_started, time_execed, duration_result_pickled = result
-                            future.set_result(result)
-                            now = time.monotonic()
-                            total_exec += time_execed - time_exec_started
-                            total_input_unpickle += time_unpickled - time_received
-                            total_schedule_to_result += now - time_scheduled
-                            total_until_exec_started += time_exec_started - time_scheduled
-                            total_result_pickle += duration_result_pickled
-                            # print(f'finished task pid={worker_pid} time_scheduled={time_scheduled:.1f} time_till_exec_started=+{time_exec_started-time_scheduled:.5f} time_execed={time_execed-time_exec_started:.5f} time_till_conn_read=+{time_conn_read-time_execed:.5f} time_till_unpickled=+{time_unpickled-time_execed:.5f} time_till_set_future=+{now-time_execed:.5f}')
-                    worker.active_task_future = None
-                    assert worker_pid not in free_worker_pids
-                    free_worker_pids.append(worker_pid)
-                # assert len(ready_conns) == len(task_completed_pids)
-                for worker_pid in task_completed_pids:
-                    # print(f'finished task pid={worker_pid}', file=sys.stderr)
-                    busy_worker_pids.remove(worker_pid)
+                    message = worker.connection.recv()
+                    if self._handle_message_from_worker(worker, message):
+                        free_worker_pids.append(pid)
+                        worker_pids_to_unbusy.append(pid)
+                busy_worker_pids.difference_update(worker_pids_to_unbusy)
 
         while True:
             with self._lock:
@@ -364,7 +324,6 @@ class ProcessPool:
                     break
             self._cond_read.recv()
 
-        print(f'ProcessPool.thread: shutdown: total_input_pickle={total_input_pickle:.3f} total_input_unpickle={total_input_unpickle:.3f} total_result_pickle={total_result_pickle} total_result_unpickle={total_result_unpickle:.3f} total_exec={total_exec:.3f} total_schedule_to_result={total_schedule_to_result:.3f} total_until_exec_started={total_until_exec_started:.3f}', file=sys.stderr)
         for worker in workers.values():
             if worker.active_task_future:
                 worker.active_task_future.cancel()
@@ -374,12 +333,25 @@ class ProcessPool:
         for worker in workers.values():
             worker.process.join()
             self._process_monitor.on_worker_stopped(worker.process.pid)
-        # print(f'ProcessPool.thread: shutdown complete', file=sys.stderr)
+
+    def _handle_message_from_worker(self, worker: ProcessPool._Worker, message) -> bool:
+        if isinstance(message, ProcessEvent):
+            self._process_monitor.on_process_event_from_worker(message)
+            return False
+        if worker.active_task_future is None:
+            return False
+        assert worker.active_task_future is not None
+        with contextlib.suppress(concurrent.futures.InvalidStateError):  # it might've been canceled
+            if isinstance(message, Exception):
+                worker.active_task_future.set_exception(message)
+            else:
+                worker.active_task_future.set_result(message)
+        worker.active_task_future = None
+        return True
 
     def _schedule_term_if_needed(self, worker_pid: int, future: Future):
         if not future.cancelled():
             return
-        # print(f'_schedule_term_if_needed: worker_pid={worker_pid} future={future}', file=sys.stderr)
         with self._lock:
             self._cancel_term_queue.append((worker_pid, future))
         self._cond_write.send(None)
@@ -387,7 +359,6 @@ class ProcessPool:
     @staticmethod
     def _worker_process(server_address, initializers):
         pid = os.getpid()
-        # print(f'worker_process: pid={pid}', file=sys.stderr)
         try:
             server_conn = multiprocessing.connection.Client(server_address, authkey=None)
             sigmonitor.init(sigmonitor.Mode.QUICK_EXIT)
@@ -395,38 +366,16 @@ class ProcessPool:
                 init(server_conn)
             server_conn.send(pid)
             while True:
-                b = server_conn.recv_bytes()
-                time_received = time.monotonic()
-                f, args, time_scheduled = multiprocessing.reduction.ForkingPickler.loads(b)
-                time_unpickled = time.monotonic()
-                # print(f'worker_process pid={pid}: starting task: now-time_scheduled=+{time.monotonic()-time_scheduled:.5f}', file=sys.stderr)
+                f, args = server_conn.recv()
                 try:
-                    # time_exec_started = None
-                    time_exec_started = time.monotonic()
                     result = f(*args)
-                    # time_execed = None
-                    time_execed = time.monotonic()
-                    # print(f'worker_process pid={pid}: task finished: {result}', file=sys.stderr)
                 except Exception as e:
-                    # print(f'worker_process pid={pid} task exception {e}', file=sys.stderr)
                     server_conn.send(e)
-                    # print(f'worker_process pid={pid}: task exception sent', file=sys.stderr)
                 else:
-                    # logging.info(f'worker_process {pid}: finishing task: result={result}')
-                    d = (result, time_scheduled, time_received, time_unpickled, time_exec_started, time_execed, time.monotonic())
-                    b = multiprocessing.reduction.ForkingPickler.dumps(d)
-                    time_pickled = time.monotonic()
-                    d = (result, time_scheduled, time_received, time_unpickled, time_exec_started, time_execed, time_pickled - time_execed)
-                    server_conn.send(d)
-                    # print(f'worker_process pid={pid}: task result sent', file=sys.stderr)
-        except EOFError:
-            return
-        except BrokenPipeError:
-            return
-        except ConnectionResetError:
+                    server_conn.send(result)
+        except (EOFError, OSError):
             return
         except Exception as e:
-            # print(f'worker_process pid={pid} exception {e}', file=sys.stderr)
             raise
 
 
@@ -599,6 +548,7 @@ class ProcessKiller:
 
 _process_event_notifier_server_conn = None
 
+
 class ProcessEventNotifier:
     """Runs a subprocess and reports its PID as start/finish events on the PID queue.
 
@@ -695,7 +645,9 @@ class ProcessEventNotifier:
         finally:
             if _process_event_notifier_server_conn:
                 event_type = ProcessEventType.ORPHANED if proc.returncode is None else ProcessEventType.FINISHED
-                _process_event_notifier_server_conn.send(ProcessEvent(worker_pid=self._my_pid, child_pid=proc.pid, event_type=event_type))
+                _process_event_notifier_server_conn.send(
+                    ProcessEvent(worker_pid=self._my_pid, child_pid=proc.pid, event_type=event_type)
+                )
 
     def _communicate_with_sig_checks(
         self, proc: subprocess.Popen, input: bytes | None, timeout: float | None
