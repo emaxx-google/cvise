@@ -11,6 +11,7 @@ import multiprocessing.connection
 import multiprocessing.reduction
 import os
 import queue
+import selectors
 import shlex
 import subprocess
 import sys
@@ -45,13 +46,18 @@ class ProcessPool:
         func: Callable
         args: tuple
         future: Future
-        serialized: bytes | None = None
+
+    @dataclass
+    class _PickledTask:
+        data: memoryview
+        future: Future
 
     @dataclass
     class _Worker:
         process: multiprocessing.Process | None
         connection: multiprocessing.connection.Connection | None
         active_task_future: Future | None
+        dying: bool = False
 
     def __init__(self, max_worker_count, mp_context, worker_initializers, process_monitor):
         self._max_worker_count = max_worker_count
@@ -132,20 +138,22 @@ class ProcessPool:
             logging.exception('_pool_thread_main exception')
 
     def _pool_thread_main2(self):
+        pickled_task_queue: collections.deque[ProcessPool._PickledTask] = collections.deque()
         workers: dict[int, ProcessPool._Worker] = {}
         free_worker_pids: collections.deque[int] = collections.deque()
         connecting_worker_pids: set[int] = set()
         busy_worker_pids: set[int] = set()
         dying_worker_pids: set[int] = set()
+        event_selector = selectors.DefaultSelector()
+        event_selector.register(self._cond_read, selectors.EVENT_READ)
         while True:
-            task: ProcessPool._Task | None = None
+            task_to_pickle: ProcessPool._Task | None = None
             worker: ProcessPool._Worker | None = None
-            serialize: bool = False
             terminate_workers: list[ProcessPool._Worker] = []
-            tasks_to_schedule: list[ProcessPool._Task] = []
+            tasks_to_send: list[ProcessPool._Task | ProcessPool._PickledTask] = []
             connect_worker: bool = False
             launch_worker: bool = False
-            worker_conn = None
+            worker_conn: multiprocessing.connection.Connection | None = None
             with self._lock:
                 # print(f'ProcessPool.thread: max_worker_count={self._max_worker_count} task_queue={len(self._task_queue)} cancel_term_queue={len(self._cancel_term_queue)} workers={len(workers)} free_worker_pids={len(free_worker_pids)} connecting_worker_pids={len(connecting_worker_pids)} busy_worker_pids={len(busy_worker_pids)}', file=sys.stderr)
                 assert len(workers) == len(connecting_worker_pids) + len(free_worker_pids) + len(
@@ -169,38 +177,35 @@ class ProcessPool:
                     if not terminate_workers:
                         continue
                 elif (
-                    self._task_queue
+                    (self._task_queue or pickled_task_queue)
                     and free_worker_pids
                     and len(busy_worker_pids) + len(dying_worker_pids) < self._max_worker_count
                 ):
-                    l1 = len(self._task_queue)
+                    l1 = len(pickled_task_queue) + len(self._task_queue)
                     l2 = len(free_worker_pids)
                     l3 = self._max_worker_count - len(busy_worker_pids) - len(dying_worker_pids)
-                    for _ in range(min(l1, l2, l3)):
-                        task = self._task_queue.popleft()
-                        tasks_to_schedule.append(task)
-                elif self._task_queue and self._accepted_connections:
+                    cnt = min(l1, l2, l3)
+                    while cnt and pickled_task_queue:
+                        tasks_to_send.append(pickled_task_queue.popleft())
+                        cnt -= 1
+                    while cnt and self._task_queue:
+                        tasks_to_send.append(self._task_queue.popleft())
+                        cnt -= 1
+                elif (self._task_queue or pickled_task_queue) and self._accepted_connections:
                     connect_worker = True
                     worker_conn = self._accepted_connections.popleft()
                 elif (
-                    self._task_queue
+                    (self._task_queue or pickled_task_queue)
                     and len(workers) - len(dying_worker_pids) < self._max_worker_count
                     and not connecting_worker_pids
                 ):
                     launch_worker = True
-                elif self._task_queue and self._task_queue[0].serialized is None:
-                    serialize = True
-                    task = self._task_queue[0]
+                elif self._task_queue and not pickled_task_queue:
+                    task_to_pickle = self._task_queue.popleft()
                 elif len(workers) - len(dying_worker_pids) < self._max_worker_count:
                     launch_worker = True
-                elif self._task_queue and any(t for t in self._task_queue if t.serialized is None):
-                    serialize = True
-                    for t in self._task_queue:
-                        if t.serialized is None:
-                            task = t
-                            break
-                    else:
-                        assert 0
+                elif self._task_queue:
+                    task_to_pickle = self._task_queue.popleft()
                 elif self._accepted_connections:
                     connect_worker = True
                     worker_conn = self._accepted_connections.popleft()
@@ -208,16 +213,20 @@ class ProcessPool:
             if terminate_workers:
                 for worker in terminate_workers:
                     assert worker
+                    assert worker.process is not None
                     worker_pid: int | None = worker.process.pid
                     assert worker_pid is not None
+                    worker.dying = True
                     worker.process.terminate()
                     assert worker_pid not in dying_worker_pids
                     dying_worker_pids.add(worker_pid)
                     busy_worker_pids.remove(worker_pid)
+                    assert worker.connection is not None
+                    event_selector.register(worker.process.sentinel, selectors.EVENT_READ, data=worker_pid)
                     if worker_pid in free_worker_pids:
                         free_worker_pids.remove(worker_pid)
-            elif tasks_to_schedule:
-                for task in tasks_to_schedule:
+            elif tasks_to_send:
+                for task in tasks_to_send:
                     assert free_worker_pids
                     worker_pid = free_worker_pids[0]
                     worker = workers[worker_pid]
@@ -227,23 +236,29 @@ class ProcessPool:
                     if task.future.cancelled():
                         continue
                     free_worker_pids.popleft()
-                    if task.serialized is None:
-                        task.serialized = multiprocessing.reduction.ForkingPickler.dumps((task.func, task.args))
-                    assert task.serialized is not None
-                    worker.connection.send_bytes(task.serialized)
+                    if isinstance(task, ProcessPool._PickledTask):
+                        data = task.data
+                    else:
+                        data = self._pickle_task(task)
+                    assert worker.connection is not None
+                    worker.connection.send_bytes(data)
                     worker.active_task_future = task.future
                     assert worker_pid not in busy_worker_pids
                     busy_worker_pids.add(worker_pid)
-            elif task and serialize:
-                task.serialized = multiprocessing.reduction.ForkingPickler.dumps((task.func, task.args))
+            elif task_to_pickle:
+                pickled_task_queue.append(
+                    ProcessPool._PickledTask(data=self._pickle_task(task_to_pickle), future=task_to_pickle.future)
+                )
             elif connect_worker:
                 assert worker_conn
                 worker_pid: int = worker_conn.recv()
                 assert worker_pid in connecting_worker_pids
                 connecting_worker_pids.remove(worker_pid)
-                workers[worker_pid].connection = worker_conn
+                worker = workers[worker_pid]
+                worker.connection = worker_conn
                 assert worker_pid not in free_worker_pids
                 free_worker_pids.append(worker_pid)
+                event_selector.register(worker_conn, selectors.EVENT_READ, data=worker_pid)
             elif launch_worker:
                 with self._lock:
                     self._workers_to_connect += 1
@@ -258,65 +273,50 @@ class ProcessPool:
                 connecting_worker_pids.add(proc.pid)
                 self._process_monitor.on_worker_started(proc.pid)
             else:
-                to_listen = (
-                    [self._cond_read]
-                    + [conn for pid in busy_worker_pids if (conn := workers[pid].connection) is not None]
-                    + [conn for pid in dying_worker_pids if (conn := workers[pid].connection) is not None]
-                    + [proc.sentinel for pid in dying_worker_pids if (proc := workers[pid].process) is not None]
-                )
-                assert to_listen
-                ready = multiprocessing.connection.wait(to_listen)
-                ready_conns = set()
-                joinable_procs = set()
-                for item in ready:
-                    if item == self._cond_read:
+                ready = event_selector.select()
+                for selector_key, events in ready:
+                    fileobj = selector_key.fileobj
+                    if fileobj == self._cond_read:
+                        # Nothing to do here besides eating the notifications - the next iteration of the outer loop
+                        # will pick up the changes (a new task, or a shutdown signal, etc.).
                         while True:
                             self._cond_read.recv()
                             if not self._cond_read.poll():
                                 break
-                    elif isinstance(item, multiprocessing.connection.Connection):
-                        ready_conns.add(item)
+                    elif isinstance(fileobj, multiprocessing.connection.Connection):
+                        pid: int = selector_key.data
+                        worker = workers[pid]
+                        assert worker.connection is not None
+                        if worker.dying:
+                            try:
+                                message = worker.connection.recv()
+                            except (EOFError, OSError):
+                                event_selector.unregister(worker.connection)
+                                worker.connection = None
+                                if worker.process is None:
+                                    workers.pop(pid)
+                                    self._process_monitor.on_worker_stopped(pid)
+                                    dying_worker_pids.remove(pid)
+                            else:
+                                self._handle_message_from_worker(worker, message)
+                        else:
+                            message = worker.connection.recv()
+                            if self._handle_message_from_worker(worker, message):
+                                busy_worker_pids.remove(pid)
+                                free_worker_pids.append(pid)
+                    elif isinstance(fileobj, int):
+                        pid: int = selector_key.data
+                        worker = workers[pid]
+                        assert worker.process is not None
+                        event_selector.unregister(worker.process.sentinel)
+                        worker.process.join()
+                        worker.process = None
+                        if worker.connection is None:
+                            workers.pop(pid)
+                            self._process_monitor.on_worker_stopped(pid)
+                            dying_worker_pids.remove(pid)
                     else:
-                        joinable_procs.add(item)
-
-                worker_pids_to_delete: list[int] = []
-                for pid in dying_worker_pids:
-                    worker = workers[pid]
-                    if worker.process is None or worker.process.sentinel not in joinable_procs:
-                        continue
-                    worker.process.join()
-                    worker.process = None
-                    if worker.connection is None:
-                        worker_pids_to_delete.append(pid)
-
-                for pid in dying_worker_pids:
-                    worker = workers[pid]
-                    if worker.connection is None or worker.connection not in ready_conns:
-                        continue
-                    try:
-                        message = worker.connection.recv()
-                    except (EOFError, OSError):
-                        if worker.process is None:
-                            worker_pids_to_delete.append(pid)
-                    else:
-                        self._handle_message_from_worker(worker, message)
-
-                for pid in worker_pids_to_delete:
-                    workers.pop(pid)
-                    self._process_monitor.on_worker_stopped(pid)
-                dying_worker_pids.difference_update(worker_pids_to_delete)
-
-                worker_pids_to_unbusy = []
-                for pid in busy_worker_pids:
-                    worker = workers[pid]
-                    assert worker.connection is not None
-                    if worker.connection not in ready_conns:
-                        continue
-                    message = worker.connection.recv()
-                    if self._handle_message_from_worker(worker, message):
-                        free_worker_pids.append(pid)
-                        worker_pids_to_unbusy.append(pid)
-                busy_worker_pids.difference_update(worker_pids_to_unbusy)
+                        raise ValueError(f'Unexpected selector result: {fileobj}')
 
         while True:
             with self._lock:
@@ -324,6 +324,7 @@ class ProcessPool:
                     break
             self._cond_read.recv()
 
+        event_selector.close()
         for worker in workers.values():
             if worker.active_task_future:
                 worker.active_task_future.cancel()
@@ -377,6 +378,10 @@ class ProcessPool:
             return
         except Exception as e:
             raise
+
+    @staticmethod
+    def _pickle_task(task: ProcessPool._Task) -> memoryview:
+        return multiprocessing.reduction.ForkingPickler.dumps((task.func, task.args))
 
 
 class ProcessEvent:
