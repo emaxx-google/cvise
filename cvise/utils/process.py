@@ -358,23 +358,42 @@ class ProcessPool:
                             self._process_monitor.on_worker_stopped(pid)
                             terminating_workers -= 1
 
+        # In pre-shutdown, we can terminate all workers except the currently-connecting ones (the latter ones are needed
+        # to avoid deadlocking the accept() call in the connection listener).
+        event_selector.close()
+        for worker in workers.values():
+            if not worker.connection or worker.terminating:
+                continue
+            if worker.active_task_future:
+                worker.active_task_future.cancel()
+            worker.process.terminate()
+        for worker in workers.values():
+            if not worker.connection:
+                continue
+            while True:
+                try:
+                    message = worker.connection.recv()
+                except (EOFError, OSError):
+                    break
+                else:
+                    self._handle_message_from_worker(worker, message)
+
+        # Wait for the signal of the full shutdown (which comes after the connection listener has stopped).
         while True:
             with self._lock:
                 if self._shutdown:
                     break
             self._cond_read.recv_bytes()
 
-        event_selector.close()
+        # Terminate the remaining workers and reap all children.
         for worker in workers.values():
-            if worker.active_task_future:
-                worker.active_task_future.cancel()
-            if worker.connection:  # TODO: read process events
-                worker.connection.close()
             if not worker.terminating:
+                assert worker.process is not None
                 worker.process.terminate()
         for worker in workers.values():
-            worker.process.join()
-            self._process_monitor.on_worker_stopped(worker.process.pid)
+            if worker.process is not None:
+                worker.process.join()
+                self._process_monitor.on_worker_stopped(worker.process.pid)
 
     def _handle_message_from_worker(self, worker: _PoolWorker, message) -> bool:
         if isinstance(message, ProcessEvent):
