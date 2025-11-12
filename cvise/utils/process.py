@@ -6,6 +6,7 @@ import collections
 import concurrent.futures
 import contextlib
 import heapq
+import logging
 import multiprocessing
 import multiprocessing.connection
 import multiprocessing.reduction
@@ -18,19 +19,15 @@ import sys
 import threading
 import time
 from collections.abc import Iterator, Mapping
-from concurrent.futures import ALL_COMPLETED, Future
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from enum import Enum, auto, unique
-from typing import Callable
+from typing import Any, Callable
 
 import pebble
 import psutil
 
 from cvise.utils import sigmonitor
-
-_mp_task_loss_workaround_obj: MPTaskLossWorkaround | None = None
-
-import logging
 
 
 @unique
@@ -40,130 +37,184 @@ class ProcessEventType(Enum):
     ORPHANED = auto()  # reported instead of FINISHED when worker leaves the child process not terminated
 
 
-class ProcessPool:
-    @dataclass
-    class _Task:
-        func: Callable
-        args: tuple
-        future: Future
+class _MPConnListener:
+    """Provides asynchronous interface for accepting connections from multiprocessing children."""
 
-    @dataclass
-    class _PickledTask:
-        data: memoryview
-        future: Future
-
-    @dataclass
-    class _Worker:
-        process: multiprocessing.Process | None
-        connection: multiprocessing.connection.Connection | None
-        active_task_future: Future | None
-        dying: bool = False
-
-    def __init__(self, max_worker_count, mp_context, worker_initializers, process_monitor):
-        self._max_worker_count = max_worker_count
-        self._mp_context = mp_context
-        self._worker_listener = multiprocessing.connection.Listener(
+    def __init__(self, backlog: int, pipe_to_notify: multiprocessing.connection.Connection):
+        self._pipe_to_notify = pipe_to_notify
+        self._listener = multiprocessing.connection.Listener(
             address=None,
             family='AF_PIPE' if sys.platform == 'win32' else 'AF_UNIX',
-            backlog=max_worker_count,
+            backlog=backlog,
             authkey=None,
         )
+        self._lock = threading.Lock()
+        self._condition = threading.Condition(lock=self._lock)
+        self._pending_conns: int = 0
+        self._shutdown = False
+        self._accepted_conns: collections.deque[multiprocessing.connection.Connection] = collections.deque()
+        self._thread = threading.Thread(target=self._conn_listener_thread_main)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop_and_wait()
+
+    def address(self) -> Any:
+        return self._listener.address
+
+    def expect_new_connection(self) -> None:
+        with self._lock:
+            self._pending_conns += 1
+            self._condition.notify()
+
+    def take_connection(self) -> multiprocessing.connection.Connection | None:
+        with self._lock:
+            if not self._accepted_conns:
+                return None
+            return self._accepted_conns.popleft()
+
+    def stop_and_wait(self) -> None:
+        with self._lock:
+            if self._shutdown:
+                return
+            self._shutdown = True
+            self._condition.notify()
+        self._thread.join(60)
+        if self._thread.is_alive():
+            logging.warning('Failed to stop connection listener thread')
+        self._listener.close()
+
+    def _conn_listener_thread_main(self) -> None:
+        while True:
+            with self._lock:
+                self._condition.wait_for(lambda: self._shutdown or self._pending_conns)
+                if self._shutdown:
+                    break
+                self._pending_conns -= 1
+                assert self._pending_conns >= 0
+
+            conn = self._listener.accept()
+            with self._lock:
+                self._accepted_conns.append(conn)
+            self._pipe_to_notify.send(None)
+
+
+@dataclass
+class _PoolTask:
+    func: Callable
+    args: tuple
+    future: Future
+
+
+@dataclass
+class _PoolPickledTask:
+    data: memoryview
+    future: Future
+
+
+@dataclass
+class _PoolWorker:
+    process: multiprocessing.Process | None
+    connection: multiprocessing.connection.Connection | None
+    active_task_future: Future | None
+    terminating: bool = False
+
+
+class _PoolManager:
+    def __init__(self):
+        pass
+
+
+class ProcessPoolError(Exception):
+    pass
+
+
+class ProcessPool:
+    def __init__(self, max_worker_count, worker_initializers, process_monitor):
+        self._max_worker_count = max_worker_count
+        self._cond_read, self._cond_write = multiprocessing.Pipe(duplex=False)
+        self._mp_conn_listener = _MPConnListener(backlog=max_worker_count, pipe_to_notify=self._cond_write)
         self._worker_initializers = worker_initializers
         self._process_monitor = process_monitor
         self._lock = threading.Lock()
-        self._cond_read, self._cond_write = mp_context.Pipe(duplex=False)
-        self._task_queue: collections.deque[ProcessPool._Task] = collections.deque()
+        self._task_queue: collections.deque[_PoolTask] = collections.deque()
         self._cancel_term_queue: collections.deque[tuple[int, Future]] = collections.deque()
+        self._pre_shutdown = False
         self._shutdown = False
-        self._workers_to_connect = 0
-        self._accepted_connections = collections.deque()
-        self._condition = threading.Condition(self._lock)
-        self._listener_thread = threading.Thread(target=self._listener_thread_main)
         self._pool_thread = threading.Thread(target=self._pool_thread_main)
 
     def __enter__(self):
         self._pool_thread.start()
-        self._listener_thread.start()
+        self._mp_conn_listener.__enter__()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.stop()
-        self._pool_thread.join()
-        self._listener_thread.join()
-        self._worker_listener.close()
 
     def stop(self):
+        # The listener must be stopped before the pool thread, to avoid deadlocking on accept() in the listener.
+        # Indicate that no new workers or jobs should be spawned now though.
+        with self._lock:
+            if self._pre_shutdown:
+                return
+            self._pre_shutdown = True
+        self._mp_conn_listener.stop_and_wait()
+
         with self._lock:
             self._shutdown = True
-            self._condition.notify()
         self._cond_write.send(None)
+        self._pool_thread.join(60)
+        if self._pool_thread.is_alive():
+            logging.warning('Failed to stop pool thread')
 
     def schedule(self, f, args, timeout):
         future = Future()
+        task = _PoolTask(func=f, args=args, future=future)
         with self._lock:
-            self._task_queue.append(ProcessPool._Task(func=f, args=args, future=future))
-        self._cond_write.send(None)
-        return future
-
-    def _listener_thread_main(self):
-        try:
-            self._listener_thread_main2()
-        except Exception:
-            logging.exception('_listener_thread_main exception')
-
-    def _listener_thread_main2(self):
-        while True:
-            with self._lock:
-                if self._shutdown:
-                    break
-                if not self._workers_to_connect:
-                    self._condition.wait()
-                    continue
-                assert self._workers_to_connect > 0
-                self._workers_to_connect -= 1
-
-            conn = self._worker_listener.accept()
-            with self._lock:
-                self._accepted_connections.append(conn)
+            self._task_queue.append(task)
+            enqueued = len(self._task_queue)
+        if enqueued == 1:
             self._cond_write.send(None)
-
-        with self._lock:
-            self._accepted_connections.append(None)
-        self._cond_write.send(None)
+        return future
 
     def _pool_thread_main(self):
         try:
             self._pool_thread_main2()
-        except Exception:
-            logging.exception('_pool_thread_main exception')
+        except:
+            logging.exception('_pool_thread_main')
 
     def _pool_thread_main2(self):
-        pickled_task_queue: collections.deque[ProcessPool._PickledTask] = collections.deque()
-        workers: dict[int, ProcessPool._Worker] = {}
+        pickled_task_queue: collections.deque[_PoolPickledTask] = collections.deque()
+        workers: dict[int, _PoolWorker] = {}
         free_worker_pids: collections.deque[int] = collections.deque()
-        connecting_worker_pids: set[int] = set()
-        busy_worker_pids: set[int] = set()
-        dying_worker_pids: set[int] = set()
+        connecting_workers: int = 0
+        terminating_workers: int = 0
         event_selector = selectors.DefaultSelector()
         event_selector.register(self._cond_read, selectors.EVENT_READ)
+        mp_conn_listener_address = self._mp_conn_listener.address()
         while True:
-            task_to_pickle: ProcessPool._Task | None = None
-            worker: ProcessPool._Worker | None = None
-            terminate_workers: list[ProcessPool._Worker] = []
-            tasks_to_send: list[ProcessPool._Task | ProcessPool._PickledTask] = []
-            connect_worker: bool = False
+            task_to_pickle: _PoolTask | None = None
+            worker: _PoolWorker | None = None
+            terminate_workers: list[_PoolWorker] = []
+            tasks_to_send: list[_PoolTask | _PoolPickledTask] = []
             launch_worker: bool = False
-            worker_conn: multiprocessing.connection.Connection | None = None
+            worker_conn_to_handshake: multiprocessing.connection.Connection | None = None
             with self._lock:
-                # print(f'ProcessPool.thread: max_worker_count={self._max_worker_count} task_queue={len(self._task_queue)} cancel_term_queue={len(self._cancel_term_queue)} workers={len(workers)} free_worker_pids={len(free_worker_pids)} connecting_worker_pids={len(connecting_worker_pids)} busy_worker_pids={len(busy_worker_pids)}', file=sys.stderr)
-                assert len(workers) == len(connecting_worker_pids) + len(free_worker_pids) + len(
-                    busy_worker_pids
-                ) + len(dying_worker_pids), (
-                    f'max_worker_count={self._max_worker_count} task_queue={len(self._task_queue)} cancel_term_queue={len(self._cancel_term_queue)} workers={len(workers)} free_worker_pids={len(free_worker_pids)} connecting_worker_pids={len(connecting_worker_pids)} busy_worker_pids={len(busy_worker_pids)} dying_worker_pids={len(dying_worker_pids)}'
+                assert connecting_workers <= len(workers)
+                assert len(free_worker_pids) <= len(workers)
+                assert terminating_workers <= len(workers)
+                assert len(workers) - terminating_workers <= self._max_worker_count
+                assert (
+                    0
+                    <= len(workers) - connecting_workers - terminating_workers - len(free_worker_pids)
+                    <= self._max_worker_count
+                ), (
+                    f'len(workers)={len(workers)} connecting_workers={connecting_workers} terminating_workers={terminating_workers} len(free_worker_pids)={len(free_worker_pids)}'
                 )
-                assert len(workers) - len(dying_worker_pids) <= self._max_worker_count
-                assert len(busy_worker_pids) <= self._max_worker_count
-                if self._shutdown:
+                if self._pre_shutdown:
                     break
                 elif self._cancel_term_queue:
                     while self._cancel_term_queue:
@@ -179,11 +230,11 @@ class ProcessPool:
                 elif (
                     (self._task_queue or pickled_task_queue)
                     and free_worker_pids
-                    and len(busy_worker_pids) + len(dying_worker_pids) < self._max_worker_count
+                    and len(workers) - connecting_workers - len(free_worker_pids) < self._max_worker_count
                 ):
                     l1 = len(pickled_task_queue) + len(self._task_queue)
                     l2 = len(free_worker_pids)
-                    l3 = self._max_worker_count - len(busy_worker_pids) - len(dying_worker_pids)
+                    l3 = self._max_worker_count - (len(workers) - connecting_workers - len(free_worker_pids))
                     cnt = min(l1, l2, l3)
                     while cnt and pickled_task_queue:
                         tasks_to_send.append(pickled_task_queue.popleft())
@@ -191,24 +242,22 @@ class ProcessPool:
                     while cnt and self._task_queue:
                         tasks_to_send.append(self._task_queue.popleft())
                         cnt -= 1
-                elif (self._task_queue or pickled_task_queue) and self._accepted_connections:
-                    connect_worker = True
-                    worker_conn = self._accepted_connections.popleft()
+                elif (self._task_queue or pickled_task_queue) and (conn := self._mp_conn_listener.take_connection()):
+                    worker_conn_to_handshake = conn
                 elif (
                     (self._task_queue or pickled_task_queue)
-                    and len(workers) - len(dying_worker_pids) < self._max_worker_count
-                    and not connecting_worker_pids
+                    and len(workers) - terminating_workers < self._max_worker_count
+                    and not connecting_workers
                 ):
                     launch_worker = True
                 elif self._task_queue and not pickled_task_queue:
                     task_to_pickle = self._task_queue.popleft()
-                elif len(workers) - len(dying_worker_pids) < self._max_worker_count:
+                elif len(workers) - terminating_workers < self._max_worker_count:
                     launch_worker = True
                 elif self._task_queue:
                     task_to_pickle = self._task_queue.popleft()
-                elif self._accepted_connections:
-                    connect_worker = True
-                    worker_conn = self._accepted_connections.popleft()
+                elif conn := self._mp_conn_listener.take_connection():
+                    worker_conn_to_handshake = conn
 
             if terminate_workers:
                 for worker in terminate_workers:
@@ -216,15 +265,11 @@ class ProcessPool:
                     assert worker.process is not None
                     worker_pid: int | None = worker.process.pid
                     assert worker_pid is not None
-                    worker.dying = True
+                    worker.terminating = True
                     worker.process.terminate()
-                    assert worker_pid not in dying_worker_pids
-                    dying_worker_pids.add(worker_pid)
-                    busy_worker_pids.remove(worker_pid)
+                    terminating_workers += 1
                     assert worker.connection is not None
                     event_selector.register(worker.process.sentinel, selectors.EVENT_READ, data=worker_pid)
-                    if worker_pid in free_worker_pids:
-                        free_worker_pids.remove(worker_pid)
             elif tasks_to_send:
                 for task in tasks_to_send:
                     assert free_worker_pids
@@ -236,45 +281,40 @@ class ProcessPool:
                     if task.future.cancelled():
                         continue
                     free_worker_pids.popleft()
-                    if isinstance(task, ProcessPool._PickledTask):
+                    if isinstance(task, _PoolPickledTask):
                         data = task.data
                     else:
-                        data = self._pickle_task(task)
+                        data = _pickle_pool_task(task)
                     assert worker.connection is not None
                     worker.connection.send_bytes(data)
                     worker.active_task_future = task.future
-                    assert worker_pid not in busy_worker_pids
-                    busy_worker_pids.add(worker_pid)
             elif task_to_pickle:
                 pickled_task_queue.append(
-                    ProcessPool._PickledTask(data=self._pickle_task(task_to_pickle), future=task_to_pickle.future)
+                    _PoolPickledTask(data=_pickle_pool_task(task_to_pickle), future=task_to_pickle.future)
                 )
-            elif connect_worker:
-                assert worker_conn
-                worker_pid: int = worker_conn.recv()
-                assert worker_pid in connecting_worker_pids
-                connecting_worker_pids.remove(worker_pid)
+            elif worker_conn_to_handshake:
+                worker_pid: int = worker_conn_to_handshake.recv()
+                assert connecting_workers > 0
+                connecting_workers -= 1
                 worker = workers[worker_pid]
-                worker.connection = worker_conn
+                worker.connection = worker_conn_to_handshake
                 assert worker_pid not in free_worker_pids
                 free_worker_pids.append(worker_pid)
-                event_selector.register(worker_conn, selectors.EVENT_READ, data=worker_pid)
+                event_selector.register(worker_conn_to_handshake, selectors.EVENT_READ, data=worker_pid)
             elif launch_worker:
-                with self._lock:
-                    self._workers_to_connect += 1
-                    self._condition.notify()
-                proc = self._mp_context.Process(
+                self._mp_conn_listener.expect_new_connection()
+                proc = multiprocessing.Process(
                     target=self._worker_process,
-                    args=(self._worker_listener.address, self._worker_initializers),
+                    args=(mp_conn_listener_address, self._worker_initializers),
                 )
                 proc.start()
                 assert proc.pid is not None
-                workers[proc.pid] = ProcessPool._Worker(process=proc, connection=None, active_task_future=None)
-                connecting_worker_pids.add(proc.pid)
+                workers[proc.pid] = _PoolWorker(process=proc, connection=None, active_task_future=None)
+                connecting_workers += 1
                 self._process_monitor.on_worker_started(proc.pid)
             else:
                 ready = event_selector.select()
-                for selector_key, events in ready:
+                for selector_key, _events in ready:
                     fileobj = selector_key.fileobj
                     if fileobj == self._cond_read:
                         # Nothing to do here besides eating the notifications - the next iteration of the outer loop
@@ -287,24 +327,26 @@ class ProcessPool:
                         pid: int = selector_key.data
                         worker = workers[pid]
                         assert worker.connection is not None
-                        if worker.dying:
-                            try:
-                                message = worker.connection.recv()
-                            except (EOFError, OSError):
-                                event_selector.unregister(worker.connection)
-                                worker.connection = None
-                                if worker.process is None:
-                                    workers.pop(pid)
-                                    self._process_monitor.on_worker_stopped(pid)
-                                    dying_worker_pids.remove(pid)
-                            else:
-                                self._handle_message_from_worker(worker, message)
-                        else:
+                        try:
                             message = worker.connection.recv()
-                            if self._handle_message_from_worker(worker, message):
-                                busy_worker_pids.remove(pid)
+                        except (EOFError, OSError):
+                            if not worker.terminating and worker.active_task_future:
+                                with contextlib.suppress(
+                                    concurrent.futures.InvalidStateError
+                                ):  # it might've been canceled
+                                    worker.active_task_future.set_exception(ProcessPoolError(f'Worker {pid} died'))
+                                worker.active_task_future = None
+                            event_selector.unregister(worker.connection)
+                            worker.connection.close()
+                            worker.connection = None
+                            if worker.process is None:
+                                workers.pop(pid)
+                                self._process_monitor.on_worker_stopped(pid)
+                                terminating_workers -= 1
+                        else:
+                            if self._handle_message_from_worker(worker, message) and not worker.terminating:
                                 free_worker_pids.append(pid)
-                    elif isinstance(fileobj, int):
+                    else:
                         pid: int = selector_key.data
                         worker = workers[pid]
                         assert worker.process is not None
@@ -314,28 +356,27 @@ class ProcessPool:
                         if worker.connection is None:
                             workers.pop(pid)
                             self._process_monitor.on_worker_stopped(pid)
-                            dying_worker_pids.remove(pid)
-                    else:
-                        raise ValueError(f'Unexpected selector result: {fileobj}')
+                            terminating_workers -= 1
 
         while True:
             with self._lock:
-                if self._accepted_connections and self._accepted_connections.popleft() is None:
+                if self._shutdown:
                     break
-            self._cond_read.recv()
+            self._cond_read.recv_bytes()
 
         event_selector.close()
         for worker in workers.values():
             if worker.active_task_future:
                 worker.active_task_future.cancel()
-            if worker.connection:
+            if worker.connection:  # TODO: read process events
                 worker.connection.close()
-            worker.process.terminate()
+            if not worker.terminating:
+                worker.process.terminate()
         for worker in workers.values():
             worker.process.join()
             self._process_monitor.on_worker_stopped(worker.process.pid)
 
-    def _handle_message_from_worker(self, worker: ProcessPool._Worker, message) -> bool:
+    def _handle_message_from_worker(self, worker: _PoolWorker, message) -> bool:
         if isinstance(message, ProcessEvent):
             self._process_monitor.on_process_event_from_worker(message)
             return False
@@ -359,13 +400,14 @@ class ProcessPool:
 
     @staticmethod
     def _worker_process(server_address, initializers):
-        pid = os.getpid()
+        sigmonitor.init(sigmonitor.Mode.QUICK_EXIT)
         try:
             server_conn = multiprocessing.connection.Client(server_address, authkey=None)
-            sigmonitor.init(sigmonitor.Mode.QUICK_EXIT)
             for init in initializers:
                 init(server_conn)
-            server_conn.send(pid)
+            # Notify the main C-Vise process that we are ready for executing tasks.
+            server_conn.send(os.getpid())
+
             while True:
                 f, args = server_conn.recv()
                 try:
@@ -379,9 +421,9 @@ class ProcessPool:
         except Exception as e:
             raise
 
-    @staticmethod
-    def _pickle_task(task: ProcessPool._Task) -> memoryview:
-        return multiprocessing.reduction.ForkingPickler.dumps((task.func, task.args))
+
+def _pickle_pool_task(task: _PoolTask) -> memoryview:
+    return multiprocessing.reduction.ForkingPickler.dumps((task.func, task.args))
 
 
 class ProcessEvent:
@@ -672,89 +714,6 @@ class ProcessEventNotifier:
                 if step_timeout == 0:
                     raise  # we reached the original timeout, so bail out
                 input = b''  # the input has been written in the first communicate() call
-
-
-class MPTaskLossWorkaround:
-    """Workaround that attempts to prevent Pebble from losing scheduled tasks.
-
-    The problematic scenario is when Pebble starts terminating a worker for a canceled taskA, but the worker manages to
-    acknowledge the receipt of the next taskB shortly before dying - in that case taskB becomes associated with a
-    non-existing worker and never finishes.
-
-    Here we try to prevent this by scheduling "barrier" tasks, one for each worker, which report themselves as started
-    and then sleep. If a task gets affected by the bug it either (a) won't report anything, or (b) will terminate
-    abruptly without resolving its future; we detect "a" via a hardcoded timeout, and "b" by monitoring the task's
-    worker PID, and cancel all such "hung" tasks; at the end we notify all other tasks to complete. The expectation is
-    that this procedure leaves the workers in a good state ready for regular C-Vise jobs.
-    """
-
-    _DEADLINE = 30  # seconds
-    _POLL_LOOP_STEP = 0.1  # seconds
-
-    def __init__(self, worker_count: int):
-        self._worker_count = worker_count
-        # Don't use Manager-based synchronization primitives because of their poor performance. Don't use Queue since
-        # it uses background threads which breaks our assumptions and isn't compatible with quick exit on signals.
-        self._task_status_queue = multiprocessing.SimpleQueue()
-        self._task_exit_flag = multiprocessing.Event()
-
-    def initialize_in_worker(self) -> None:
-        """Must be called in a worker process in order to initialize global state needed later."""
-        global _mp_task_loss_workaround_obj
-        _mp_task_loss_workaround_obj = self
-
-    def execute(self, pool: pebble.ProcessPool) -> None:
-        # 1. Send out the barrier tasks.
-        futures: list[Future] = [pool.schedule(self._job, args=[task_id]) for task_id in range(self._worker_count)]
-        task_procs: dict[int, psutil.Process | None] = {}
-
-        def pump_task_queue():
-            while not self._task_status_queue.empty():
-                task_id, pid = self._task_status_queue.get()
-                try:
-                    task_procs[task_id] = psutil.Process(pid)
-                except psutil.NoSuchProcess:
-                    task_procs[task_id] = None  # remember that the task was claimed by a now-dead worker
-
-        # 2. Detect which tasks started successfully.
-        start_time = time.monotonic()
-        while time.monotonic() < start_time + self._DEADLINE:
-            pump_task_queue()
-            if len(task_procs) == self._worker_count:
-                break
-            time.sleep(self._POLL_LOOP_STEP)  # SimpleQueue doesn't provide polling
-
-        # 3. Shut down all tasks - use graceful termination for the successfully started ones, and cancel the lost ones.
-        self._task_exit_flag.set()
-        start_time = time.monotonic()
-        while time.monotonic() < start_time + self._DEADLINE:
-            pump_task_queue()
-            task_procs = {task_id: proc for task_id, proc in task_procs.items() if proc and proc.is_running()}
-            for task_id, future in enumerate(futures):
-                if task_id not in task_procs:
-                    future.cancel()
-            _done, still_running = concurrent.futures.wait(
-                futures, return_when=ALL_COMPLETED, timeout=self._POLL_LOOP_STEP
-            )
-            if not still_running:
-                break
-
-        # 4. Cleanup; make sure to free the pool if the graceful termination above didn't finish within the timeout.
-        for future in futures:
-            future.cancel()
-        self._task_exit_flag.clear()
-
-    @staticmethod
-    def _job(task_id: int) -> None:
-        assert _mp_task_loss_workaround_obj
-        status_queue = _mp_task_loss_workaround_obj._task_status_queue
-        exit_flag = _mp_task_loss_workaround_obj._task_exit_flag
-        # Don't allow signals to interrupt IPC primitives since this might leave them in locked/inconsistent state; only
-        # exit in the safe location from the pool loop.
-        with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND):
-            status_queue.put((task_id, os.getpid()))
-            while not exit_flag.wait(timeout=MPTaskLossWorkaround._POLL_LOOP_STEP):
-                sigmonitor.maybe_retrigger_action()
 
 
 @contextlib.contextmanager
