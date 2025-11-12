@@ -5,8 +5,6 @@ import contextlib
 import filecmp
 import logging
 import math
-import multiprocessing
-import multiprocessing.connection
 import os
 import platform
 import queue
@@ -495,11 +493,9 @@ class TestManager:
         )
 
         self.key_logger = None if self.skip_key_off else KeyLogger()
-        # self.mpmanager = multiprocessing.Manager()
         self.process_monitor = ProcessMonitor(self.parallel_tests)
         self.mplogger = mplogging.MPLogger(self.parallel_tests)
         self.worker_pool = None
-        # self.mp_task_loss_workaround = MPTaskLossWorkaround(self.parallel_tests)
 
     def __enter__(self):
         self.exit_stack.enter_context(self.tmp_dir_manager)
@@ -514,11 +510,8 @@ class TestManager:
         worker_initializers = [
             self.mplogger.worker_process_initializer(),
             ProcessEventNotifier.initialize_in_worker,
-            # self.mp_task_loss_workaround.initialize_in_worker,
         ]
-        self.worker_pool = ProcessPool(
-            self.parallel_tests, multiprocessing.get_context(), worker_initializers, self.process_monitor
-        )
+        self.worker_pool = ProcessPool(self.parallel_tests, worker_initializers, self.process_monitor)
 
         self.exit_stack.enter_context(self.worker_pool)
 
@@ -930,15 +923,11 @@ class TestManager:
                 break
 
         if self.jobs:
-            # logging.info(f'run_parallel_tests: canceling count={len(self.jobs)}')
-            # st = time.monotonic()
             for job in self.jobs:
                 self.cancel_job(job)
                 self.pass_statistic.add_aborted(
                     job.pass_, job.start_time, self.parallel_tests, job.type == JobType.TRANSFORM
                 )
-            # print(f'run_parallel_tests: cancellation time={time.monotonic()-st:.5f}')
-            # self.mp_task_loss_workaround.execute(self.worker_pool)  # only do it if at least one job canceled
             self.release_all_jobs()
 
     def run_passes(self, passes: Sequence[AbstractPass], interleaving: bool):
