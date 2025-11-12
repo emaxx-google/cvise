@@ -360,7 +360,7 @@ class ProcessPool:
                             terminating_workers -= 1
 
         # In pre-shutdown, we can terminate all pending tasks and workers except the currently-connecting ones (which
-        # ones are needed to avoid deadlocking the accept() call in the connection listener).
+        # are needed to avoid deadlocking the accept() call in the connection listener).
         event_selector.close()
         for task in pickled_task_queue:
             task.future.cancel()
@@ -372,12 +372,11 @@ class ProcessPool:
                 continue
             if worker.active_task_future:
                 worker.active_task_future.cancel()
-                worker.active_task_future = None
             worker.process.terminate()
             worker.terminating = True
-        # Pump all messages from the workers, e.g., the process events they could've sent shortly before termination.
+        # Pump all messages from busy workers, e.g., process events that could've been sent shortly before termination.
         for worker in workers.values():
-            if not worker.connection:
+            if not worker.connection or not worker.active_task_future:
                 continue
             while True:
                 try:
@@ -430,20 +429,21 @@ class ProcessPool:
     def _worker_process(server_address, initializers):
         sigmonitor.init(sigmonitor.Mode.QUICK_EXIT)
         try:
-            server_conn = multiprocessing.connection.Client(server_address, authkey=None)
-            for init in initializers:
-                init(server_conn)
-            # Notify the main C-Vise process that we are ready for executing tasks.
-            server_conn.send(os.getpid())
-
-            while True:
-                f, args = server_conn.recv()
-                try:
-                    result = f(*args)
-                except Exception as e:
-                    server_conn.send(e)
-                else:
-                    server_conn.send(result)
+            with multiprocessing.connection.Client(server_address, authkey=None) as server_conn:
+                for init in initializers:
+                    init(server_conn)
+                # Notify the main C-Vise process that we are ready for executing tasks.
+                server_conn.send(os.getpid())
+                # Handle incoming tasks in an infinite loop (we'll be stopped by a signal).
+                while True:
+                    f, args = server_conn.recv()
+                    try:
+                        result = f(*args)
+                    except Exception as e:
+                        result = e
+                    pickled = multiprocessing.reduction.ForkingPickler.dumps(result)
+                    with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND):
+                        server_conn.send_bytes(pickled)
         except (EOFError, OSError):
             return
         except Exception as e:
