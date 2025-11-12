@@ -123,11 +123,6 @@ class _PoolWorker:
     terminating: bool = False
 
 
-class _PoolManager:
-    def __init__(self):
-        pass
-
-
 class ProcessPoolError(Exception):
     pass
 
@@ -154,26 +149,32 @@ class ProcessPool:
     def __exit__(self, exc_type, exc_val, exc_tb):
         self.stop()
 
-    def stop(self):
         # The listener must be stopped before the pool thread, to avoid deadlocking on accept() in the listener.
-        # Indicate that no new workers or jobs should be spawned now though.
-        with self._lock:
-            if self._pre_shutdown:
-                return
-            self._pre_shutdown = True
-        self._mp_conn_listener.stop_and_wait()
+        self._mp_conn_listener.__exit__(exc_type, exc_val, exc_tb)
 
+        # Terminate all workers in a blocking fashion.
         with self._lock:
             self._shutdown = True
         self._cond_write.send(None)
         self._pool_thread.join(60)
         if self._pool_thread.is_alive():
-            logging.warning('Failed to stop pool thread')
+            logging.warning('Failed to stop process pool thread')
+
+    def stop(self):
+        # Indicate that already running tasks and free workers can be terminated.
+        with self._lock:
+            if self._pre_shutdown:
+                return
+            self._pre_shutdown = True
+        self._cond_write.send(None)
 
     def schedule(self, f, args, timeout):
         future = Future()
         task = _PoolTask(func=f, args=args, future=future)
         with self._lock:
+            if self._pre_shutdown:
+                future.cancel()
+                return future
             self._task_queue.append(task)
             enqueued = len(self._task_queue)
         if enqueued == 1:
@@ -358,15 +359,23 @@ class ProcessPool:
                             self._process_monitor.on_worker_stopped(pid)
                             terminating_workers -= 1
 
-        # In pre-shutdown, we can terminate all workers except the currently-connecting ones (the latter ones are needed
-        # to avoid deadlocking the accept() call in the connection listener).
+        # In pre-shutdown, we can terminate all pending tasks and workers except the currently-connecting ones (which
+        # ones are needed to avoid deadlocking the accept() call in the connection listener).
         event_selector.close()
+        for task in pickled_task_queue:
+            task.future.cancel()
+        with self._lock:
+            for task in self._task_queue:
+                task.future.cancel()
         for worker in workers.values():
             if not worker.connection or worker.terminating:
                 continue
             if worker.active_task_future:
                 worker.active_task_future.cancel()
+                worker.active_task_future = None
             worker.process.terminate()
+            worker.terminating = True
+        # Pump all messages from the workers, e.g., the process events they could've sent shortly before termination.
         for worker in workers.values():
             if not worker.connection:
                 continue

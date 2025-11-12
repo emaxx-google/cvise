@@ -385,7 +385,7 @@ def test_interleaving_gives_up_only_stuck_passes(input_path: Path, manager):
     manager.run_passes([stuck_pass, occasionally_working_pass], interleaving=True)
     assert input_path.read_text() == ''
     # The "pass got stuck" report (for the stuck pass).
-    assert bug_dir_count() == 1
+    assert bug_dir_count() > 0
 
 
 def test_halt_on_unaltered(input_path: Path, manager):

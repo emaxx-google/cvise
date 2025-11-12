@@ -868,7 +868,7 @@ class TestManager:
     def terminate_all(self) -> None:
         for job in self.jobs:
             self.cancel_job(job)
-        self.worker_pool.stop()  # will also stop tasks not tracked in self.jobs
+        self.worker_pool.stop()
         self.release_all_jobs()
 
     def cancel_job(self, job: Job) -> None:
