@@ -14,11 +14,14 @@ Ctrl-C keystroke. This helper allows to prevent whether a signal was observer
 and letting the code raise the exception to trigger the shutdown.
 """
 
+from __future__ import annotations
+
 import concurrent.futures
 import contextlib
 import enum
 import os
 import signal
+import socket
 import weakref
 from collections.abc import Iterator
 from concurrent.futures import Future
@@ -37,6 +40,8 @@ _mode: Mode = Mode.RAISE_EXCEPTION
 _sigint_observed: bool = False
 _sigterm_observed: bool = False
 _future: Future | None = None
+_wakeup_read_socket: socket.socket | None = None
+_wakeup_write_socket: socket.socket | None = None
 
 
 def init(mode: Mode) -> None:
@@ -46,6 +51,12 @@ def init(mode: Mode) -> None:
     # would result in an infinite recursion).
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
+
+    global _wakeup_read_socket, _wakeup_write_socket
+    if _wakeup_read_socket is None:
+        _wakeup_read_socket, _wakeup_write_socket = socket.socketpair()
+        _wakeup_write_socket.setblocking(False)
+        signal.set_wakeup_fd(_wakeup_write_socket.fileno(), warn_on_full_buffer=False)
 
     global _future
     _future = Future()
@@ -62,6 +73,7 @@ def maybe_retrigger_action() -> None:
 @contextmanager
 def scoped_mode(new_mode: Mode) -> Iterator[None]:
     global _mode
+    assert _future is not None  # initialized
 
     # It's unlikely to happen, but cheap to check: no need to enter the scope if we know we'll terminate afterwards.
     _implicit_maybe_retrigger_action()
@@ -79,6 +91,11 @@ def scoped_mode(new_mode: Mode) -> Iterator[None]:
 def get_future() -> Future:
     assert _future is not None
     return _future
+
+
+def get_wakeup_fd() -> int:
+    assert _wakeup_read_socket is not None
+    return _wakeup_read_socket.fileno()
 
 
 def signal_observed_for_testing() -> bool:

@@ -22,7 +22,7 @@ from collections.abc import Iterator, Mapping
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from enum import Enum, auto, unique
-from typing import Any, Callable
+from typing import Any
 
 import pebble
 import psutil
@@ -282,7 +282,7 @@ class ProcessPool:
             elif launch_worker:
                 self._mp_conn_listener.expect_new_connection()
                 proc = multiprocessing.Process(
-                    target=self._worker_process,
+                    target=self._worker_process_main,
                     args=(mp_conn_listener_address, self._worker_initializers),
                 )
                 proc.start()
@@ -291,8 +291,8 @@ class ProcessPool:
                 connecting_workers += 1
                 self._process_monitor.on_worker_started(proc.pid)
             else:
-                ready = event_selector.select()
-                for selector_key, _events in ready:
+                events = event_selector.select()
+                for selector_key, _event_mask in events:
                     fileobj = selector_key.fileobj
                     if fileobj == self._cond_read:
                         # Nothing to do here besides eating the notifications - the next iteration of the outer loop
@@ -405,32 +405,45 @@ class ProcessPool:
         self._cond_write.send(None)
 
     @staticmethod
-    def _worker_process(server_address, initializers):
+    def _worker_process_main(server_address, initializers):
         sigmonitor.init(sigmonitor.Mode.QUICK_EXIT)
-        try:
-            with multiprocessing.connection.Client(server_address, authkey=None) as server_conn:
-                for init in initializers:
-                    init(server_conn)
-                # Notify the main C-Vise process that we are ready for executing tasks.
-                server_conn.send(os.getpid())
-                # Handle incoming tasks in an infinite loop (we'll be stopped by a signal).
-                while True:
-                    f, args = server_conn.recv()
-                    try:
-                        # Handle signals as exceptions within the job, to let the code do proper resource deallocation
-                        # (like terminating subprocesses), but once the func returns after a signal was triggered,
-                        # terminate the worker.
-                        with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION):
-                            result = f(*args)
-                    except Exception as e:
-                        result = e
-                    pickled = multiprocessing.reduction.ForkingPickler.dumps(result)
-                    with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND):
-                        server_conn.send_bytes(pickled)
-        except (EOFError, OSError):
-            return
-        except Exception as e:
-            raise
+        with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION):
+            try:
+                with multiprocessing.connection.Client(server_address, authkey=None) as server_conn:
+                    for init in initializers:
+                        init(server_conn)
+                    # Notify the main C-Vise process that we are ready for executing tasks.
+                    server_conn.send(os.getpid())
+                    # Handle incoming tasks in an infinite loop (until stopped by a signal).
+                    with selectors.DefaultSelector() as event_selector:
+                        event_selector.register(server_conn, selectors.EVENT_READ)
+                        event_selector.register(sigmonitor.get_wakeup_fd(), selectors.EVENT_READ)
+                        while True:
+                            events = event_selector.select()
+                            had_signal = False
+                            can_recv = False
+                            for selector_key, _event_mask in events:
+                                if selector_key.fileobj == sigmonitor.get_wakeup_fd():
+                                    had_signal = True
+                                elif selector_key.fileobj:
+                                    can_recv = True
+                                else:
+                                    assert 0
+                            if had_signal:
+                                sigmonitor.maybe_retrigger_action()
+                            if can_recv:
+                                f, args = server_conn.recv()
+                                try:
+                                    result = f(*args)
+                                except Exception as e:
+                                    result = e
+                                pickled = multiprocessing.reduction.ForkingPickler.dumps(result)
+                                with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND):
+                                    server_conn.send_bytes(pickled)
+            except (EOFError, OSError):
+                return
+            except Exception as e:
+                raise
 
 
 class ProcessEvent:
