@@ -642,7 +642,7 @@ class ProcessEventNotifier:
 
     _EVENT_LOOP_STEP = 1  # seconds
 
-    def __init__(self, pid_queue: queue.Queue | None):
+    def __init__(self, pid_queue: queue.Queue | None = None):
         self._my_pid = os.getpid()
 
     @staticmethod
