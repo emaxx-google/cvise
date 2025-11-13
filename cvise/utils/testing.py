@@ -494,7 +494,7 @@ class TestManager:
 
         self.key_logger = None if self.skip_key_off else KeyLogger()
         self.process_monitor = ProcessMonitor(self.parallel_tests)
-        self.mplogger = mplogging.MPLogger(self.parallel_tests)
+        self.mplogger = mplogging.MPLogger()
         self.worker_pool = None
 
     def __enter__(self):
@@ -511,11 +511,9 @@ class TestManager:
             self.mplogger.worker_process_initializer(),
             ProcessEventNotifier.initialize_in_worker,
         ]
-        self.worker_pool = ProcessPool(self.parallel_tests, worker_initializers, self.process_monitor)
+        self.worker_pool = ProcessPool(self.parallel_tests, worker_initializers, self.process_monitor, self.mplogger)
 
         self.exit_stack.enter_context(self.worker_pool)
-
-        self.exit_stack.enter_context(self.mplogger)
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -872,7 +870,6 @@ class TestManager:
         self.release_all_jobs()
 
     def cancel_job(self, job: Job) -> None:
-        self.mplogger.ignore_logs_from_job(job.order)
         # logging.info(f'cancel_job')
         job.future.cancel()
 
@@ -1235,9 +1232,7 @@ class TestManager:
                 dependee_bundle_paths=dependee_bundle_paths,
             )
         init_timeout = self.INIT_TIMEOUT_FACTOR * self.timeout
-        future = self.worker_pool.schedule(
-            _worker_process_job_wrapper, args=[self.order, env.run], timeout=init_timeout
-        )
+        future = self.worker_pool.schedule(env.run, args=(), timeout=init_timeout)
         self.jobs.append(
             Job(
                 type=JobType.INIT,
@@ -1280,9 +1275,7 @@ class TestManager:
             # self.process_monitor.pid_queue,
             None,
         )
-        future = self.worker_pool.schedule(
-            _worker_process_job_wrapper, args=[self.order, env.run], timeout=self.timeout
-        )
+        future = self.worker_pool.schedule(env.run, args=(), timeout=self.timeout)
         self.jobs.append(
             Job(
                 type=JobType.TRANSFORM,
@@ -1321,9 +1314,7 @@ class TestManager:
             # self.process_monitor.pid_queue,
             None,
         )
-        future = self.worker_pool.schedule(
-            _worker_process_job_wrapper, args=[self.order, env.run], timeout=self.timeout
-        )
+        future = self.worker_pool.schedule(env.run, args=(), timeout=self.timeout)
         self.jobs.append(
             Job(
                 type=JobType.TRANSFORM,
@@ -1364,22 +1355,3 @@ def override_tmpdir_env(old_env: Mapping[str, str], tmp_override: Path) -> Mappi
     for var in ('TMPDIR', 'TEMP', 'TMP'):
         new_env[var] = str(tmp_override)
     return new_env
-
-
-def _init_worker_process(initializers: list[Callable]) -> None:
-    # By default (when not executing a job), terminate a worker immediately on relevant signals. Raising an exception at
-    # unexpected times, especially inside multiprocessing internals, can put the worker into a bad state.
-    sigmonitor.init(sigmonitor.Mode.QUICK_EXIT)
-    for func in initializers:
-        func()
-
-
-def _worker_process_job_wrapper(job_order: int, func: Callable) -> Any:
-    # Handle signals as exceptions within the job, to let the code do proper resource deallocation (like terminating
-    # subprocesses), but once the func returns after a signal was triggered, terminate the worker.
-    with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION):
-        # Annotate each log message with the job order, for the log recipient in the main process to discard logs coming
-        # from canceled jobs.
-        with mplogging.worker_process_job_wrapper(job_order):
-            # logging.info(f'_worker_process_job_wrapper: pid={os.getpid()} order={job_order} func={func} cwd={cwd}')
-            return func()

@@ -128,12 +128,13 @@ class ProcessPoolError(Exception):
 
 
 class ProcessPool:
-    def __init__(self, max_worker_count, worker_initializers, process_monitor):
+    def __init__(self, max_worker_count, worker_initializers, process_monitor, mplogger):
         self._max_worker_count = max_worker_count
         self._cond_read, self._cond_write = multiprocessing.Pipe(duplex=False)
         self._mp_conn_listener = _MPConnListener(backlog=max_worker_count, pipe_to_notify=self._cond_write)
         self._worker_initializers = worker_initializers
         self._process_monitor = process_monitor
+        self._mplogger = mplogger
         self._lock = threading.Lock()
         self._task_queue: collections.deque[_PoolTask] = collections.deque()
         self._cancel_term_queue: collections.deque[tuple[int, Future]] = collections.deque()
@@ -407,6 +408,10 @@ class ProcessPool:
         if isinstance(message, ProcessEvent):
             self._process_monitor.on_process_event_from_worker(message)
             return False
+        if isinstance(message, logging.LogRecord):
+            if not worker.terminating:
+                self._mplogger.on_log_from_worker(message)
+            return False
         if worker.active_task_future is None:
             return False
         assert worker.active_task_future is not None
@@ -438,7 +443,11 @@ class ProcessPool:
                 while True:
                     f, args = server_conn.recv()
                     try:
-                        result = f(*args)
+                        # Handle signals as exceptions within the job, to let the code do proper resource deallocation
+                        # (like terminating subprocesses), but once the func returns after a signal was triggered,
+                        # terminate the worker.
+                        with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION):
+                            result = f(*args)
                     except Exception as e:
                         result = e
                     pickled = multiprocessing.reduction.ForkingPickler.dumps(result)
