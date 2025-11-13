@@ -58,7 +58,6 @@ class InitEnvironment:
     test_case: Path
     tmp_dir: Path
     job_timeout: int
-    pid_queue: queue.Queue
     dependee_bundle_paths: list[Path]
 
     def run(self) -> Any:
@@ -68,7 +67,7 @@ class InitEnvironment:
                 self.test_case,
                 tmp_dir=self.tmp_dir,
                 job_timeout=self.job_timeout,
-                process_event_notifier=ProcessEventNotifier(self.pid_queue),
+                process_event_notifier=ProcessEventNotifier(),
                 dependee_hints=dependee_hints,
             )
         except UnicodeDecodeError:
@@ -87,7 +86,6 @@ class AdvanceOnSuccessEnvironment:
     new_tmp_dir: Path
     pass_succeeded_state: Any
     job_timeout: int
-    pid_queue: queue.Queue
     dependee_bundle_paths: list[Path]
 
     def run(self) -> Any:
@@ -98,7 +96,7 @@ class AdvanceOnSuccessEnvironment:
             new_tmp_dir=self.new_tmp_dir,
             succeeded_state=self.pass_succeeded_state,
             job_timeout=self.job_timeout,
-            process_event_notifier=ProcessEventNotifier(self.pid_queue),
+            process_event_notifier=ProcessEventNotifier(),
             dependee_hints=dependee_hints,
         )
 
@@ -120,7 +118,6 @@ class TestEnvironment:
         all_test_cases: set[Path],
         should_copy_test_cases: bool,
         transform,
-        pid_queue: queue.Queue | None = None,
     ):
         self.state = state
         self.folder: Path = folder
@@ -130,7 +127,6 @@ class TestEnvironment:
         self.result = None
         self.order = order
         self.transform = transform
-        self.pid_queue = pid_queue
         self.test_case: Path = test_case
         self.should_copy_test_cases = should_copy_test_cases
         self.base_size = fileutil.get_file_size(test_case)
@@ -169,7 +165,7 @@ class TestEnvironment:
             (result, self.state) = self.transform(
                 self.test_case_path,
                 self.state,
-                process_event_notifier=ProcessEventNotifier(self.pid_queue),
+                process_event_notifier=ProcessEventNotifier(),
                 original_test_case=self.test_case.resolve(),
                 written_paths=written_paths,
             )
@@ -200,7 +196,7 @@ class TestEnvironment:
         # the interestingness test, or because C-Vise abruptly kills our job without a chance for a proper cleanup).
         with tempfile.TemporaryDirectory(dir=self.folder, prefix='overridetmp') as tmp_override:
             env = override_tmpdir_env(os.environ.copy(), Path(tmp_override))
-            stdout, stderr, returncode = ProcessEventNotifier(self.pid_queue).run_process(
+            stdout, stderr, returncode = ProcessEventNotifier().run_process(
                 str(self.test_script), shell=True, env=env, cwd=self.folder
             )
         if verbose and returncode != 0:
@@ -1208,8 +1204,6 @@ class TestManager:
                 test_case=self.current_test_case,
                 tmp_dir=tmp_dir,
                 job_timeout=self.timeout,
-                # pid_queue=self.process_monitor.pid_queue,
-                pid_queue=None,
                 dependee_bundle_paths=dependee_bundle_paths,
             )
         else:
@@ -1220,8 +1214,6 @@ class TestManager:
                 new_tmp_dir=tmp_dir,
                 pass_succeeded_state=ctx.taken_succeeded_state,
                 job_timeout=self.timeout,
-                # pid_queue=self.process_monitor.pid_queue,
-                pid_queue=None,
                 dependee_bundle_paths=dependee_bundle_paths,
             )
         init_timeout = self.INIT_TIMEOUT_FACTOR * self.timeout
@@ -1265,8 +1257,6 @@ class TestManager:
             self.test_cases,
             should_copy_test_cases,
             ctx.pass_.transform,
-            # self.process_monitor.pid_queue,
-            None,
         )
         future = self.worker_pool.schedule(env.run, args=(), timeout=self.timeout)
         self.jobs.append(
@@ -1304,8 +1294,6 @@ class TestManager:
             self.test_cases,
             should_copy_test_cases,
             FoldingManager.transform,
-            # self.process_monitor.pid_queue,
-            None,
         )
         future = self.worker_pool.schedule(env.run, args=(), timeout=self.timeout)
         self.jobs.append(
