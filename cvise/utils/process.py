@@ -103,13 +103,6 @@ class _MPConnListener:
 
 
 @dataclass
-class _PoolTask:
-    func: Callable
-    args: tuple
-    future: Future
-
-
-@dataclass
 class _PoolPickledTask:
     data: memoryview
     future: Future
@@ -136,7 +129,7 @@ class ProcessPool:
         self._process_monitor = process_monitor
         self._mplogger = mplogger
         self._lock = threading.Lock()
-        self._task_queue: collections.deque[_PoolTask] = collections.deque()
+        self._task_queue: collections.deque[_PoolPickledTask] = collections.deque()
         self._cancel_term_queue: collections.deque[tuple[int, Future]] = collections.deque()
         self._pre_shutdown = False
         self._shutdown = False
@@ -171,7 +164,7 @@ class ProcessPool:
 
     def schedule(self, f, args, timeout):
         future = Future()
-        task = _PoolTask(func=f, args=args, future=future)
+        task = _PoolPickledTask(data=multiprocessing.reduction.ForkingPickler.dumps((f, args)), future=future)
         with self._lock:
             if self._pre_shutdown:
                 future.cancel()
@@ -189,7 +182,6 @@ class ProcessPool:
             logging.exception('_pool_thread_main')
 
     def _pool_thread_main2(self):
-        pickled_task_queue: collections.deque[_PoolPickledTask] = collections.deque()
         workers: dict[int, _PoolWorker] = {}
         free_worker_pids: collections.deque[int] = collections.deque()
         connecting_workers: int = 0
@@ -198,10 +190,9 @@ class ProcessPool:
         event_selector.register(self._cond_read, selectors.EVENT_READ)
         mp_conn_listener_address = self._mp_conn_listener.address()
         while True:
-            task_to_pickle: _PoolTask | None = None
             worker: _PoolWorker | None = None
             terminate_workers: list[_PoolWorker] = []
-            tasks_to_send: list[_PoolTask | _PoolPickledTask] = []
+            tasks_to_send: list[_PoolPickledTask] = []
             launch_worker: bool = False
             worker_conn_to_handshake: multiprocessing.connection.Connection | None = None
             with self._lock:
@@ -230,34 +221,27 @@ class ProcessPool:
                     if not terminate_workers:
                         continue
                 elif (
-                    (self._task_queue or pickled_task_queue)
+                    self._task_queue
                     and free_worker_pids
                     and len(workers) - connecting_workers - len(free_worker_pids) < self._max_worker_count
                 ):
-                    l1 = len(pickled_task_queue) + len(self._task_queue)
+                    l1 = len(self._task_queue)
                     l2 = len(free_worker_pids)
                     l3 = self._max_worker_count - (len(workers) - connecting_workers - len(free_worker_pids))
                     cnt = min(l1, l2, l3)
-                    while cnt and pickled_task_queue:
-                        tasks_to_send.append(pickled_task_queue.popleft())
-                        cnt -= 1
                     while cnt and self._task_queue:
                         tasks_to_send.append(self._task_queue.popleft())
                         cnt -= 1
-                elif (self._task_queue or pickled_task_queue) and (conn := self._mp_conn_listener.take_connection()):
+                elif self._task_queue and (conn := self._mp_conn_listener.take_connection()):
                     worker_conn_to_handshake = conn
                 elif (
-                    (self._task_queue or pickled_task_queue)
+                    self._task_queue
                     and len(workers) - terminating_workers < self._max_worker_count
                     and not connecting_workers
                 ):
                     launch_worker = True
-                elif self._task_queue and not pickled_task_queue:
-                    task_to_pickle = self._task_queue.popleft()
                 elif len(workers) - terminating_workers < self._max_worker_count:
                     launch_worker = True
-                elif self._task_queue:
-                    task_to_pickle = self._task_queue.popleft()
                 elif conn := self._mp_conn_listener.take_connection():
                     worker_conn_to_handshake = conn
 
@@ -283,17 +267,9 @@ class ProcessPool:
                     if task.future.cancelled():
                         continue
                     free_worker_pids.popleft()
-                    if isinstance(task, _PoolPickledTask):
-                        data = task.data
-                    else:
-                        data = _pickle_pool_task(task)
                     assert worker.connection is not None
-                    worker.connection.send_bytes(data)
+                    worker.connection.send_bytes(task.data)
                     worker.active_task_future = task.future
-            elif task_to_pickle:
-                pickled_task_queue.append(
-                    _PoolPickledTask(data=_pickle_pool_task(task_to_pickle), future=task_to_pickle.future)
-                )
             elif worker_conn_to_handshake:
                 worker_pid: int = worker_conn_to_handshake.recv()
                 assert connecting_workers > 0
@@ -363,8 +339,6 @@ class ProcessPool:
         # In pre-shutdown, we can terminate all pending tasks and workers except the currently-connecting ones (which
         # are needed to avoid deadlocking the accept() call in the connection listener).
         event_selector.close()
-        for task in pickled_task_queue:
-            task.future.cancel()
         with self._lock:
             for task in self._task_queue:
                 task.future.cancel()
@@ -457,10 +431,6 @@ class ProcessPool:
             return
         except Exception as e:
             raise
-
-
-def _pickle_pool_task(task: _PoolTask) -> memoryview:
-    return multiprocessing.reduction.ForkingPickler.dumps((task.func, task.args))
 
 
 class ProcessEvent:
