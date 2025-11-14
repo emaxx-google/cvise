@@ -16,6 +16,7 @@ and letting the code raise the exception to trigger the shutdown.
 
 from __future__ import annotations
 
+import atexit
 import concurrent.futures
 import contextlib
 import enum
@@ -47,19 +48,22 @@ _wakeup_write_socket: socket.socket | None = None
 def init(mode: Mode) -> None:
     global _mode
     _mode = mode
-    # Ignore old signal handlers (in tests, the old handler could've been installed by ourselves as well; calling it
-    # would result in an infinite recursion).
-    signal.signal(signal.SIGTERM, _on_signal)
-    signal.signal(signal.SIGINT, _on_signal)
 
     global _wakeup_read_socket, _wakeup_write_socket
     if _wakeup_read_socket is None:
         _wakeup_read_socket, _wakeup_write_socket = socket.socketpair()
         _wakeup_write_socket.setblocking(False)
         signal.set_wakeup_fd(_wakeup_write_socket.fileno(), warn_on_full_buffer=False)
+        atexit.register(_wakeup_read_socket.close)
+        atexit.register(_wakeup_write_socket.close)
 
     global _future
     _future = Future()
+
+    # Ignore old signal handlers (in tests, the old handler could've been installed by ourselves as well; calling it
+    # would result in an infinite recursion).
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
 
 
 def maybe_retrigger_action() -> None:
