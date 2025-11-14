@@ -103,9 +103,10 @@ class _MPConnListener:
 
 
 @dataclass
-class _PoolPickledTask:
+class _PoolTask:
     data: memoryview
     future: Future
+    timeout: float
 
 
 @dataclass
@@ -129,8 +130,8 @@ class ProcessPool:
         self._process_monitor = process_monitor
         self._mplogger = mplogger
         self._lock = threading.Lock()
-        self._task_queue: collections.deque[_PoolPickledTask] = collections.deque()
-        self._cancel_term_queue: collections.deque[tuple[int, Future]] = collections.deque()
+        self._task_queue: collections.deque[_PoolTask] = collections.deque()
+        self._termination_queue: collections.deque[tuple[int, Future]] = collections.deque()
         self._pre_shutdown = False
         self._shutdown = False
         self._pool_thread = threading.Thread(target=self._pool_thread_main)
@@ -164,7 +165,7 @@ class ProcessPool:
 
     def schedule(self, f, args, timeout):
         future = Future()
-        task = _PoolPickledTask(data=multiprocessing.reduction.ForkingPickler.dumps((f, args)), future=future)
+        task = _PoolTask(data=multiprocessing.reduction.ForkingPickler.dumps((f, args)), future=future, timeout=timeout)
         with self._lock:
             if self._pre_shutdown:
                 future.cancel()
@@ -186,13 +187,22 @@ class ProcessPool:
         free_worker_pids: collections.deque[int] = collections.deque()
         connecting_workers: int = 0
         terminating_workers: int = 0
+        timeouts_heap: list[tuple[float, Future]] = []
         event_selector = selectors.DefaultSelector()
         event_selector.register(self._cond_read, selectors.EVENT_READ)
         mp_conn_listener_address = self._mp_conn_listener.address()
         while True:
+            now = time.monotonic()
+            while timeouts_heap and now >= timeouts_heap[0][0]:
+                _when, future = heapq.heappop(timeouts_heap)
+                if future.done():
+                    continue
+                with contextlib.suppress(concurrent.futures.InvalidStateError):  # it might've been resolved already
+                    future.set_exception(TimeoutError(f'Job timed out'))
+
             worker: _PoolWorker | None = None
             terminate_workers: list[_PoolWorker] = []
-            tasks_to_send: list[_PoolPickledTask] = []
+            tasks_to_send: list[_PoolTask] = []
             launch_worker: bool = False
             worker_conn_to_handshake: multiprocessing.connection.Connection | None = None
             with self._lock:
@@ -209,9 +219,9 @@ class ProcessPool:
                 )
                 if self._pre_shutdown:
                     break
-                elif self._cancel_term_queue:
-                    while self._cancel_term_queue:
-                        worker_pid, future = self._cancel_term_queue.popleft()
+                elif self._termination_queue:
+                    while self._termination_queue:
+                        worker_pid, future = self._termination_queue.popleft()
                         if worker_pid not in workers:
                             continue
                         worker = workers[worker_pid]
@@ -261,15 +271,14 @@ class ProcessPool:
                     assert free_worker_pids
                     worker_pid = free_worker_pids[0]
                     worker = workers[worker_pid]
-                    task.future.add_done_callback(
-                        lambda future, pid=worker_pid: self._schedule_term_if_needed(pid, future)
-                    )
-                    if task.future.cancelled():
+                    task.future.add_done_callback(lambda future, pid=worker_pid: self._on_future_resolved(pid, future))
+                    if task.future.done():
                         continue
                     free_worker_pids.popleft()
                     assert worker.connection is not None
                     worker.connection.send_bytes(task.data)
                     worker.active_task_future = task.future
+                    heapq.heappush(timeouts_heap, (time.monotonic() + task.timeout, task.future))
             elif worker_conn_to_handshake:
                 worker_pid: int = worker_conn_to_handshake.recv()
                 assert connecting_workers > 0
@@ -291,7 +300,8 @@ class ProcessPool:
                 connecting_workers += 1
                 self._process_monitor.on_worker_started(proc.pid)
             else:
-                events = event_selector.select()
+                max_wait = timeouts_heap[0][0] - now if timeouts_heap else None
+                events = event_selector.select(timeout=max_wait)
                 for selector_key, _event_mask in events:
                     fileobj = selector_key.fileobj
                     if fileobj == self._cond_read:
@@ -383,7 +393,7 @@ class ProcessPool:
             self._process_monitor.on_process_event_from_worker(message)
             return False
         if isinstance(message, logging.LogRecord):
-            if not worker.terminating:
+            if not worker.terminating or (worker.active_task_future and not worker.active_task_future.done()):
                 self._mplogger.on_log_from_worker(message)
             return False
         if worker.active_task_future is None:
@@ -397,49 +407,46 @@ class ProcessPool:
         worker.active_task_future = None
         return True
 
-    def _schedule_term_if_needed(self, worker_pid: int, future: Future):
-        if not future.cancelled():
+    def _on_future_resolved(self, worker_pid: int, future: Future):
+        if not future.cancelled() and not isinstance(future.exception(timeout=0), TimeoutError):
             return
         with self._lock:
-            self._cancel_term_queue.append((worker_pid, future))
-        self._cond_write.send(None)
+            self._termination_queue.append((worker_pid, future))
+            enqueued = len(self._termination_queue)
+        if enqueued == 1:
+            self._cond_write.send(None)
 
     @staticmethod
     def _worker_process_main(server_address, initializers):
         sigmonitor.init(sigmonitor.Mode.QUICK_EXIT)
-        with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION):
+        with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND):
             try:
                 with multiprocessing.connection.Client(server_address, authkey=None) as server_conn:
                     for init in initializers:
                         init(server_conn)
                     # Notify the main C-Vise process that we are ready for executing tasks.
                     server_conn.send(os.getpid())
-                    # Handle incoming tasks in an infinite loop (until stopped by a signal).
                     with selectors.DefaultSelector() as event_selector:
                         event_selector.register(server_conn, selectors.EVENT_READ)
                         event_selector.register(sigmonitor.get_wakeup_fd(), selectors.EVENT_READ)
+                        # Handle incoming tasks in an infinite loop (until stopped by a signal).
                         while True:
                             events = event_selector.select()
-                            had_signal = False
                             can_recv = False
                             for selector_key, _event_mask in events:
-                                if selector_key.fileobj == sigmonitor.get_wakeup_fd():
-                                    had_signal = True
-                                elif selector_key.fileobj:
+                                if selector_key.fileobj != sigmonitor.get_wakeup_fd():
                                     can_recv = True
-                                else:
-                                    assert 0
-                            if had_signal:
-                                sigmonitor.maybe_retrigger_action()
+                            sigmonitor.maybe_retrigger_action()
                             if can_recv:
                                 f, args = server_conn.recv()
                                 try:
-                                    result = f(*args)
+                                    with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION):
+                                        result = f(*args)
                                 except Exception as e:
                                     result = e
+                                sigmonitor.maybe_retrigger_action()
                                 pickled = multiprocessing.reduction.ForkingPickler.dumps(result)
-                                with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND):
-                                    server_conn.send_bytes(pickled)
+                                server_conn.send_bytes(pickled)
             except (EOFError, OSError):
                 return
             except Exception as e:
