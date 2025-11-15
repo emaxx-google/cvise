@@ -195,7 +195,9 @@ class TestEnvironment:
             # cleanup and stats (only useful for successful case - otherwise job's dir will be anyway deleted)
             if result.test_exitcode == 0:
                 fileutil.remove_extraneous_files(self.test_case_path, written_paths)
-                result.size_improvement = self.base_size - fileutil.get_file_size(self.test_case_path)
+                result.size_improvement = fileutil.get_file_size(self.test_case) - fileutil.get_file_size(
+                    self.test_case_path
+                )
             return result
         except UnicodeDecodeError:
             # most likely the pass is incompatible with non-UTF files - terminate it
