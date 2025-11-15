@@ -101,6 +101,31 @@ class AdvanceOnSuccessEnvironment:
         )
 
 
+@dataclass
+class TestResult:
+    test_script: Path
+    folder: Path
+    all_test_cases: set[Path]
+    test_case: Path
+    pass_result: PassResult
+    updated_state: Any
+    test_exitcode: int | None = None
+    size_improvement: int | None = None
+
+    @property
+    def test_case_path(self) -> Path:
+        return self.folder / self.test_case
+
+    @property
+    def success(self):
+        return self.pass_result == PassResult.OK and self.test_exitcode == 0
+
+    def dump(self, dst):
+        for f in self.all_test_cases:
+            shutil.copy(self.folder / f, dst)
+        shutil.copy(self.test_script, dst)
+
+
 class TestEnvironment:
     """Holds data for running a Pass transform() method and the interestingness test in a worker.
 
@@ -122,8 +147,6 @@ class TestEnvironment:
         self.state = state
         self.folder: Path = folder
         self.test_script = test_script
-        self.exitcode = None
-        self.result: PassResult | None = None
         self.order = order
         self.transform = transform
         self.test_case: Path = test_case
@@ -133,25 +156,8 @@ class TestEnvironment:
         self.new_size: int | None = None
 
     @property
-    def size_improvement(self) -> int:
-        assert self.success
-        assert self.original_size is not None
-        assert self.new_size is not None
-        return self.original_size - self.new_size
-
-    @property
     def test_case_path(self) -> Path:
         return self.folder / self.test_case
-
-    @property
-    def success(self):
-        return self.result == PassResult.OK and self.exitcode == 0
-
-    def dump(self, dst):
-        for f in self.all_test_cases:
-            shutil.copy(self.folder / f, dst)
-
-        shutil.copy(self.test_script, dst)
 
     def copy_test_cases(self):
         for test_case in self.all_test_cases:
@@ -165,27 +171,32 @@ class TestEnvironment:
 
             # transform by state
             written_paths: set[Path] = set()
-            (result, self.state) = self.transform(
+            (pass_result, updated_state) = self.transform(
                 self.test_case_path,
                 self.state,
                 process_event_notifier=ProcessEventNotifier(),
                 original_test_case=self.test_case.resolve(),
                 written_paths=written_paths,
             )
-            self.result = result
-            if self.result != PassResult.OK:
-                return self
+            result = TestResult(
+                test_script=self.test_script,
+                folder=self.folder,
+                all_test_cases=self.all_test_cases,
+                test_case=self.test_case,
+                pass_result=pass_result,
+                updated_state=updated_state,
+            )
+            if pass_result != PassResult.OK:
+                return result
 
             # run test script
-            self.exitcode = self.run_test(False)
+            result.test_exitcode = self.run_test(False)
 
-            # cleanup and stats (only useful for successful case - otherwise job's dir will be deleted anyway)
-            if self.exitcode == 0:
-                self.original_size = fileutil.get_file_size(self.test_case)
-                self.new_size = fileutil.get_file_size(self.test_case_path)
+            # cleanup and stats (only useful for successful case - otherwise job's dir will be anyway deleted)
+            if result.test_exitcode == 0:
                 fileutil.remove_extraneous_files(self.test_case_path, written_paths)
-
-            return self
+                result.size_improvement = self.base_size - fileutil.get_file_size(self.test_case_path)
+            return result
         except UnicodeDecodeError:
             # most likely the pass is incompatible with non-UTF files - terminate it
             logging.debug('Skipping pass due to a unicode issue')
@@ -603,8 +614,8 @@ class TestManager:
             return False
 
         crash_dir.mkdir()
-        test_env: TestEnvironment = job.future.result()
-        test_env.dump(crash_dir)
+        result: TestResult = job.future.result()
+        result.dump(crash_dir)
 
         if not self.die_on_pass_bug:
             logging.debug(
@@ -616,11 +627,11 @@ class TestManager:
             + f'Git version: {CVise.Info.GIT_VERSION}\n'
             + f'LLVM version: {CVise.Info.LLVM_VERSION}\n'
             + f'System: {str(platform.uname())}\n'
-            + PassBugError.MSG.format(job.pass_, problem, test_env.state, crash_dir)
+            + PassBugError.MSG.format(job.pass_, problem, result.updated_state, crash_dir)
         )
 
         if self.die_on_pass_bug:
-            raise PassBugError(job.pass_, problem, test_env.state, crash_dir)
+            raise PassBugError(job.pass_, problem, result.updated_state, crash_dir)
         else:
             return True
 
@@ -752,7 +763,7 @@ class TestManager:
             ctx.hint_bundle_paths = {} if ctx.state is None else ctx.state.hint_bundle_paths()
 
     def handle_finished_transform_job(self, job: Job) -> None:
-        env: TestEnvironment = job.future.result()
+        result: TestResult = job.future.result()
         self.pass_statistic.add_executed(job.pass_, job.start_time, self.parallel_tests)
 
         ctx = self.pass_contexts[job.pass_id] if job.pass_id is not None else None
@@ -779,13 +790,13 @@ class TestManager:
                     ctx.last_success_pass_job_counter = max(ctx.last_success_pass_job_counter, job.pass_job_counter)
 
     def check_pass_result(self, job: Job):
-        test_env: TestEnvironment = job.future.result()
-        if test_env.success:
-            if self.max_improvement is not None and test_env.size_improvement > self.max_improvement:
-                logging.debug(f'Too large improvement: {test_env.size_improvement} B')
+        result: TestResult = job.future.result()
+        if result.success:
+            if self.max_improvement is not None and result.size_improvement > self.max_improvement:
+                logging.debug(f'Too large improvement: {result.size_improvement} B')
                 return PassCheckingOutcome.IGNORE
             # Report bug if transform did not change the file
-            if filecmp.cmp(self.current_test_case, test_env.test_case_path):
+            if filecmp.cmp(self.current_test_case, result.test_case_path):
                 if not self.silent_pass_bug:
                     if not self.report_pass_bug(job, 'pass failed to modify the variant'):
                         return PassCheckingOutcome.STOP
@@ -815,22 +826,22 @@ class TestManager:
         return PassCheckingOutcome.IGNORE
 
     def maybe_update_success_candidate(
-        self, order: int, pass_: AbstractPass | None, pass_id: int | None, env: TestEnvironment
+        self, order: int, pass_: AbstractPass | None, pass_id: int | None, result: TestResult
     ) -> None:
-        assert env.success
+        assert result.success
         new = SuccessCandidate(
             order=order,
             pass_=pass_,
             pass_id=pass_id,
-            pass_state=env.state,
-            size_delta=-env.size_improvement,
+            pass_state=result.updated_state,
+            size_delta=-result.size_improvement,
         )
         if self.success_candidate and not new.better_than(self.success_candidate):
             return
         if self.success_candidate:
             # Make sure to clean up old temporary files.
             self.success_candidate.release(self.tmp_dir_manager)
-        new.take_file_ownership(env.test_case_path, self.tmp_dir_manager)
+        new.take_file_ownership(result.test_case_path, self.tmp_dir_manager)
         self.success_candidate = new
 
     def terminate_all(self) -> None:
