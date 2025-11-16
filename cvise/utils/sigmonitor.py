@@ -32,12 +32,13 @@ from pathlib import Path
 
 @enum.unique
 class Mode(enum.Enum):
+    OFF = enum.auto()
     RAISE_EXCEPTION = enum.auto()
     QUICK_EXIT = enum.auto()
     RAISE_EXCEPTION_ON_DEMAND = enum.auto()
 
 
-_mode: Mode = Mode.RAISE_EXCEPTION
+_mode: Mode = Mode.OFF
 _sigint_observed: bool = False
 _sigterm_observed: bool = False
 _future: Future | None = None
@@ -50,12 +51,14 @@ def init(mode: Mode) -> None:
     _mode = mode
 
     global _wakeup_read_socket, _wakeup_write_socket
-    if _wakeup_read_socket is None:
-        _wakeup_read_socket, _wakeup_write_socket = socket.socketpair()
-        _wakeup_write_socket.setblocking(False)
-        signal.set_wakeup_fd(_wakeup_write_socket.fileno(), warn_on_full_buffer=False)
-        atexit.register(_wakeup_read_socket.close)
-        atexit.register(_wakeup_write_socket.close)
+    if _wakeup_read_socket is not None:
+        _wakeup_read_socket.close()
+        _wakeup_write_socket.close()
+    _wakeup_read_socket, _wakeup_write_socket = socket.socketpair()
+    _wakeup_write_socket.setblocking(False)
+    signal.set_wakeup_fd(_wakeup_write_socket.fileno(), warn_on_full_buffer=False)
+    atexit.register(_wakeup_read_socket.close)
+    atexit.register(_wakeup_write_socket.close)
 
     global _future
     _future = Future()
@@ -77,7 +80,6 @@ def maybe_retrigger_action() -> None:
 @contextmanager
 def scoped_mode(new_mode: Mode) -> Iterator[None]:
     global _mode
-    assert _future is not None  # initialized
 
     # It's unlikely to happen, but cheap to check: no need to enter the scope if we know we'll terminate afterwards.
     _implicit_maybe_retrigger_action()
@@ -119,7 +121,7 @@ def _on_signal(signum: int, frame) -> None:
     with contextlib.suppress(concurrent.futures.InvalidStateError):
         _future.set_exception(exception)
 
-    if _is_on_demand_mode():
+    if _mode == Mode.OFF or _is_on_demand_mode():
         return
     if _mode == Mode.RAISE_EXCEPTION and not _can_raise_in_frame(frame):
         # This is to avoid the "Exception ignored in" log spam.
@@ -138,7 +140,7 @@ def _is_on_demand_mode() -> bool:
 
 
 def _implicit_maybe_retrigger_action() -> None:
-    if not _is_on_demand_mode():
+    if _mode != Mode.OFF and not _is_on_demand_mode():
         maybe_retrigger_action()
 
 
