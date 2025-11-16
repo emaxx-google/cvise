@@ -101,7 +101,7 @@ class AdvanceOnSuccessEnvironment:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class TestResult:
     test_script: Path
     folder: Path
@@ -126,6 +126,7 @@ class TestResult:
         shutil.copy(self.test_script, dst)
 
 
+@dataclass(slots=True)
 class TestEnvironment:
     """Holds data for running a Pass transform() method and the interestingness test in a worker.
 
@@ -133,27 +134,14 @@ class TestEnvironment:
     (this is useful for implementing the "sanity check" of the input on the C-Vise startup).
     """
 
-    def __init__(
-        self,
-        state,
-        order,
-        test_script,
-        folder: Path,
-        test_case: Path,
-        all_test_cases: set[Path],
-        should_copy_test_cases: bool,
-        transform,
-    ):
-        self.state = state
-        self.folder: Path = folder
-        self.test_script = test_script
-        self.order = order
-        self.transform = transform
-        self.test_case: Path = test_case
-        self.should_copy_test_cases = should_copy_test_cases
-        self.all_test_cases: set[Path] = all_test_cases
-        self.original_size: int | None = None
-        self.new_size: int | None = None
+    state: Any
+    order: int
+    test_script: Path
+    folder: Path
+    test_case: Path
+    all_test_cases: set[Path]
+    should_copy_test_cases: bool
+    transform: Callable
 
     @property
     def test_case_path(self) -> Path:

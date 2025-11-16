@@ -44,9 +44,6 @@ def _communicate(proc: subprocess.Popen, timeout=None) -> tuple[str, str]:
             for line in pipe:
                 sys.stderr.write(line)
                 sys.stderr.flush()
-                assert 'Exception' not in line
-                assert 'Traceback' not in line
-                assert 'Unexpected' not in line
                 append_list.append(line)
         except ValueError:
             pass
@@ -65,7 +62,18 @@ def _communicate(proc: subprocess.Popen, timeout=None) -> tuple[str, str]:
         raise
     err_thread.join()
     out_thread.join()
-    return ''.join(captured_stdout), ''.join(captured_stderr)
+    stdout = ''.join(captured_stdout)
+    stderr = ''.join(captured_stderr)
+
+    assert 'Exception' not in stdout
+    assert 'Traceback' not in stdout
+    assert 'Unexpected' not in stdout
+
+    assert 'Exception' not in stderr
+    assert 'Traceback' not in stderr
+    assert 'Unexpected' not in stderr
+
+    return stdout, stderr
 
 
 def check_cvise(
