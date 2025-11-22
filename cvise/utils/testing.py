@@ -768,14 +768,14 @@ class TestManager:
             case PassCheckingOutcome.IGNORE:
                 self.pass_statistic.add_failure(job.pass_)
                 if self.interleaving:
-                    self.folding_manager.on_transform_job_failure(env.state)
+                    self.folding_manager.on_transform_job_failure(result.updated_state)
             case PassCheckingOutcome.ACCEPT:
                 self.pass_statistic.add_success(job.pass_)
-                self.maybe_update_success_candidate(job.order, job.pass_, job.pass_id, env)
+                self.maybe_update_success_candidate(job.order, job.pass_, job.pass_id, result)
                 if self.interleaving:
-                    self.folding_manager.on_transform_job_success(env.state)
+                    self.folding_manager.on_transform_job_success(result.updated_state)
                 if ctx:
-                    ctx.current_batch_succeeded_states.append(env.state)
+                    ctx.current_batch_succeeded_states.append(result.updated_state)
                     assert job.pass_job_counter is not None
                     ctx.last_success_pass_job_counter = max(ctx.last_success_pass_job_counter, job.pass_job_counter)
 
@@ -793,11 +793,11 @@ class TestManager:
                 return PassCheckingOutcome.IGNORE
             return PassCheckingOutcome.ACCEPT
 
-        match test_env.result:
+        match result.pass_result:
             case PassResult.OK:
-                assert test_env.exitcode
-                if self.also_interesting is not None and test_env.exitcode == self.also_interesting:
-                    self.save_extra_dir(test_env.test_case_path)
+                assert result.test_exitcode
+                if self.also_interesting is not None and result.test_exitcode == self.also_interesting:
+                    self.save_extra_dir(result.test_case_path)
             case PassResult.STOP:
                 return PassCheckingOutcome.STOP
             case PassResult.ERROR:

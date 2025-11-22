@@ -4,6 +4,7 @@ import copy
 import logging
 import multiprocessing
 import multiprocessing.connection
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from cvise.utils import sigmonitor
