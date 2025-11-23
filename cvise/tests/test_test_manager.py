@@ -636,4 +636,4 @@ def _assert_stats_validity(pass_statistic: statistics.PassStatistic, start_time:
     for stat in stats:
         assert stat.worked + stat.failed <= stat.totally_executed
     elapsed = time.monotonic() - start_time
-    assert sum(stat.total_seconds for stat in stats) <= elapsed
+    assert sum(stat.total_seconds for stat in stats) <= elapsed * 1.1

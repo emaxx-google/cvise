@@ -18,7 +18,7 @@ import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass, field
 from enum import Enum, auto, unique
@@ -104,6 +104,14 @@ class _MPConnListener:
 
 @dataclass
 class _PoolTask:
+    f: Callable
+    args: Sequence[Any]
+    future: Future
+    timeout: float
+
+
+@dataclass
+class _SerializedPoolTask:
     data: memoryview
     future: Future
     timeout: float
@@ -163,9 +171,9 @@ class ProcessPool:
             self._pre_shutdown = True
         self._cond_write.send(None)
 
-    def schedule(self, f, args, timeout):
+    def schedule(self, f: Callable, args: Sequence[Any], timeout):
         future = Future()
-        task = _PoolTask(data=multiprocessing.reduction.ForkingPickler.dumps((f, args)), future=future, timeout=timeout)
+        task = _PoolTask(f=f, args=args, future=future, timeout=timeout)
         with self._lock:
             if self._pre_shutdown:
                 future.cancel()
@@ -184,6 +192,7 @@ class ProcessPool:
 
     def _pool_thread_main2(self):
         workers: dict[int, _PoolWorker] = {}
+        serialized_task_queue: collections.deque[_SerializedPoolTask] = collections.deque()
         free_worker_pids: collections.deque[int] = collections.deque()
         connecting_workers: int = 0
         terminating_workers: int = 0
@@ -202,7 +211,8 @@ class ProcessPool:
 
             worker: _PoolWorker | None = None
             terminate_workers: list[_PoolWorker] = []
-            tasks_to_send: list[_PoolTask] = []
+            tasks_to_send: list[_PoolTask | _SerializedPoolTask] = []
+            task_to_serialize: _PoolTask | None = None
             launch_worker: bool = False
             worker_conn_to_handshake: multiprocessing.connection.Connection | None = None
             with self._lock:
@@ -231,21 +241,24 @@ class ProcessPool:
                     if not terminate_workers:
                         continue
                 elif (
-                    self._task_queue
+                    (self._task_queue or serialized_task_queue)
                     and free_worker_pids
                     and len(workers) - connecting_workers - len(free_worker_pids) < self._max_worker_count
                 ):
-                    l1 = len(self._task_queue)
+                    l1 = len(self._task_queue) + len(serialized_task_queue)
                     l2 = len(free_worker_pids)
                     l3 = self._max_worker_count - (len(workers) - connecting_workers - len(free_worker_pids))
                     cnt = min(l1, l2, l3)
+                    while cnt and serialized_task_queue:
+                        tasks_to_send.append(serialized_task_queue.popleft())
+                        cnt -= 1
                     while cnt and self._task_queue:
                         tasks_to_send.append(self._task_queue.popleft())
                         cnt -= 1
-                elif self._task_queue and (conn := self._mp_conn_listener.take_connection()):
+                elif (self._task_queue or serialized_task_queue) and (conn := self._mp_conn_listener.take_connection()):
                     worker_conn_to_handshake = conn
                 elif (
-                    self._task_queue
+                    (self._task_queue or serialized_task_queue)
                     and len(workers) - terminating_workers < self._max_worker_count
                     and not connecting_workers
                 ):
@@ -254,6 +267,8 @@ class ProcessPool:
                     launch_worker = True
                 elif conn := self._mp_conn_listener.take_connection():
                     worker_conn_to_handshake = conn
+                elif self._task_queue:
+                    task_to_serialize = self._task_queue.popleft()
 
             if terminate_workers:
                 for worker in terminate_workers:
@@ -276,9 +291,19 @@ class ProcessPool:
                         continue
                     free_worker_pids.popleft()
                     assert worker.connection is not None
-                    worker.connection.send_bytes(task.data)
+                    data = (
+                        multiprocessing.reduction.ForkingPickler.dumps((task.f, task.args))
+                        if isinstance(task, _PoolTask)
+                        else task.data
+                    )
+                    worker.connection.send_bytes(data)
                     worker.active_task_future = task.future
                     heapq.heappush(timeouts_heap, (time.monotonic() + task.timeout, task.future))
+            elif task_to_serialize:
+                data = multiprocessing.reduction.ForkingPickler.dumps((task_to_serialize.f, task_to_serialize.args))
+                serialized_task_queue.append(
+                    _SerializedPoolTask(data=data, future=task_to_serialize.future, timeout=task_to_serialize.timeout)
+                )
             elif worker_conn_to_handshake:
                 worker_pid: int = worker_conn_to_handshake.recv()
                 assert connecting_workers > 0
@@ -316,7 +341,7 @@ class ProcessPool:
                         worker = workers[pid]
                         assert worker.connection is not None
                         try:
-                            message = worker.connection.recv()
+                            raw_message = worker.connection.recv_bytes()
                         except (EOFError, OSError):
                             if not worker.terminating and worker.active_task_future:
                                 with contextlib.suppress(
@@ -332,6 +357,7 @@ class ProcessPool:
                                 self._process_monitor.on_worker_stopped(pid)
                                 terminating_workers -= 1
                         else:
+                            message = multiprocessing.reduction.ForkingPickler.loads(raw_message)
                             if self._handle_message_from_worker(worker, message) and not worker.terminating:
                                 free_worker_pids.append(pid)
                     else:
@@ -350,6 +376,8 @@ class ProcessPool:
         # are needed to avoid deadlocking the accept() call in the connection listener).
         event_selector.close()
         with self._lock:
+            for task in serialized_task_queue:
+                task.future.cancel()
             for task in self._task_queue:
                 task.future.cancel()
         for worker in workers.values():
@@ -393,7 +421,7 @@ class ProcessPool:
             self._process_monitor.on_process_event_from_worker(message)
             return False
         if isinstance(message, logging.LogRecord):
-            if not worker.terminating or (worker.active_task_future and not worker.active_task_future.done()):
+            if not worker.terminating and (worker.active_task_future is None or not worker.active_task_future.done()):
                 self._mplogger.on_log_from_worker(message)
             return False
         if worker.active_task_future is None:
