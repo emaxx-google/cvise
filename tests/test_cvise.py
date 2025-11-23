@@ -84,11 +84,11 @@ def check_cvise(
     shutil.copy(get_source_path(testcase), work_path)
     work_path.chmod(0o644)
 
-    proc = start_cvise([testcase] + arguments, tmp_path, overridden_subprocess_tmpdir)
-    stdout, stderr = _communicate(proc)
-    assert proc.returncode == 0, (
-        f'Process failed with exit code {proc.returncode}; stderr:\n{stderr}\nstdout:\n{stdout}'
-    )
+    with start_cvise([testcase] + arguments, tmp_path, overridden_subprocess_tmpdir) as proc:
+        stdout, stderr = _communicate(proc)
+        assert proc.returncode == 0, (
+            f'Process failed with exit code {proc.returncode}; stderr:\n{stderr}\nstdout:\n{stdout}'
+        )
 
     content = work_path.read_text()
     assert content in expected
@@ -137,7 +137,7 @@ def test_kill(tmp_path: Path, overridden_subprocess_tmpdir: Path, signum: int, a
     shutil.copy(get_source_path('blocksort-part.c'), tmp_path)
     flag_file = tmp_path / 'flag'
 
-    proc = start_cvise(
+    with start_cvise(
         [
             'blocksort-part.c',
             '-c',
@@ -148,19 +148,20 @@ def test_kill(tmp_path: Path, overridden_subprocess_tmpdir: Path, signum: int, a
         ],
         tmp_path,
         overridden_subprocess_tmpdir,
-    )
-    # to make the test cover the interesting scenario, we wait until C-Vise starts at least one job
-    wait_until_file_created(flag_file)
-    # extra wait for more variance in test scenarios
-    time.sleep(additional_delay)
+    ) as proc:
+        # to make the test cover the interesting scenario, we wait until C-Vise starts at least one job
+        wait_until_file_created(flag_file)
+        # extra wait for more variance in test scenarios
+        time.sleep(additional_delay)
 
-    proc.send_signal(signum)
-    try:
-        _communicate(proc, timeout=MAX_SHUTDOWN)
-    except TimeoutError:
-        # C-Vise has not quit on time - kill it and fail the test
-        proc.kill()
-        raise
+        proc.send_signal(signum)
+        try:
+            _communicate(proc, timeout=MAX_SHUTDOWN)
+        except TimeoutError:
+            # C-Vise has not quit on time - kill it and fail the test
+            proc.kill()
+            raise
+
     assert_subprocess_tmpdir_empty(overridden_subprocess_tmpdir)
 
 
@@ -188,15 +189,16 @@ def test_interleaving_lines_passes(tmp_path: Path, overridden_subprocess_tmpdir:
         }
         """)
 
-    proc = start_cvise(
+    with start_cvise(
         ['-c', 'gcc -c test.c && grep foo test.c', '--pass-group-file', str(config_path), testcase_path.name],
         tmp_path,
         overridden_subprocess_tmpdir,
-    )
-    stdout, stderr = _communicate(proc)
-    assert proc.returncode == 0, (
-        f'Process failed with exit code {proc.returncode}; stderr:\n{stderr}\nstdout:\n{stdout}'
-    )
+    ) as proc:
+        stdout, stderr = _communicate(proc)
+        assert proc.returncode == 0, (
+            f'Process failed with exit code {proc.returncode}; stderr:\n{stderr}\nstdout:\n{stdout}'
+        )
+
     assert (
         testcase_path.read_text()
         == """
@@ -222,7 +224,7 @@ def test_apply_hints(tmp_path: Path, overridden_subprocess_tmpdir: Path):
     input_path = tmp_path / 'input.txt'
     input_path.write_text('abcd')
 
-    proc = start_cvise(
+    with start_cvise(
         [
             '--action=apply-hints',
             '--hints-file',
@@ -233,11 +235,12 @@ def test_apply_hints(tmp_path: Path, overridden_subprocess_tmpdir: Path):
         ],
         tmp_path,
         overridden_subprocess_tmpdir,
-    )
-    stdout, stderr = _communicate(proc)
-    assert proc.returncode == 0, (
-        f'Process failed with exit code {proc.returncode}; stderr:\n{stderr}\nstdout:\n{stdout}'
-    )
+    ) as proc:
+        stdout, stderr = _communicate(proc)
+        assert proc.returncode == 0, (
+            f'Process failed with exit code {proc.returncode}; stderr:\n{stderr}\nstdout:\n{stdout}'
+        )
+
     assert stdout == 'ad'
     assert_subprocess_tmpdir_empty(overridden_subprocess_tmpdir)
 
@@ -251,16 +254,16 @@ def test_non_ascii(tmp_path: Path, overridden_subprocess_tmpdir: Path):
         """)
 
     # Also enable diff logging to check it doesn't break on non-unicode.
-    proc = start_cvise(
+    with start_cvise(
         ['-c', 'gcc -c -Wall -Werror test.c && grep foo test.c', testcase_path.name, '--print-diff'],
         tmp_path,
         overridden_subprocess_tmpdir,
-    )
-    stdout, stderr = _communicate(proc)
+    ) as proc:
+        stdout, stderr = _communicate(proc)
+        assert proc.returncode == 0, (
+            f'Process failed with exit code {proc.returncode}; stderr:\n{stderr}\nstdout:\n{stdout}'
+        )
 
-    assert proc.returncode == 0, (
-        f'Process failed with exit code {proc.returncode}; stderr:\n{stderr}\nstdout:\n{stdout}'
-    )
     # The reduced result may or may not include the trailing line break - this depends on random ordering factors.
     assert testcase_path.read_text() in ('int foo;', 'int foo;\n')
     assert_subprocess_tmpdir_empty(overridden_subprocess_tmpdir)
@@ -286,7 +289,7 @@ def test_dir_test_case(tmp_path: Path, overridden_subprocess_tmpdir: Path):
     (test_case / 'a.h').write_text('// comment\nint x = 1;\n')
     (test_case / 'a.cc').write_text('#include "a.h"\nint nextHi = x;\n')
 
-    proc = start_cvise(
+    with start_cvise(
         [
             '-c',
             'gcc -c repro/a.cc && grep "nextHi = x" repro/a.cc',
@@ -295,12 +298,12 @@ def test_dir_test_case(tmp_path: Path, overridden_subprocess_tmpdir: Path):
         ],
         tmp_path,
         overridden_subprocess_tmpdir,
-    )
-    stdout, stderr = _communicate(proc)
+    ) as proc:
+        stdout, stderr = _communicate(proc)
+        assert proc.returncode == 0, (
+            f'Process failed with exit code {proc.returncode}; stderr:\n{stderr}\nstdout:\n{stdout}'
+        )
 
-    assert proc.returncode == 0, (
-        f'Process failed with exit code {proc.returncode}; stderr:\n{stderr}\nstdout:\n{stdout}'
-    )
     assert (test_case / 'a.h').read_text() == 'int x ;\n'
     assert (test_case / 'a.cc').read_text() == '#include "a.h"\nint nextHi = x;\n'
 
@@ -314,7 +317,7 @@ def disabled_test_script_inside_test_case_error(tmp_path: Path, overridden_subpr
     interestingness_test.write_text('#!/bin/sh\ntrue\n')
     interestingness_test.chmod(interestingness_test.stat().st_mode | stat.S_IEXEC)
 
-    proc = start_cvise(
+    with start_cvise(
         [
             str(interestingness_test),
             'repro',
@@ -323,10 +326,10 @@ def disabled_test_script_inside_test_case_error(tmp_path: Path, overridden_subpr
         ],
         tmp_path,
         overridden_subprocess_tmpdir,
-    )
-    stdout, stderr = _communicate(proc)
+    ) as proc:
+        stdout, stderr = _communicate(proc)
+        assert proc.returncode != 0, f'Process succeeded unexpectedly; stderr:\n{stderr}\nstdout:\n{stdout}'
 
-    assert proc.returncode != 0, f'Process succeeded unexpectedly; stderr:\n{stderr}\nstdout:\n{stdout}'
     assert 'is inside test case directory' in stderr
 
 
@@ -346,7 +349,7 @@ def test_non_ascii_dir_test_case(tmp_path: Path, overridden_subprocess_tmpdir: P
         """)
 
     # Also enable diff logging to check it doesn't break on non-unicode.
-    proc = start_cvise(
+    with start_cvise(
         [
             '-c',
             'gcc -c -Wall -Werror repro/*.c && grep foo repro/*.c',
@@ -356,12 +359,12 @@ def test_non_ascii_dir_test_case(tmp_path: Path, overridden_subprocess_tmpdir: P
         ],
         tmp_path,
         overridden_subprocess_tmpdir,
-    )
-    stdout, stderr = _communicate(proc)
+    ) as proc:
+        stdout, stderr = _communicate(proc)
+        assert proc.returncode == 0, (
+            f'Process failed with exit code {proc.returncode}; stderr:\n{stderr}\nstdout:\n{stdout}'
+        )
 
-    assert proc.returncode == 0, (
-        f'Process failed with exit code {proc.returncode}; stderr:\n{stderr}\nstdout:\n{stdout}'
-    )
     assert a_path.read_text() in ('int foo;', 'int foo;\n')
     assert not b_path.exists() or b_path.read_text() == ''
     assert 'Streichholz' in stderr
@@ -371,12 +374,12 @@ def test_failing_interestingness_test(tmp_path: Path, overridden_subprocess_tmpd
     testcase_path = tmp_path / 'test.c'
     testcase_path.write_text('foo')
 
-    proc = start_cvise(
+    with start_cvise(
         ['test.c', '-c', 'gcc test.c'],
         tmp_path,
         overridden_subprocess_tmpdir,
-    )
-    stdout, stderr = _communicate(proc)
+    ) as proc:
+        stdout, stderr = _communicate(proc)
+        assert proc.returncode != 0, f'Process succeeded unexpectedly; stderr:\n{stderr}\nstdout:\n{stdout}'
 
-    assert proc.returncode != 0, f'Process succeeded unexpectedly; stderr:\n{stderr}\nstdout:\n{stdout}'
     assert 'interestingness test does not return' in stdout
