@@ -23,7 +23,7 @@ from typing import Any
 from cvise.cvise import CVise
 from cvise.passes.abstract import AbstractPass, PassResult
 from cvise.passes.hint_based import HintBasedPass, HintState
-from cvise.utils import cache, fileutil, mplogging, sigmonitor
+from cvise.utils import cache, fileutil, sigmonitor
 from cvise.utils.error import (
     AbsolutePathTestCaseError,
     InsaneTestCaseError,
@@ -492,7 +492,6 @@ class TestManager:
 
         self.key_logger = None if self.skip_key_off else KeyLogger()
         self.process_monitor = ProcessMonitor(self.parallel_tests)
-        self.mplogger = mplogging.MPLogger()
         self.worker_pool = None
 
     def __enter__(self):
@@ -506,10 +505,9 @@ class TestManager:
         self.exit_stack.enter_context(self.process_monitor)
 
         worker_initializers = [
-            self.mplogger.worker_process_initializer(),
             ProcessEventNotifier.initialize_in_worker,
         ]
-        self.worker_pool = ProcessPool(self.parallel_tests, worker_initializers, self.process_monitor, self.mplogger)
+        self.worker_pool = ProcessPool(self.parallel_tests, worker_initializers, self.process_monitor)
 
         self.exit_stack.enter_context(self.worker_pool)
         return self
@@ -863,11 +861,9 @@ class TestManager:
         self.release_all_jobs()
 
     def cancel_job(self, job: Job) -> None:
-        # logging.info(f'cancel_job')
         job.future.cancel()
 
     def run_parallel_tests(self) -> None:
-        # print(f'run_parallel_tests', file=sys.stderr)
         assert self.worker_pool
         assert not self.jobs
         self.current_batch_start_order = self.order
@@ -982,7 +978,6 @@ class TestManager:
                                 self.print_diff = not self.print_diff
 
                     self.run_parallel_tests()
-                    # print(f'total jobs count={self.order}', file=sys.stderr)
 
                     is_success = self.success_candidate is not None
                     if is_success:
@@ -1028,7 +1023,6 @@ class TestManager:
             sys.exit(1)
 
     def process_result(self) -> None:
-        # logging.info(f'PROCESS_RESULT')
         assert self.success_candidate
         new_test_case = self.success_candidate.test_case_path
         assert new_test_case

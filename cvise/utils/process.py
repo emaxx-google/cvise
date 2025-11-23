@@ -27,7 +27,7 @@ from typing import Any
 import pebble
 import psutil
 
-from cvise.utils import sigmonitor
+from cvise.utils import mplogging, sigmonitor
 
 
 @unique
@@ -130,13 +130,12 @@ class ProcessPoolError(Exception):
 
 
 class ProcessPool:
-    def __init__(self, max_worker_count, worker_initializers, process_monitor, mplogger):
+    def __init__(self, max_worker_count, worker_initializers, process_monitor):
         self._max_worker_count = max_worker_count
         self._cond_read, self._cond_write = multiprocessing.Pipe(duplex=False)
         self._mp_conn_listener = _MPConnListener(backlog=max_worker_count, pipe_to_notify=self._cond_write)
         self._worker_initializers = worker_initializers
         self._process_monitor = process_monitor
-        self._mplogger = mplogger
         self._lock = threading.Lock()
         self._task_queue: collections.deque[_PoolTask] = collections.deque()
         self._termination_queue: collections.deque[tuple[int, Future]] = collections.deque()
@@ -317,7 +316,7 @@ class ProcessPool:
                 self._mp_conn_listener.expect_new_connection()
                 proc = multiprocessing.Process(
                     target=self._worker_process_main,
-                    args=(mp_conn_listener_address, self._worker_initializers),
+                    args=(logging.getLogger().getEffectiveLevel(), mp_conn_listener_address, self._worker_initializers),
                 )
                 proc.start()
                 assert proc.pid is not None
@@ -416,13 +415,14 @@ class ProcessPool:
                 worker.process.join()
                 self._process_monitor.on_worker_stopped(worker.process.pid)
 
-    def _handle_message_from_worker(self, worker: _PoolWorker, message) -> bool:
+    def _handle_message_from_worker(self, worker: _PoolWorker, message: Any) -> bool:
         if isinstance(message, ProcessEvent):
             self._process_monitor.on_process_event_from_worker(message)
             return False
-        if isinstance(message, logging.LogRecord):
-            if not worker.terminating and (worker.active_task_future is None or not worker.active_task_future.done()):
-                self._mplogger.on_log_from_worker(message)
+        is_active_worker = not worker.terminating and (
+            worker.active_task_future is None or not worker.active_task_future.done()
+        )
+        if mplogging.maybe_handle_message_from_worker(message, is_active_worker):
             return False
         if worker.active_task_future is None:
             return False
@@ -445,11 +445,19 @@ class ProcessPool:
             self._cond_write.send(None)
 
     @staticmethod
-    def _worker_process_main(server_address, initializers):
+    def _worker_process_main(logging_level: int, server_address, initializers):
+        try:
+            ProcessPool._worker_process_main2(logging_level, server_address, initializers)
+        except Exception as e:
+            print(f'worker process exception: {e}', file=sys.stderr)
+
+    @staticmethod
+    def _worker_process_main2(logging_level: int, server_address, initializers):
         sigmonitor.init(sigmonitor.Mode.QUICK_EXIT)
         with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND):
             try:
                 with multiprocessing.connection.Client(server_address, authkey=None) as server_conn:
+                    mplogging.init_in_worker(logging_level=logging_level, server_conn=server_conn)
                     for init in initializers:
                         init(server_conn)
                     # Notify the main C-Vise process that we are ready for executing tasks.

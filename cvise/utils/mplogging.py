@@ -4,41 +4,29 @@ import copy
 import logging
 import multiprocessing
 import multiprocessing.connection
-from collections.abc import Callable
-from dataclasses import dataclass
+from typing import Any
 
 from cvise.utils import sigmonitor
 
 
-class MPLogger:
-    """Collects and processes logs from multiprocessing workers in the main process.
-
-    Main features:
-    * Discards logs from canceled jobs (to hide spurious errors from the user).
-    * Supports logging to file (otherwise workers would try to write to the same file simultaneously).
-
-    Each worker should use worker_process_initializer().
-    """
-
-    def worker_process_initializer(self) -> Callable:
-        return _WorkerProcessInitializer(logging_level=logging.getLogger().getEffectiveLevel())
-
-    def on_log_from_worker(self, record: logging.LogRecord) -> None:
-        logger = logging.getLogger(record.name)
-        logger.handle(record)
+def init_in_worker(logging_level: int, server_conn: multiprocessing.connection.Connection) -> None:
+    root = logging.getLogger()
+    root.setLevel(logging_level)
+    root.handlers.clear()
+    root.addHandler(_MPConnSendingHandler(server_conn))
 
 
-@dataclass
-class _WorkerProcessInitializer:
-    """The function-like object returned by worker_process_initializer()."""
+def maybe_handle_message_from_worker(message: Any, is_active_worker: bool) -> bool:
+    if isinstance(message, logging.LogRecord):
+        if is_active_worker:
+            _emit_log_from_worker(message)
+        return True
+    return False
 
-    logging_level: int
 
-    def __call__(self, server_conn: multiprocessing.connection.Connection):
-        root = logging.getLogger()
-        root.setLevel(self.logging_level)
-        root.handlers.clear()
-        root.addHandler(_MPConnSendingHandler(server_conn))
+def _emit_log_from_worker(record: logging.LogRecord) -> None:
+    logger = logging.getLogger(record.name)
+    logger.handle(record)
 
 
 class _MPConnSendingHandler(logging.Handler):
