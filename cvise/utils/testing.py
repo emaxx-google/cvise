@@ -345,6 +345,9 @@ class Job:
     pass_user_visible_name: str
     pass_job_counter: int | None
 
+    # Only specified for TRANSFORM jobs.
+    pass_state: Any
+
     start_time: float
     timeout: float
     temporary_folder: Path | None
@@ -692,11 +695,12 @@ class TestManager:
                 logging.info(f'Created extra directory {extra_dir} for you to look at later')
 
     def process_done_futures(self) -> None:
-        jobs_to_remove = []
-        for job in self.jobs:
+        jobs_to_remove: set[int] = set()
+        new_successful_transforms: dict[int, list[HintState]] = {}
+        for job_id, job in enumerate(self.jobs):
             if not job.future.done():
                 continue
-            jobs_to_remove.append(job)
+            jobs_to_remove.add(job_id)
             if exc := job.future.exception():
                 # starting with Python 3.11: concurrent.futures.TimeoutError == TimeoutError
                 if type(exc) in (TimeoutError, concurrent.futures.TimeoutError):
@@ -707,12 +711,26 @@ class TestManager:
                 case JobType.INIT:
                     self.handle_finished_init_job(job)
                 case JobType.TRANSFORM:
-                    self.handle_finished_transform_job(job)
+                    if self.handle_finished_transform_job(job) and job.pass_id is not None:
+                        result: TestResult = job.future.result()
+                        if isinstance(result.updated_state, HintState):
+                            new_successful_transforms.setdefault(job.pass_id, []).append(result.updated_state)
                 case _:
                     raise ValueError(f'Unexpected job type {job.type}')
 
-        for job in jobs_to_remove:
-            self.release_job(job)
+        if new_successful_transforms:
+            for job_id, job in enumerate(self.jobs):
+                if (
+                    job_id not in jobs_to_remove
+                    and job.pass_id is not None
+                    and job.pass_id in new_successful_transforms
+                    and any(job.pass_state.subset_of(s) for s in new_successful_transforms[job.pass_id])
+                ):
+                    self.cancel_job(job)
+                    jobs_to_remove.add(job_id)
+
+        for job_id in sorted(jobs_to_remove, reverse=True):
+            self.release_job(self.jobs[job_id])
 
     def handle_timed_out_job(self, job: Job) -> None:
         logging.warning('Test timed out for %s.', job.pass_user_visible_name)
@@ -753,7 +771,7 @@ class TestManager:
         if isinstance(ctx.pass_, HintBasedPass):
             ctx.hint_bundle_paths = {} if ctx.state is None else ctx.state.hint_bundle_paths()
 
-    def handle_finished_transform_job(self, job: Job) -> None:
+    def handle_finished_transform_job(self, job: Job) -> bool:
         result: TestResult = job.future.result()
         self.pass_statistic.add_executed(job.pass_, job.start_time, self.parallel_tests)
 
@@ -766,10 +784,12 @@ class TestManager:
                 self.pass_statistic.add_failure(job.pass_)
                 assert ctx is not None
                 ctx.state = None
+                return False
             case PassCheckingOutcome.IGNORE:
                 self.pass_statistic.add_failure(job.pass_)
                 if self.interleaving:
                     self.folding_manager.on_transform_job_failure(result.updated_state)
+                return False
             case PassCheckingOutcome.ACCEPT:
                 self.pass_statistic.add_success(job.pass_)
                 self.maybe_update_success_candidate(job.order, job.pass_, job.pass_id, result)
@@ -779,6 +799,7 @@ class TestManager:
                     ctx.current_batch_succeeded_states.append(result.updated_state)
                     assert job.pass_job_counter is not None
                     ctx.last_success_pass_job_counter = max(ctx.last_success_pass_job_counter, job.pass_job_counter)
+                return True
 
     def check_pass_result(self, job: Job):
         result: TestResult = job.future.result()
@@ -876,11 +897,7 @@ class TestManager:
                 pass
 
             # no more jobs could be scheduled at the moment - wait for some results
-            # logging.info(f'run_parallel_tests: wait on count={len([j.future for j in self.jobs if not j.future.done()])}')
-            wait(
-                [j.future for j in self.jobs] + [sigmonitor.get_future()],
-                return_when=FIRST_COMPLETED,
-            )
+            wait([j.future for j in self.jobs] + [sigmonitor.get_future()], return_when=FIRST_COMPLETED)
             sigmonitor.maybe_retrigger_action()
 
             self.process_done_futures()
@@ -1208,6 +1225,7 @@ class TestManager:
                 pass_id=pass_id,
                 pass_user_visible_name=ctx.pass_.user_visible_name(),
                 pass_job_counter=ctx.pass_job_counter,
+                pass_state=None,
                 start_time=time.monotonic(),
                 timeout=init_timeout,
                 temporary_folder=tmp_dir,
@@ -1249,6 +1267,7 @@ class TestManager:
                 pass_id=pass_id,
                 pass_user_visible_name=ctx.pass_.user_visible_name(),
                 pass_job_counter=ctx.pass_job_counter,
+                pass_state=ctx.state,
                 start_time=time.monotonic(),
                 timeout=self.timeout,
                 temporary_folder=folder,
@@ -1286,6 +1305,7 @@ class TestManager:
                 pass_id=None,
                 pass_user_visible_name='Folding',
                 pass_job_counter=None,
+                pass_state=folding_state,
                 start_time=time.monotonic(),
                 timeout=self.timeout,
                 temporary_folder=folder,
