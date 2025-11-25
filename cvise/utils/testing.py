@@ -35,7 +35,7 @@ from cvise.utils.error import (
 )
 from cvise.utils.folding import FoldingManager, FoldingStateIn, FoldingStateOut
 from cvise.utils.hint import is_special_hint_type, load_hints
-from cvise.utils.process import ProcessEventNotifier, ProcessMonitor, ProcessPool
+from cvise.utils.process import ProcessEventNotifier, ProcessPool
 from cvise.utils.readkey import KeyLogger
 
 MAX_PASS_INCREASEMENT_THRESHOLD = 3
@@ -491,7 +491,6 @@ class TestManager:
         )
 
         self.key_logger = None if self.skip_key_off else KeyLogger()
-        self.process_monitor = ProcessMonitor(self.parallel_tests)
         self.worker_pool = None
 
     def __enter__(self):
@@ -502,12 +501,8 @@ class TestManager:
 
         if self.key_logger:
             self.exit_stack.enter_context(self.key_logger)
-        self.exit_stack.enter_context(self.process_monitor)
 
-        worker_initializers = [
-            ProcessEventNotifier.initialize_in_worker,
-        ]
-        self.worker_pool = ProcessPool(self.parallel_tests, worker_initializers, self.process_monitor)
+        self.worker_pool = ProcessPool(self.parallel_tests)
 
         self.exit_stack.enter_context(self.worker_pool)
         return self

@@ -14,6 +14,7 @@ import os
 import queue
 import selectors
 import shlex
+import socket
 import subprocess
 import sys
 import threading
@@ -24,17 +25,9 @@ from dataclasses import dataclass, field
 from enum import Enum, auto, unique
 from typing import Any
 
-import pebble
 import psutil
 
 from cvise.utils import mplogging, sigmonitor
-
-
-@unique
-class ProcessEventType(Enum):
-    STARTED = auto()
-    FINISHED = auto()
-    ORPHANED = auto()  # reported instead of FINISHED when worker leaves the child process not terminated
 
 
 class _MPConnListener:
@@ -130,12 +123,10 @@ class ProcessPoolError(Exception):
 
 
 class ProcessPool:
-    def __init__(self, max_worker_count, worker_initializers, process_monitor):
+    def __init__(self, max_worker_count):
         self._max_worker_count = max_worker_count
         self._cond_read, self._cond_write = multiprocessing.Pipe(duplex=False)
         self._mp_conn_listener = _MPConnListener(backlog=max_worker_count, pipe_to_notify=self._cond_write)
-        self._worker_initializers = worker_initializers
-        self._process_monitor = process_monitor
         self._lock = threading.Lock()
         self._task_queue: collections.deque[_PoolTask] = collections.deque()
         self._termination_queue: collections.deque[tuple[int, Future]] = collections.deque()
@@ -161,6 +152,7 @@ class ProcessPool:
         self._pool_thread.join(60)
         if self._pool_thread.is_alive():
             logging.warning('Failed to stop process pool thread')
+            assert 0
 
     def stop(self):
         # Indicate that already running tasks and free workers can be terminated.
@@ -316,13 +308,12 @@ class ProcessPool:
                 self._mp_conn_listener.expect_new_connection()
                 proc = multiprocessing.Process(
                     target=self._worker_process_main,
-                    args=(logging.getLogger().getEffectiveLevel(), mp_conn_listener_address, self._worker_initializers),
+                    args=(logging.getLogger().getEffectiveLevel(), mp_conn_listener_address),
                 )
                 proc.start()
                 assert proc.pid is not None
                 workers[proc.pid] = _PoolWorker(process=proc, connection=None, active_task_future=None)
                 connecting_workers += 1
-                self._process_monitor.on_worker_started(proc.pid)
             else:
                 max_wait = timeouts_heap[0][0] - now if timeouts_heap else None
                 events = event_selector.select(timeout=max_wait)
@@ -353,7 +344,6 @@ class ProcessPool:
                             worker.connection = None
                             if worker.process is None:
                                 workers.pop(pid)
-                                self._process_monitor.on_worker_stopped(pid)
                                 terminating_workers -= 1
                         else:
                             message = multiprocessing.reduction.ForkingPickler.loads(raw_message)
@@ -368,7 +358,6 @@ class ProcessPool:
                         worker.process = None
                         if worker.connection is None:
                             workers.pop(pid)
-                            self._process_monitor.on_worker_stopped(pid)
                             terminating_workers -= 1
 
         # In pre-shutdown, we can terminate all pending tasks and workers except the currently-connecting ones (which
@@ -413,12 +402,8 @@ class ProcessPool:
         for worker in workers.values():
             if worker.process is not None:
                 worker.process.join()
-                self._process_monitor.on_worker_stopped(worker.process.pid)
 
     def _handle_message_from_worker(self, worker: _PoolWorker, message: Any) -> bool:
-        if isinstance(message, ProcessEvent):
-            self._process_monitor.on_process_event_from_worker(message)
-            return False
         is_active_worker = not worker.terminating and (
             worker.active_task_future is None or not worker.active_task_future.done()
         )
@@ -445,21 +430,19 @@ class ProcessPool:
             self._cond_write.send(None)
 
     @staticmethod
-    def _worker_process_main(logging_level: int, server_address, initializers):
+    def _worker_process_main(logging_level: int, server_address):
         try:
-            ProcessPool._worker_process_main2(logging_level, server_address, initializers)
+            ProcessPool._worker_process_main2(logging_level, server_address)
         except Exception as e:
-            print(f'worker process exception: {e}', file=sys.stderr)
+            print(f'{os.getpid()} worker process exception: {e}', file=sys.stderr)
 
     @staticmethod
-    def _worker_process_main2(logging_level: int, server_address, initializers):
+    def _worker_process_main2(logging_level: int, server_address):
         sigmonitor.init(sigmonitor.Mode.QUICK_EXIT)
         with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND):
             try:
                 with multiprocessing.connection.Client(server_address, authkey=None) as server_conn:
                     mplogging.init_in_worker(logging_level=logging_level, server_conn=server_conn)
-                    for init in initializers:
-                        init(server_conn)
                     # Notify the main C-Vise process that we are ready for executing tasks.
                     server_conn.send(os.getpid())
                     with selectors.DefaultSelector() as event_selector:
@@ -476,8 +459,7 @@ class ProcessPool:
                             if can_recv:
                                 f, args = server_conn.recv()
                                 try:
-                                    with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION):
-                                        result = f(*args)
+                                    result = f(*args)
                                 except Exception as e:
                                     result = e
                                 sigmonitor.maybe_retrigger_action()
@@ -487,176 +469,6 @@ class ProcessPool:
                 return
             except Exception as e:
                 raise
-
-
-class ProcessEvent:
-    def __init__(self, worker_pid, child_pid, event_type):
-        self.worker_pid = worker_pid
-        self.child_pid = child_pid
-        self.type = event_type
-
-
-class ProcessMonitor:
-    """Keeps track of subprocesses spawned by Pebble workers."""
-
-    def __init__(self, parallel_tests: int):
-        self._lock = threading.Lock()
-        self._worker_to_child_pids: dict[int, set[int]] = {}
-        # Remember dead worker PIDs, so that we can distinguish an early-reported child PID (arriving before
-        # on_worker_started()) from a posthumously received child PID - the latter needs to be killed. The constant is
-        # chosen to be big enough to make it practically unlikely to receive a new pid_queue event from a
-        # forgotten-to-be-dead worker.
-        self._recent_dead_workers: collections.deque[int] = collections.deque(maxlen=parallel_tests * 10)
-        self._killer = ProcessKiller()
-
-    def __enter__(self):
-        self._killer.__enter__()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self._killer.__exit__(exc_type, exc_val, exc_tb)
-
-    def on_worker_started(self, worker_pid: int) -> None:
-        # logging.info(f'ProcessMonitor.on_worker_started: {worker_pid}')
-        with self._lock:
-            # Children might've already been added in _on_pid_queue_event() if the pid_queue event arrived early.
-            self._worker_to_child_pids.setdefault(worker_pid, set())
-            # It's rare but still possible that a new worker reuses the PID from a recently terminated one.
-            with contextlib.suppress(ValueError):
-                self._recent_dead_workers.remove(worker_pid)
-
-    def on_worker_stopped(self, worker_pid: int) -> None:
-        # logging.info(f'ProcessMonitor.on_worker_stopped: {worker_pid}')
-        with self._lock:
-            self._recent_dead_workers.append(worker_pid)
-            pids_to_kill = self._worker_to_child_pids.pop(worker_pid)
-
-        for pid in pids_to_kill:
-            self._killer.kill_process_tree(pid)
-
-    def get_worker_to_child_pids(self) -> dict[int, set[int]]:
-        with self._lock:
-            return self._worker_to_child_pids.copy()
-
-    def on_process_event_from_worker(self, event: ProcessEvent) -> None:
-        # logging.info(f'ProcessMonitor.on_process_event_from_worker: {event}')
-        with self._lock:
-            posthumous = event.worker_pid in self._recent_dead_workers
-            should_kill = posthumous or (event.type == ProcessEventType.ORPHANED)
-            if not posthumous:
-                # Update the worker's children PID set. The set might need to be created, since the pid_queue event
-                # might've arrived before on_worker_started() gets called.
-                children = self._worker_to_child_pids.setdefault(event.worker_pid, set())
-                if event.type == ProcessEventType.STARTED:
-                    children.add(event.child_pid)
-                else:
-                    children.discard(event.child_pid)
-
-        if should_kill:
-            self._killer.kill_process_tree(event.child_pid)
-
-
-@dataclass(order=True, frozen=True)
-class ProcessKillerTask:
-    hard_kill: bool  # whether to kill() - as opposed to terminate()
-    when: float  # seconds (in terms of the monotonic timer)
-    proc: psutil.Process = field(compare=False)
-
-
-class ProcessKiller:
-    """Helper for terminating/killing process trees.
-
-    For each process, we first try terminate() - SIGTERM on *nix - and if the process doesn't finish within TERM_TIMEOUT
-    seconds we use kill() - SIGKILL on *nix. See also https://github.com/marxin/cvise/issues/145.
-    """
-
-    TERM_TIMEOUT = 3  # seconds
-    EVENT_LOOP_STEP = 1  # seconds
-
-    def __init__(self):
-        # Essentially we implement a set of timers, one for each PID; since creating many threading.Timer would be too
-        # costly, we use a single thread with an event queue instead.
-        self._condition = threading.Condition()
-        self._task_queue: list[ProcessKillerTask] = []
-        self._shut_down: bool = False
-        self._thread = threading.Thread(target=self._thread_main)
-
-    def __enter__(self):
-        self._thread.start()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        with self._condition:
-            self._shut_down = True
-            self._condition.notify()
-        self._thread.join(timeout=60)  # semi-arbitrary timeout to prevent even theoretical possibility of deadlocks
-
-    def kill_process_tree(self, pid: int) -> None:
-        try:
-            proc = psutil.Process(pid)
-        except psutil.NoSuchProcess:
-            return
-        task = ProcessKillerTask(hard_kill=False, when=0, proc=proc)
-        with self._condition:
-            heapq.heappush(self._task_queue, task)
-            self._condition.notify()
-
-    def _thread_main(self) -> None:
-        while True:
-            with self._condition:
-                if not self._task_queue and self._shut_down:
-                    break
-                if self._task_queue and not self._task_queue[0].proc.is_running():
-                    # the process exited - nothing left for this task, and no need to wait if we're blocking shutdown
-                    heapq.heappop(self._task_queue)
-                    continue
-                now = time.monotonic()
-                timeout = min(self._task_queue[0].when - now, self.EVENT_LOOP_STEP) if self._task_queue else None
-                if timeout is None or timeout > 0:
-                    self._condition.wait(timeout)
-                    continue
-                task = heapq.heappop(self._task_queue)
-            if task.hard_kill:
-                self._do_hard_kill(task.proc)
-            else:
-                self._do_terminate(task.proc)
-
-    def _do_terminate(self, proc: psutil.Process) -> None:
-        try:
-            children = proc.children(recursive=True) + [proc]
-        except psutil.NoSuchProcess:
-            return
-
-        alive_children = []
-        for child in children:
-            try:
-                child.terminate()
-            except psutil.NoSuchProcess:
-                pass
-            else:
-                alive_children.append(child)
-        if not alive_children:
-            return
-
-        when = time.monotonic() + self.TERM_TIMEOUT
-        with self._condition:
-            for child in alive_children:
-                task = ProcessKillerTask(hard_kill=True, when=when, proc=child)
-                heapq.heappush(self._task_queue, task)
-            self._condition.notify()
-
-    def _do_hard_kill(self, proc: psutil.Process) -> None:
-        try:
-            children = proc.children(recursive=True) + [proc]
-        except psutil.NoSuchProcess:
-            return
-
-        for child in children:
-            with contextlib.suppress(psutil.NoSuchProcess):
-                child.kill()
-
-
-_process_event_notifier_server_conn = None
 
 
 class ProcessEventNotifier:
@@ -670,12 +482,6 @@ class ProcessEventNotifier:
 
     def __init__(self, pid_queue: queue.Queue | None = None):
         self._my_pid = os.getpid()
-
-    @staticmethod
-    def initialize_in_worker(server_conn: multiprocessing.connection.Connection):
-        # print(f'ProcessEventNotifier.initialize_in_worker pid={os.getpid()}', file=sys.stderr)
-        global _process_event_notifier_server_conn
-        _process_event_notifier_server_conn = server_conn
 
     def run_process(
         self,
@@ -691,34 +497,17 @@ class ProcessEventNotifier:
         if shell:
             assert isinstance(cmd, str)
 
-        # Prevent signals from interrupting in the middle of any operation besides proc.communicate() - abrupt exits
-        # could result in spawning a child without having its PID reported or leaving the queue in inconsistent state.
-        with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND):
-            # print(f'run_process {os.getpid()}: BEGIN {cmd if isinstance(cmd, str) else " ".join(cmd)}', file=sys.stderr)
-            try:
-                proc = subprocess.Popen(
-                    cmd,
-                    stdout=stdout,
-                    stderr=stderr,
-                    shell=shell,
-                    env=env,
-                    **kwargs,
-                )
-                self._notify_start(proc)
-
-                with self._auto_notify_end(proc):
-                    # If a timeout was specified and the process exceeded it, we need to kill it - otherwise we'll leave a
-                    # zombie process on *nix. If it's KeyboardInterrupt/SystemExit, the worker will terminate soon, so we may
-                    # have not enough time to properly kill children, and zombies aren't a concern.
-                    with _auto_kill_on_timeout(proc):
-                        with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION):
-                            stdout_data, stderr_data = self._communicate_with_sig_checks(proc, input, timeout)
-                            # print(f'run_process {os.getpid()}: END', file=sys.stderr)
-            except Exception as e:
-                # print(f'run_process {os.getpid()}: ERROR: {e}', file=sys.stderr)
-                raise
-
-        return stdout_data, stderr_data, proc.returncode  # type: ignore
+        with subprocess.Popen(
+            cmd,
+            stdout=stdout,
+            stderr=stderr,
+            shell=shell,
+            env=env,
+            **kwargs,
+        ) as proc:
+            with _auto_kill_descendants(proc):  # TODO: filter by own PID to avoid race
+                stdout_data, stderr_data = self._communicate_with_sig_checks(proc, input, timeout)
+        return stdout_data, stderr_data, proc.returncode
 
     def check_output(
         self,
@@ -741,83 +530,92 @@ class ProcessEventNotifier:
             raise RuntimeError(f'{name} failed with exit code {returncode}{delim}{stderr_data}')
         return stdout_data
 
-    def _notify_start(self, proc: subprocess.Popen) -> None:
-        if not _process_event_notifier_server_conn:
-            return
-        _process_event_notifier_server_conn.send(
-            ProcessEvent(worker_pid=self._my_pid, child_pid=proc.pid, event_type=ProcessEventType.STARTED)
-        )
-
-    @contextlib.contextmanager
-    def _auto_notify_end(self, proc: subprocess.Popen) -> Iterator[None]:
-        try:
-            yield
-        finally:
-            if _process_event_notifier_server_conn:
-                event_type = ProcessEventType.ORPHANED if proc.returncode is None else ProcessEventType.FINISHED
-                _process_event_notifier_server_conn.send(
-                    ProcessEvent(worker_pid=self._my_pid, child_pid=proc.pid, event_type=event_type)
-                )
-
     def _communicate_with_sig_checks(
         self, proc: subprocess.Popen, input: bytes | None, timeout: float | None
     ) -> tuple[bytes, bytes]:
-        stop_time = None if timeout is None else time.monotonic() + timeout
-        while True:
-            sigmonitor.maybe_retrigger_action()
+        comm_read_socket, comm_write_socket = socket.socketpair()
+        comm_read_socket.setblocking(False)
+        comm_write_socket.setblocking(False)
+        comm_result = _CommunicationResult()
+        comm_thread = threading.Thread(
+            target=self._comm_thread_main, args=(proc, input, timeout, comm_result, comm_write_socket), daemon=True
+        )
+        comm_thread.start()
 
-            step_timeout = self._EVENT_LOOP_STEP
-            if stop_time is not None:
-                left = max(0, stop_time - time.monotonic())
-                step_timeout = min(step_timeout, left)
+        with selectors.DefaultSelector() as event_selector:
+            event_selector.register(sigmonitor.get_wakeup_fd(), selectors.EVENT_READ)
+            event_selector.register(comm_read_socket, selectors.EVENT_READ)
+            while True:
+                events = event_selector.select()
+                sigmonitor.maybe_retrigger_action()
+                if any(k.fileobj == comm_read_socket for k, _ in events):
+                    break
 
+        comm_read_socket.close()
+
+        if comm_result.exception is not None:
+            raise comm_result.exception
+        comm_thread.join()
+        assert comm_result.stdout is not None
+        assert comm_result.stderr is not None
+        return comm_result.stdout, comm_result.stderr
+
+    @staticmethod
+    def _comm_thread_main(
+        proc: subprocess.Popen,
+        input: bytes | None,
+        timeout: float | None,
+        comm_result: _CommunicationResult,
+        comm_write_socket: socket.socket,
+    ) -> None:
+        try:
+            comm_result.stdout, comm_result.stderr = proc.communicate(input=input, timeout=timeout)
+        except Exception as e:
+            comm_result.exception = e
+        finally:
             try:
-                return proc.communicate(input=input, timeout=step_timeout)  # type: ignore[arg-type]
-            except subprocess.TimeoutExpired:
-                if step_timeout == 0:
-                    raise  # we reached the original timeout, so bail out
-                input = b''  # the input has been written in the first communicate() call
+                comm_write_socket.send(b'\0')
+            finally:
+                comm_write_socket.close()
+
+
+@dataclass(slots=True)
+class _CommunicationResult:
+    stdout: bytes | None = None
+    stderr: bytes | None = None
+    exception: Any = None
 
 
 @contextlib.contextmanager
-def _auto_kill_on_timeout(proc: subprocess.Popen) -> Iterator[None]:
+def _auto_kill_descendants(proc: subprocess.Popen) -> Iterator[None]:
     try:
         yield
-    except subprocess.TimeoutExpired:
-        _kill(proc)
-        raise
+    finally:
+        if proc.returncode is None:
+            _kill_subtree(proc.pid)
+            proc.wait()
 
 
-def _kill(proc: subprocess.Popen) -> None:
-    # First, close i/o streams opened for PIPE. This allows us to simply use wait() to wait for the process completion.
-    # Additionally, it acts as another indication (SIGPIPE on *nix) for the process and its grandchildren to exit.
-    if proc.stdin is not None:
-        proc.stdin.close()
-    if proc.stdout is not None:
-        proc.stdout.close()
-    if proc.stderr is not None:
-        proc.stderr.close()
-
-    # Second, attempt graceful termination (SIGTERM on *nix). We wait for some timeout that's less than Pebble's
-    # term_timeout, so that we (hopefully) have time to try hard termination before C-Vise main process kills us.
-    # Repeatedly request termination several times a second, because some programs "miss" incoming signals.
-    TERMINATE_TIMEOUT = pebble.CONSTS.term_timeout / 2  # type: ignore
-    SLEEP_UNIT = 0.1  # semi-arbitrary
-    stop_time = time.monotonic() + TERMINATE_TIMEOUT
-    while True:
-        proc.terminate()
-        step_timeout = min(SLEEP_UNIT, stop_time - time.monotonic())
-        if step_timeout <= 0:
-            break
-        try:
-            proc.wait(timeout=step_timeout)
-        except subprocess.TimeoutExpired:
-            pass
-        else:
-            break
-    if proc.returncode is not None:
+def _kill_subtree(pid: int) -> None:
+    try:
+        proc = psutil.Process(pid)
+    except psutil.NoSuchProcess:
+        return
+    try:
+        children = proc.children(recursive=True) + [proc]
+    except psutil.NoSuchProcess:
         return
 
-    # Third - if didn't exit on time - attempt a hard termination (SIGKILL on *nix).
-    proc.kill()
-    proc.wait()
+    alive_children: list[psutil.Process] = []
+    for child in children:
+        try:
+            child.terminate()
+        except psutil.NoSuchProcess:
+            pass
+        else:
+            alive_children.append(child)
+
+    _gone, alive = psutil.wait_procs(alive_children, timeout=3)
+    for child in alive:
+        with contextlib.suppress(psutil.NoSuchProcess):
+            child.kill()

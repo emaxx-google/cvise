@@ -66,7 +66,9 @@ class HungPass(StubPass):
 
     def transform(self, test_case: Path, state, *args, **kwargs):
         INFINITY = 1000
-        time.sleep(INFINITY)
+        for _ in range(INFINITY):
+            time.sleep(1)
+            sigmonitor.maybe_retrigger_action()
         return (PassResult.INVALID, state)
 
 

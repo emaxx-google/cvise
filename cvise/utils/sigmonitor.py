@@ -23,6 +23,7 @@ import enum
 import os
 import signal
 import socket
+import sys
 import weakref
 from collections.abc import Iterator
 from concurrent.futures import Future
@@ -52,10 +53,12 @@ def init(mode: Mode) -> None:
 
     global _wakeup_read_socket, _wakeup_write_socket
     if _wakeup_read_socket is not None:
+        signal.set_wakeup_fd(-1)
         _wakeup_read_socket.close()
         _wakeup_write_socket.close()
     _wakeup_read_socket, _wakeup_write_socket = socket.socketpair()
     _wakeup_write_socket.setblocking(False)
+    _wakeup_read_socket.setblocking(False)
     signal.set_wakeup_fd(_wakeup_write_socket.fileno(), warn_on_full_buffer=False)
     atexit.register(_wakeup_read_socket.close)
     atexit.register(_wakeup_write_socket.close)
