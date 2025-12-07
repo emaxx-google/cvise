@@ -95,7 +95,7 @@ class _MPConnListener:
             self._pipe_to_notify.send(None)
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class _PoolTask:
     f: Callable
     args: Sequence[Any]
@@ -103,14 +103,14 @@ class _PoolTask:
     timeout: float
 
 
-@dataclass
+@dataclass(frozen=True, slots=True)
 class _SerializedPoolTask:
     data: memoryview
     future: Future
     timeout: float
 
 
-@dataclass
+@dataclass(slots=True)
 class _PoolWorker:
     process: multiprocessing.Process | None
     connection: multiprocessing.connection.Connection | None
