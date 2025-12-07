@@ -45,7 +45,7 @@ class _MPConnListener:
         self._condition = threading.Condition(lock=self._lock)
         self._pending_conns: int = 0
         self._shutdown = False
-        self._accepted_conns: collections.deque[multiprocessing.connection.Connection] = collections.deque()
+        self._accepted_conns: list[multiprocessing.connection.Connection] = []
         self._thread = threading.Thread(target=self._conn_listener_thread_main)
 
     def __enter__(self):
@@ -63,11 +63,11 @@ class _MPConnListener:
             self._pending_conns += 1
             self._condition.notify()
 
-    def take_connection(self) -> multiprocessing.connection.Connection | None:
+    def take_connections(self) -> list[multiprocessing.connection.Connection]:
         with self._lock:
-            if not self._accepted_conns:
-                return None
-            return self._accepted_conns.popleft()
+            conns = self._accepted_conns
+            self._accepted_conns = []
+            return conns
 
     def stop_and_wait(self) -> None:
         with self._lock:
@@ -115,7 +115,7 @@ class _PoolWorker:
     process: multiprocessing.Process | None
     connection: multiprocessing.connection.Connection | None
     active_task_future: Future | None
-    terminating: bool = False
+    stopping: bool = False
 
 
 class ProcessPoolError(Exception):
@@ -185,126 +185,113 @@ class ProcessPool:
         workers: dict[int, _PoolWorker] = {}
         serialized_task_queue: collections.deque[_SerializedPoolTask] = collections.deque()
         free_worker_pids: collections.deque[int] = collections.deque()
-        connecting_workers: int = 0
-        terminating_workers: int = 0
+        starting_workers: int = 0
+        stopping_workers: int = 0
         timeouts_heap: list[tuple[float, Future]] = []
         event_selector = selectors.DefaultSelector()
         event_selector.register(self._cond_read, selectors.EVENT_READ)
         mp_conn_listener_address = self._mp_conn_listener.address()
         while True:
             now = time.monotonic()
-            while timeouts_heap and now >= timeouts_heap[0][0]:
+            while timeouts_heap and (now >= timeouts_heap[0][0] or timeouts_heap[0][1].done()):
                 _when, future = heapq.heappop(timeouts_heap)
-                if future.done():
-                    continue
-                with contextlib.suppress(concurrent.futures.InvalidStateError):  # it might've been resolved already
+                with contextlib.suppress(concurrent.futures.InvalidStateError):
                     future.set_exception(TimeoutError(f'Job timed out'))
 
+            # Eat notifications sent until this point. This has to be done before reading members under the mutex below.
+            while self._cond_read.poll():
+                self._cond_read.recv_bytes()
+
             worker: _PoolWorker | None = None
-            terminate_workers: list[_PoolWorker] = []
-            tasks_to_send: list[_PoolTask | _SerializedPoolTask] = []
+            workers_to_start: int = 0
+            workers_to_handshake: list[multiprocessing.connection.Connection] = []
+            workers_to_stop: list[_PoolWorker] = []
+            tasks_to_send: collections.deque[_PoolTask | _SerializedPoolTask] = collections.deque()
             task_to_serialize: _PoolTask | None = None
-            launch_worker: bool = False
-            worker_conn_to_handshake: multiprocessing.connection.Connection | None = None
             with self._lock:
-                assert connecting_workers <= len(workers)
+                assert starting_workers <= len(workers)
                 assert len(free_worker_pids) <= len(workers)
-                assert terminating_workers <= len(workers)
-                assert len(workers) - terminating_workers <= self._max_worker_count
+                assert stopping_workers <= len(workers)
+                assert len(workers) - stopping_workers <= self._max_worker_count
                 assert (
                     0
-                    <= len(workers) - connecting_workers - terminating_workers - len(free_worker_pids)
+                    <= len(workers) - starting_workers - stopping_workers - len(free_worker_pids)
                     <= self._max_worker_count
                 ), (
-                    f'len(workers)={len(workers)} connecting_workers={connecting_workers} terminating_workers={terminating_workers} len(free_worker_pids)={len(free_worker_pids)}'
+                    f'len(workers)={len(workers)} starting_workers={starting_workers} stopping_workers={stopping_workers} len(free_worker_pids)={len(free_worker_pids)}'
                 )
                 if self._pre_shutdown:
                     break
-                elif self._termination_queue:
-                    while self._termination_queue:
-                        worker_pid, future = self._termination_queue.popleft()
-                        if worker_pid not in workers:
-                            continue
-                        worker = workers[worker_pid]
-                        if worker.active_task_future != future:
-                            continue
-                        terminate_workers.append(worker)
-                    if not terminate_workers:
+
+                while self._termination_queue:
+                    worker_pid, future = self._termination_queue.popleft()
+                    if worker_pid not in workers:
                         continue
-                elif (
-                    (self._task_queue or serialized_task_queue)
-                    and free_worker_pids
-                    and len(workers) - connecting_workers - len(free_worker_pids) < self._max_worker_count
+                    worker = workers[worker_pid]
+                    if worker.active_task_future != future:
+                        continue
+                    workers_to_stop.append(worker)
+
+                workers_to_start = self._max_worker_count - len(workers) + stopping_workers + len(workers_to_stop)
+                assert 0 <= workers_to_start <= self._max_worker_count, (
+                    f'workers_to_start={workers_to_start} max_worker_count={self._max_worker_count} workers={len(workers)} starting_workers={starting_workers} stopping_workers={stopping_workers} workers_to_stop={len(workers_to_stop)}'
+                )
+
+                workers_to_handshake = self._mp_conn_listener.take_connections()
+
+                available_workers = min(
+                    len(free_worker_pids) + len(workers_to_handshake),
+                    self._max_worker_count - (len(workers) - starting_workers - len(free_worker_pids)),
+                )
+                for queue in (serialized_task_queue, self._task_queue):
+                    while available_workers and queue:
+                        task = queue.popleft()
+                        if not task.future.done():
+                            tasks_to_send.append(task)
+                            available_workers -= 1
+
+                if (
+                    self._task_queue
+                    and not workers_to_stop
+                    and not tasks_to_send
+                    and not workers_to_start
+                    and not workers_to_handshake
                 ):
-                    l1 = len(self._task_queue) + len(serialized_task_queue)
-                    l2 = len(free_worker_pids)
-                    l3 = self._max_worker_count - (len(workers) - connecting_workers - len(free_worker_pids))
-                    cnt = min(l1, l2, l3)
-                    while cnt and serialized_task_queue:
-                        tasks_to_send.append(serialized_task_queue.popleft())
-                        cnt -= 1
-                    while cnt and self._task_queue:
-                        tasks_to_send.append(self._task_queue.popleft())
-                        cnt -= 1
-                elif (self._task_queue or serialized_task_queue) and (conn := self._mp_conn_listener.take_connection()):
-                    worker_conn_to_handshake = conn
-                elif (
-                    (self._task_queue or serialized_task_queue)
-                    and len(workers) - terminating_workers < self._max_worker_count
-                    and not connecting_workers
-                ):
-                    launch_worker = True
-                elif len(workers) - terminating_workers < self._max_worker_count:
-                    launch_worker = True
-                elif conn := self._mp_conn_listener.take_connection():
-                    worker_conn_to_handshake = conn
-                elif self._task_queue:
+                    # only do this if we're free from other tasks, as an optimization
                     task_to_serialize = self._task_queue.popleft()
 
-            if terminate_workers:
-                for worker in terminate_workers:
-                    assert worker
-                    assert worker.process is not None
-                    worker_pid: int | None = worker.process.pid
-                    assert worker_pid is not None
-                    worker.terminating = True
-                    worker.process.terminate()
-                    terminating_workers += 1
-                    assert worker.connection is not None
-                    event_selector.register(worker.process.sentinel, selectors.EVENT_READ, data=worker_pid)
-            elif tasks_to_send:
-                for task in tasks_to_send:
-                    assert free_worker_pids
-                    worker_pid = free_worker_pids[0]
-                    worker = workers[worker_pid]
-                    task.future.add_done_callback(lambda future, pid=worker_pid: self._on_future_resolved(pid, future))
-                    if task.future.done():
-                        continue
-                    free_worker_pids.popleft()
-                    assert worker.connection is not None
-                    data = (
-                        multiprocessing.reduction.ForkingPickler.dumps((task.f, task.args))
-                        if isinstance(task, _PoolTask)
-                        else task.data
-                    )
-                    worker.connection.send_bytes(data)
-                    worker.active_task_future = task.future
-                    heapq.heappush(timeouts_heap, (time.monotonic() + task.timeout, task.future))
-            elif task_to_serialize:
-                data = multiprocessing.reduction.ForkingPickler.dumps((task_to_serialize.f, task_to_serialize.args))
-                serialized_task_queue.append(
-                    _SerializedPoolTask(data=data, future=task_to_serialize.future, timeout=task_to_serialize.timeout)
-                )
-            elif worker_conn_to_handshake:
-                worker_pid: int = worker_conn_to_handshake.recv()
-                assert connecting_workers > 0
-                connecting_workers -= 1
+            for worker in workers_to_stop:
+                assert worker
+                assert worker.process is not None
+                assert worker.process.pid is not None
+                worker.stopping = True
+                worker.process.terminate()
+                stopping_workers += 1
+                assert worker.connection is not None
+                # observe when the process will become join'able
+                event_selector.register(worker.process.sentinel, selectors.EVENT_READ, data=worker.process.pid)
+
+            while tasks_to_send and free_worker_pids:
+                task = tasks_to_send.popleft()
+                worker_pid = free_worker_pids.popleft()
+                self._send_task(task, workers[worker_pid], timeouts_heap)
+
+            for conn in workers_to_handshake:
+                worker_pid: int = conn.recv()
+                assert starting_workers > 0
+                starting_workers -= 1
                 worker = workers[worker_pid]
-                worker.connection = worker_conn_to_handshake
+                worker.connection = conn
+                event_selector.register(conn, selectors.EVENT_READ, data=worker_pid)
                 assert worker_pid not in free_worker_pids
-                free_worker_pids.append(worker_pid)
-                event_selector.register(worker_conn_to_handshake, selectors.EVENT_READ, data=worker_pid)
-            elif launch_worker:
+                if tasks_to_send:
+                    task = tasks_to_send.popleft()
+                    self._send_task(task, worker, timeouts_heap)
+                else:
+                    free_worker_pids.append(worker_pid)
+            assert not tasks_to_send
+
+            for _ in range(workers_to_start):
                 self._mp_conn_listener.expect_new_connection()
                 proc = multiprocessing.Process(
                     target=self._worker_process_main,
@@ -312,53 +299,55 @@ class ProcessPool:
                 )
                 proc.start()
                 assert proc.pid is not None
+                # print(f'started worker pid={proc.pid}')
                 workers[proc.pid] = _PoolWorker(process=proc, connection=None, active_task_future=None)
-                connecting_workers += 1
-            else:
-                max_wait = timeouts_heap[0][0] - now if timeouts_heap else None
-                events = event_selector.select(timeout=max_wait)
-                for selector_key, _event_mask in events:
-                    fileobj = selector_key.fileobj
-                    if fileobj == self._cond_read:
-                        # Nothing to do here besides eating the notifications - the next iteration of the outer loop
-                        # will pick up the changes (a new task, or a shutdown signal, etc.).
-                        while True:
-                            self._cond_read.recv()
-                            if not self._cond_read.poll():
-                                break
-                    elif isinstance(fileobj, multiprocessing.connection.Connection):
-                        pid: int = selector_key.data
-                        worker = workers[pid]
-                        assert worker.connection is not None
-                        try:
-                            raw_message = worker.connection.recv_bytes()
-                        except (EOFError, OSError):
-                            if not worker.terminating and worker.active_task_future:
-                                with contextlib.suppress(
-                                    concurrent.futures.InvalidStateError
-                                ):  # it might've been canceled
-                                    worker.active_task_future.set_exception(ProcessPoolError(f'Worker {pid} died'))
-                                worker.active_task_future = None
-                            event_selector.unregister(worker.connection)
-                            worker.connection.close()
-                            worker.connection = None
-                            if worker.process is None:
-                                workers.pop(pid)
-                                terminating_workers -= 1
-                        else:
-                            message = multiprocessing.reduction.ForkingPickler.loads(raw_message)
-                            if self._handle_message_from_worker(worker, message) and not worker.terminating:
-                                free_worker_pids.append(pid)
-                    else:
-                        pid: int = selector_key.data
-                        worker = workers[pid]
-                        assert worker.process is not None
-                        event_selector.unregister(worker.process.sentinel)
-                        worker.process.join()
-                        worker.process = None
-                        if worker.connection is None:
+                starting_workers += 1
+
+            if task_to_serialize:
+                data = multiprocessing.reduction.ForkingPickler.dumps((task_to_serialize.f, task_to_serialize.args))
+                serialized_task_queue.append(
+                    _SerializedPoolTask(data=data, future=task_to_serialize.future, timeout=task_to_serialize.timeout)
+                )
+
+            max_wait = timeouts_heap[0][0] - now if timeouts_heap else None
+            events = event_selector.select(timeout=max_wait)
+            for selector_key, _event_mask in events:
+                fileobj = selector_key.fileobj
+                if fileobj == self._cond_read:
+                    # Nothing to do here - the next iteration of the outer loop will pick up the changes (a new task, or
+                    # a shutdown signal, etc.).
+                    pass
+                elif isinstance(fileobj, multiprocessing.connection.Connection):
+                    pid: int = selector_key.data
+                    worker = workers[pid]
+                    assert worker.connection is not None
+                    try:
+                        raw_message = worker.connection.recv_bytes()
+                    except (EOFError, OSError):
+                        if not worker.stopping and worker.active_task_future:
+                            with contextlib.suppress(concurrent.futures.InvalidStateError):  # it might've been canceled
+                                worker.active_task_future.set_exception(ProcessPoolError(f'Worker {pid} died'))
+                            worker.active_task_future = None
+                        event_selector.unregister(worker.connection)
+                        worker.connection.close()
+                        worker.connection = None
+                        if worker.process is None:
                             workers.pop(pid)
-                            terminating_workers -= 1
+                            stopping_workers -= 1
+                    else:
+                        message = multiprocessing.reduction.ForkingPickler.loads(raw_message)
+                        if self._handle_message_from_worker(worker, message) and not worker.stopping:
+                            free_worker_pids.append(pid)
+                else:
+                    pid: int = selector_key.data
+                    worker = workers[pid]
+                    assert worker.process is not None
+                    event_selector.unregister(worker.process.sentinel)
+                    worker.process.join()
+                    worker.process = None
+                    if worker.connection is None:
+                        workers.pop(pid)
+                        stopping_workers -= 1
 
         # In pre-shutdown, we can terminate all pending tasks and workers except the currently-connecting ones (which
         # are needed to avoid deadlocking the accept() call in the connection listener).
@@ -369,12 +358,12 @@ class ProcessPool:
             for task in self._task_queue:
                 task.future.cancel()
         for worker in workers.values():
-            if not worker.connection or worker.terminating:
+            if not worker.connection or worker.stopping:
                 continue
             if worker.active_task_future:
                 worker.active_task_future.cancel()
             worker.process.terminate()
-            worker.terminating = True
+            worker.stopping = True
         # Pump all messages from busy workers, e.g., process events that could've been sent shortly before termination.
         for worker in workers.values():
             if not worker.connection or not worker.active_task_future:
@@ -396,15 +385,30 @@ class ProcessPool:
 
         # Terminate the remaining workers and reap all children.
         for worker in workers.values():
-            if not worker.terminating:
+            if not worker.stopping:
                 assert worker.process is not None
                 worker.process.terminate()
         for worker in workers.values():
             if worker.process is not None:
                 worker.process.join()
 
+    def _send_task(self, task, worker: _PoolWorker, timeouts_heap) -> None:
+        assert worker.process is not None
+        assert worker.process.pid is not None
+        task.future.add_done_callback(lambda future: self._on_future_resolved(worker.process.pid, future))
+        assert worker.connection is not None
+        data = (
+            multiprocessing.reduction.ForkingPickler.dumps((task.f, task.args))
+            if isinstance(task, _PoolTask)
+            else task.data
+        )
+        worker.connection.send_bytes(data)
+        assert worker.active_task_future is None
+        worker.active_task_future = task.future
+        heapq.heappush(timeouts_heap, (time.monotonic() + task.timeout, task.future))
+
     def _handle_message_from_worker(self, worker: _PoolWorker, message: Any) -> bool:
-        is_active_worker = not worker.terminating and (
+        is_active_worker = not worker.stopping and (
             worker.active_task_future is None or not worker.active_task_future.done()
         )
         if mplogging.maybe_handle_message_from_worker(message, is_active_worker):
