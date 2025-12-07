@@ -147,7 +147,7 @@ class ProcessPool:
         # Terminate all workers in a blocking fashion.
         with self._lock:
             self._shutdown = True
-        self._cond_write.send(None)
+        self._cond_write.send_bytes(b'')
         self._pool_thread.join(60)
         if self._pool_thread.is_alive():
             logging.warning('Failed to stop process pool thread')
@@ -159,7 +159,7 @@ class ProcessPool:
             if self._pre_shutdown:
                 return
             self._pre_shutdown = True
-        self._cond_write.send(None)
+        self._cond_write.send_bytes(b'')
 
     def schedule(self, f: Callable, args: Sequence[Any], timeout):
         future = Future()
@@ -171,7 +171,7 @@ class ProcessPool:
             self._task_queue.append(task)
             need_signal = len(self._task_queue) + len(self._termination_queue) == 1
         if need_signal:
-            self._cond_write.send(None)
+            self._cond_write.send_bytes(b'')
         return future
 
     def _pool_thread_main(self):
@@ -205,7 +205,7 @@ class ProcessPool:
             workers_to_start: int = 0
             workers_to_handshake: list[multiprocessing.connection.Connection] = []
             workers_to_stop: list[_PoolWorker] = []
-            tasks_to_send: collections.deque[_PoolTask | _SerializedPoolTask] = collections.deque()
+            tasks_to_send: list[_PoolTask | _SerializedPoolTask] = []
             has_tasks_to_serialize = False
             with self._lock:
                 assert starting_workers <= len(workers)
@@ -231,13 +231,6 @@ class ProcessPool:
                         continue
                     workers_to_stop.append(worker)
 
-                workers_to_start = self._max_worker_count - len(workers) + stopping_workers + len(workers_to_stop)
-                assert 0 <= workers_to_start <= self._max_worker_count, (
-                    f'workers_to_start={workers_to_start} max_worker_count={self._max_worker_count} workers={len(workers)} starting_workers={starting_workers} stopping_workers={stopping_workers} workers_to_stop={len(workers_to_stop)}'
-                )
-
-                workers_to_handshake = self._mp_conn_listener.take_connections()
-
                 available_workers = min(
                     len(free_worker_pids),
                     self._max_worker_count - (len(workers) - starting_workers - len(free_worker_pids)),
@@ -262,26 +255,16 @@ class ProcessPool:
                 # observe when the process will become join'able
                 event_selector.register(worker.process.sentinel, selectors.EVENT_READ, data=worker.process.pid)
 
-            while tasks_to_send and free_worker_pids:
-                task = tasks_to_send.popleft()
+            for task in tasks_to_send:
                 worker_pid = free_worker_pids.popleft()
                 self._send_task(task, workers[worker_pid], timeouts_heap)
 
+            workers_to_handshake = self._mp_conn_listener.take_connections()
             for conn in workers_to_handshake:
                 event_selector.register(conn, selectors.EVENT_READ, data=None)
-                # worker_pid: int = conn.recv()  # TODO: use select() instead
-                # assert starting_workers > 0
-                # starting_workers -= 1
-                # worker = workers[worker_pid]
-                # assert worker.connection is None
-                # worker.connection = conn
-                # assert worker_pid not in free_worker_pids
-                # if tasks_to_send:
-                #     task = tasks_to_send.popleft()
-                #     self._send_task(task, worker, timeouts_heap)
-                # else:
-                #     free_worker_pids.append(worker_pid)
-            assert not tasks_to_send
+
+            workers_to_start = self._max_worker_count - len(workers) + stopping_workers
+            assert 0 <= workers_to_start <= self._max_worker_count
 
             for _ in range(workers_to_start):
                 self._mp_conn_listener.expect_new_connection()
@@ -372,7 +355,7 @@ class ProcessPool:
                 worker.active_task_future.cancel()
             worker.process.terminate()
             worker.stopping = True
-        # Pump all messages from busy workers, e.g., process events that could've been sent shortly before termination.
+        # Pump all messages from busy workers to prevent them from blocking if the connection buffer gets full.
         for worker in workers.values():
             if not worker.connection or not worker.active_task_future:
                 continue
@@ -439,7 +422,7 @@ class ProcessPool:
             self._termination_queue.append((worker_pid, future))
             need_signal = len(self._task_queue) + len(self._termination_queue) == 1
         if need_signal:
-            self._cond_write.send(None)
+            self._cond_write.send_bytes(b'')
 
     @staticmethod
     def _worker_process_main(logging_level: int, server_address):
