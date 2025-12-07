@@ -16,10 +16,9 @@ def init_in_worker(logging_level: int, server_conn: multiprocessing.connection.C
     root.addHandler(_MPConnSendingHandler(server_conn))
 
 
-def maybe_handle_message_from_worker(message: Any, is_active_worker: bool) -> bool:
+def maybe_handle_message_from_worker(message: Any) -> bool:
     if isinstance(message, logging.LogRecord):
-        if is_active_worker:
-            _emit_log_from_worker(message)
+        _emit_log_from_worker(message)
         return True
     return False
 

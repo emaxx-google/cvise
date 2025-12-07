@@ -128,7 +128,7 @@ class ProcessPool:
         self._mp_conn_listener = _MPConnListener(backlog=max_worker_count, pipe_to_notify=self._cond_write)
         self._lock = threading.Lock()
         self._task_queue: collections.deque[_PoolTask] = collections.deque()
-        self._termination_queue: collections.deque[tuple[int, Future]] = collections.deque()
+        self._termination_queue: list[tuple[int, Future]] = []
         self._pre_shutdown = False
         self._shutdown = False
         self._pool_thread = threading.Thread(target=self._pool_thread_main)
@@ -192,10 +192,14 @@ class ProcessPool:
         mp_conn_listener_address = self._mp_conn_listener.address()
         while True:
             now = time.monotonic()
-            while timeouts_heap and (now >= timeouts_heap[0][0] or timeouts_heap[0][1].done()):
-                _when, future = heapq.heappop(timeouts_heap)
-                with contextlib.suppress(concurrent.futures.InvalidStateError):
-                    future.set_exception(TimeoutError(f'Job timed out'))
+            while timeouts_heap:
+                timeout, future = timeouts_heap[0]
+                if timeout > now and not future.done():
+                    break
+                heapq.heappop(timeouts_heap)
+                if not future.done():
+                    with contextlib.suppress(concurrent.futures.InvalidStateError):
+                        future.set_exception(TimeoutError('Job timed out'))
 
             # Eat notifications sent until this point. This has to be done before reading members under the mutex below.
             while self._cond_read.poll():
@@ -210,26 +214,20 @@ class ProcessPool:
             with self._lock:
                 assert starting_workers <= len(workers)
                 assert len(free_worker_pids) <= len(workers)
-                assert stopping_workers <= len(workers)
-                assert len(workers) - stopping_workers <= self._max_worker_count
-                assert (
-                    0
-                    <= len(workers) - starting_workers - stopping_workers - len(free_worker_pids)
-                    <= self._max_worker_count
-                ), (
-                    f'len(workers)={len(workers)} starting_workers={starting_workers} stopping_workers={stopping_workers} len(free_worker_pids)={len(free_worker_pids)}'
-                )
+                assert 0 <= len(workers) - stopping_workers <= self._max_worker_count
+                assert 0 <= len(workers) - starting_workers - len(free_worker_pids) <= self._max_worker_count
+
                 if self._pre_shutdown:
                     break
 
-                while self._termination_queue:
-                    worker_pid, future = self._termination_queue.popleft()
+                for worker_pid, future in self._termination_queue:
                     if worker_pid not in workers:
                         continue
                     worker = workers[worker_pid]
                     if worker.active_task_future != future:
                         continue
                     workers_to_stop.append(worker)
+                self._termination_queue = []
 
                 available_workers = min(
                     len(free_worker_pids),
@@ -238,9 +236,10 @@ class ProcessPool:
                 for queue in (serialized_task_queue, self._task_queue):
                     while available_workers and queue:
                         task = queue.popleft()
-                        if not task.future.done():
-                            tasks_to_send.append(task)
-                            available_workers -= 1
+                        if task.future.done():
+                            continue
+                        tasks_to_send.append(task)
+                        available_workers -= 1
 
                 has_tasks_to_serialize = len(self._task_queue) > 0
 
@@ -295,7 +294,6 @@ class ProcessPool:
                             worker = workers[worker_pid]
                             assert worker.connection is None
                             worker.connection = fileobj
-                            assert worker_pid not in free_worker_pids
                             free_worker_pids.append(worker_pid)
                             event_selector.modify(fileobj, selectors.EVENT_READ, data=worker_pid)
                         else:
@@ -318,9 +316,12 @@ class ProcessPool:
                                     workers.pop(pid)
                                     stopping_workers -= 1
                             else:
-                                message = multiprocessing.reduction.ForkingPickler.loads(raw_message)
-                                if self._handle_message_from_worker(worker, message) and not worker.stopping:
-                                    free_worker_pids.append(pid)
+                                if not worker.stopping and (
+                                    worker.active_task_future is None or not worker.active_task_future.done()
+                                ):
+                                    message = multiprocessing.reduction.ForkingPickler.loads(raw_message)
+                                    if self._handle_message_from_worker(worker, message):
+                                        free_worker_pids.append(pid)
                     else:
                         pid: int = selector_key.data
                         worker = workers[pid]
@@ -361,11 +362,9 @@ class ProcessPool:
                 continue
             while True:
                 try:
-                    message = worker.connection.recv()
+                    message = worker.connection.recv_bytes()
                 except (EOFError, OSError):
                     break
-                else:
-                    self._handle_message_from_worker(worker, message)
 
         # Wait for the signal of the full shutdown (which comes after the connection listener has stopped).
         while True:
@@ -399,14 +398,10 @@ class ProcessPool:
         heapq.heappush(timeouts_heap, (time.monotonic() + task.timeout, task.future))
 
     def _handle_message_from_worker(self, worker: _PoolWorker, message: Any) -> bool:
-        is_active_worker = not worker.stopping and (
-            worker.active_task_future is None or not worker.active_task_future.done()
-        )
-        if mplogging.maybe_handle_message_from_worker(message, is_active_worker):
+        if mplogging.maybe_handle_message_from_worker(message):
             return False
         if worker.active_task_future is None:
             return False
-        assert worker.active_task_future is not None
         with contextlib.suppress(concurrent.futures.InvalidStateError):  # it might've been canceled
             if isinstance(message, Exception):
                 worker.active_task_future.set_exception(message)
