@@ -207,7 +207,7 @@ class ProcessPool:
             workers_to_handshake: list[multiprocessing.connection.Connection] = []
             workers_to_stop: list[_PoolWorker] = []
             tasks_to_send: collections.deque[_PoolTask | _SerializedPoolTask] = collections.deque()
-            task_to_serialize: _PoolTask | None = None
+            tasks_to_serialize: list[_PoolTask] = []
             with self._lock:
                 assert starting_workers <= len(workers)
                 assert len(free_worker_pids) <= len(workers)
@@ -250,15 +250,8 @@ class ProcessPool:
                             tasks_to_send.append(task)
                             available_workers -= 1
 
-                if (
-                    self._task_queue
-                    and not workers_to_stop
-                    and not tasks_to_send
-                    and not workers_to_start
-                    and not workers_to_handshake
-                ):
-                    # only do this if we're free from other tasks, as an optimization
-                    task_to_serialize = self._task_queue.popleft()
+                tasks_to_serialize = list(self._task_queue)
+                self._task_queue.clear()
 
             for worker in workers_to_stop:
                 assert worker
@@ -303,11 +296,9 @@ class ProcessPool:
                 workers[proc.pid] = _PoolWorker(process=proc, connection=None, active_task_future=None)
                 starting_workers += 1
 
-            if task_to_serialize:
-                data = multiprocessing.reduction.ForkingPickler.dumps((task_to_serialize.f, task_to_serialize.args))
-                serialized_task_queue.append(
-                    _SerializedPoolTask(data=data, future=task_to_serialize.future, timeout=task_to_serialize.timeout)
-                )
+            for task in tasks_to_serialize:
+                data = multiprocessing.reduction.ForkingPickler.dumps((task.f, task.args))
+                serialized_task_queue.append(_SerializedPoolTask(data=data, future=task.future, timeout=task.timeout))
 
             max_wait = timeouts_heap[0][0] - now if timeouts_heap else None
             events = event_selector.select(timeout=max_wait)
