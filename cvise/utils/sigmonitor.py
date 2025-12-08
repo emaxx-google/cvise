@@ -43,25 +43,27 @@ _mode: Mode = Mode.OFF
 _sigint_observed: bool = False
 _sigterm_observed: bool = False
 _future: Future | None = None
-_wakeup_read_socket: socket.socket | None = None
-_wakeup_write_socket: socket.socket | None = None
+_wakeup_read_fd: int | None = None
+_wakeup_write_fd: int | None = None
 
 
 def init(mode: Mode) -> None:
     global _mode
     _mode = mode
 
-    global _wakeup_read_socket, _wakeup_write_socket
-    if _wakeup_read_socket is not None:
+    global _wakeup_read_fd, _wakeup_write_fd
+    if _wakeup_read_fd is not None:
+        # Clean up the previous descriptors (presumably only relevant for tests that reuse the same process).
         signal.set_wakeup_fd(-1)
-        _wakeup_read_socket.close()
-        _wakeup_write_socket.close()
-    _wakeup_read_socket, _wakeup_write_socket = socket.socketpair()
-    _wakeup_write_socket.setblocking(False)
-    _wakeup_read_socket.setblocking(False)
-    signal.set_wakeup_fd(_wakeup_write_socket.fileno(), warn_on_full_buffer=False)
-    atexit.register(_wakeup_read_socket.close)
-    atexit.register(_wakeup_write_socket.close)
+        os.close(_wakeup_read_fd)
+        assert _wakeup_write_fd is not None
+        os.close(_wakeup_write_fd)
+    read_socket, write_socket = socket.socketpair()
+    read_socket.setblocking(False)
+    write_socket.setblocking(False)
+    _wakeup_read_fd = read_socket.detach()
+    _wakeup_write_fd = write_socket.detach()
+    signal.set_wakeup_fd(_wakeup_write_fd, warn_on_full_buffer=False)
 
     global _future
     _future = Future()
@@ -103,8 +105,8 @@ def get_future() -> Future:
 
 
 def get_wakeup_fd() -> int:
-    assert _wakeup_read_socket is not None
-    return _wakeup_read_socket.fileno()
+    assert _wakeup_read_fd is not None
+    return _wakeup_read_fd
 
 
 def signal_observed_for_testing() -> bool:
