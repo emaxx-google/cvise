@@ -294,7 +294,15 @@ class ProcessPool:
                             worker = workers[worker_pid]
                             assert worker.connection is None
                             worker.connection = fileobj
-                            free_worker_pids.append(worker_pid)
+                            if (
+                                serialized_task_queue
+                                and not serialized_task_queue[0].future.done()
+                                and len(workers) - starting_workers - len(free_worker_pids) < self._max_worker_count
+                            ):
+                                task = serialized_task_queue.popleft()
+                                self._send_task(task, worker, timeouts_heap)
+                            else:
+                                free_worker_pids.append(worker_pid)
                             event_selector.modify(fileobj, selectors.EVENT_READ, data=worker_pid)
                         else:
                             pid: int = selector_key.data
@@ -321,7 +329,16 @@ class ProcessPool:
                                 ):
                                     message = multiprocessing.reduction.ForkingPickler.loads(raw_message)
                                     if self._handle_message_from_worker(worker, message):
-                                        free_worker_pids.append(pid)
+                                        if (
+                                            serialized_task_queue
+                                            and not serialized_task_queue[0].future.done()
+                                            and len(workers) - starting_workers - len(free_worker_pids)
+                                            < self._max_worker_count
+                                        ):
+                                            task = serialized_task_queue.popleft()
+                                            self._send_task(task, worker, timeouts_heap)
+                                        else:
+                                            free_worker_pids.append(pid)
                     else:
                         pid: int = selector_key.data
                         worker = workers[pid]
@@ -382,7 +399,7 @@ class ProcessPool:
             if worker.process is not None:
                 worker.process.join()
 
-    def _send_task(self, task, worker: _PoolWorker, timeouts_heap) -> None:
+    def _send_task(self, task: _PoolTask | _SerializedPoolTask, worker: _PoolWorker, timeouts_heap) -> None:
         assert worker.process is not None
         assert worker.process.pid is not None
         task.future.add_done_callback(lambda future: self._on_future_resolved(worker.process.pid, future))
