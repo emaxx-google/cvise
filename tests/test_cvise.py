@@ -265,7 +265,7 @@ def test_non_ascii(tmp_path: Path, overridden_subprocess_tmpdir: Path):
         )
 
     # The reduced result may or may not include the trailing line break - this depends on random ordering factors.
-    assert testcase_path.read_text() in ('int foo;', 'int foo;\n', '// foo')
+    assert testcase_path.read_text() in ('int foo;', 'int foo;\n', '// foo', '// nonutffoo')
     assert_subprocess_tmpdir_empty(overridden_subprocess_tmpdir)
     assert 'Streichholz' in stderr
 

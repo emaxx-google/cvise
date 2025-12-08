@@ -35,7 +35,8 @@ from cvise.utils.error import (
 )
 from cvise.utils.folding import FoldingManager, FoldingStateIn, FoldingStateOut
 from cvise.utils.hint import is_special_hint_type, load_hints
-from cvise.utils.process import ProcessEventNotifier, ProcessPool
+from cvise.utils.process import ProcessEventNotifier
+from cvise.utils.processpool import ProcessPool
 from cvise.utils.readkey import KeyLogger
 
 MAX_PASS_INCREASEMENT_THRESHOLD = 3

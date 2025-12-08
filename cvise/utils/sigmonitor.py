@@ -40,6 +40,7 @@ class Mode(enum.Enum):
 
 
 _mode: Mode = Mode.OFF
+_handle_sigint: bool = True
 _sigint_observed: bool = False
 _sigterm_observed: bool = False
 _future: Future | None = None
@@ -47,9 +48,11 @@ _wakeup_read_fd: int | None = None
 _wakeup_write_fd: int | None = None
 
 
-def init(mode: Mode) -> None:
+def init(mode: Mode, handle_sigint: bool = True) -> None:
     global _mode
     _mode = mode
+    global _handle_sigint
+    _handle_sigint = handle_sigint
 
     global _wakeup_read_fd, _wakeup_write_fd
     if _wakeup_read_fd is not None:
@@ -71,7 +74,7 @@ def init(mode: Mode) -> None:
     # Ignore old signal handlers (in tests, the old handler could've been installed by ourselves as well; calling it
     # would result in an infinite recursion).
     signal.signal(signal.SIGTERM, _on_signal)
-    signal.signal(signal.SIGINT, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal if _handle_sigint else signal.SIG_IGN)
 
 
 def maybe_retrigger_action() -> None:
@@ -114,6 +117,7 @@ def signal_observed_for_testing() -> bool:
 
 
 def _on_signal(signum: int, frame) -> None:
+    # print(f'[{os.getpid()}] on_signal {signum}', file=sys.stderr)
     global _sigint_observed
     global _sigterm_observed
     match signum:
