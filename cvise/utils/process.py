@@ -12,6 +12,7 @@ import multiprocessing.connection
 import multiprocessing.reduction
 import os
 import queue
+import select
 import selectors
 import shlex
 import socket
@@ -32,8 +33,8 @@ from cvise.utils import mplogging, sigmonitor
 class _MPConnListener:
     """Provides asynchronous interface for accepting connections from multiprocessing children."""
 
-    def __init__(self, backlog: int, pipe_to_notify: multiprocessing.connection.Connection):
-        self._pipe_to_notify = pipe_to_notify
+    def __init__(self, backlog: int, event_write_socket: socket.socket):
+        self._event_write_socket = event_write_socket
         self._listener = multiprocessing.connection.Listener(
             address=None,
             family='AF_PIPE' if sys.platform == 'win32' else 'AF_UNIX',
@@ -91,7 +92,9 @@ class _MPConnListener:
             conn = self._listener.accept()
             with self._lock:
                 self._accepted_conns.append(conn)
-            self._pipe_to_notify.send(None)
+                should_notify = len(self._accepted_conns) == 1
+            if should_notify:
+                self._event_write_socket.send(b'\0')
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,8 +127,10 @@ class ProcessPoolError(Exception):
 class ProcessPool:
     def __init__(self, max_worker_count):
         self._max_worker_count = max_worker_count
-        self._cond_read, self._cond_write = multiprocessing.Pipe(duplex=False)
-        self._mp_conn_listener = _MPConnListener(backlog=max_worker_count, pipe_to_notify=self._cond_write)
+        self._event_read_socket, self._event_write_socket = socket.socketpair()
+        self._event_read_socket.setblocking(False)
+        self._event_write_socket.setblocking(False)
+        self._mp_conn_listener = _MPConnListener(backlog=max_worker_count, event_write_socket=self._event_write_socket)
         self._lock = threading.Lock()
         self._task_queue: collections.deque[_PoolTask] = collections.deque()
         self._termination_queue: list[tuple[int, Future]] = []
@@ -147,11 +152,13 @@ class ProcessPool:
         # Terminate all workers in a blocking fashion.
         with self._lock:
             self._shutdown = True
-        self._cond_write.send_bytes(b'')
+        self._event_write_socket.send(b'\0')
         self._pool_thread.join(60)
         if self._pool_thread.is_alive():
             logging.warning('Failed to stop process pool thread')
             assert 0
+        self._event_read_socket.close()
+        self._event_write_socket.close()
 
     def stop(self):
         # Indicate that already running tasks and free workers can be terminated.
@@ -159,7 +166,7 @@ class ProcessPool:
             if self._pre_shutdown:
                 return
             self._pre_shutdown = True
-        self._cond_write.send_bytes(b'')
+        self._event_write_socket.send(b'\0')
 
     def schedule(self, f: Callable, args: Sequence[Any], timeout):
         future = Future()
@@ -169,9 +176,9 @@ class ProcessPool:
                 future.cancel()
                 return future
             self._task_queue.append(task)
-            need_signal = len(self._task_queue) + len(self._termination_queue) == 1
-        if need_signal:
-            self._cond_write.send_bytes(b'')
+            should_notify = len(self._task_queue) + len(self._termination_queue) == 1
+        if should_notify:
+            self._event_write_socket.send(b'\0')
         return future
 
     def _pool_thread_main(self):
@@ -188,7 +195,7 @@ class ProcessPool:
         stopping_workers: int = 0
         timeouts_heap: list[tuple[float, Future]] = []
         event_selector = selectors.DefaultSelector()
-        event_selector.register(self._cond_read, selectors.EVENT_READ)
+        event_selector.register(self._event_read_socket, selectors.EVENT_READ)
         mp_conn_listener_address = self._mp_conn_listener.address()
         while True:
             now = time.monotonic()
@@ -200,10 +207,6 @@ class ProcessPool:
                 if not future.done():
                     with contextlib.suppress(concurrent.futures.InvalidStateError):
                         future.set_exception(TimeoutError('Job timed out'))
-
-            # Eat notifications sent until this point. This has to be done before reading members under the mutex below.
-            while self._cond_read.poll():
-                self._cond_read.recv_bytes()
 
             worker: _PoolWorker | None = None
             workers_to_start: int = 0
@@ -282,10 +285,10 @@ class ProcessPool:
                 events = event_selector.select(timeout=poll_timeout)
                 for selector_key, _event_mask in events:
                     fileobj = selector_key.fileobj
-                    if fileobj == self._cond_read:
-                        # Nothing to do here - the next iteration of the outer loop will pick up the changes (a new task, or
-                        # a shutdown signal, etc.).
-                        pass
+                    if fileobj == self._event_read_socket:
+                        # Just eat the notifications - the next iteration of the outer loop will pick up the changes (a
+                        # new task, or a shutdown signal, etc.).
+                        self._event_read_socket.recv(100)
                     elif isinstance(fileobj, multiprocessing.connection.Connection):
                         if selector_key.data is None:
                             worker_pid: int = fileobj.recv()
@@ -362,10 +365,10 @@ class ProcessPool:
         # are needed to avoid deadlocking the accept() call in the connection listener).
         event_selector.close()
         with self._lock:
-            for task in serialized_task_queue:
-                task.future.cancel()
             for task in self._task_queue:
                 task.future.cancel()
+        for task in serialized_task_queue:
+            task.future.cancel()
         for worker in workers.values():
             if not worker.connection or worker.stopping:
                 continue
@@ -388,7 +391,8 @@ class ProcessPool:
             with self._lock:
                 if self._shutdown:
                     break
-            self._cond_read.recv_bytes()
+            select.select([self._event_read_socket], [], [])
+            self._event_read_socket.recv(100)
 
         # Terminate the remaining workers and reap all children.
         for worker in workers.values():
@@ -432,9 +436,9 @@ class ProcessPool:
             return
         with self._lock:
             self._termination_queue.append((worker_pid, future))
-            need_signal = len(self._task_queue) + len(self._termination_queue) == 1
-        if need_signal:
-            self._cond_write.send_bytes(b'')
+            should_notify = len(self._task_queue) + len(self._termination_queue) == 1
+        if should_notify:
+            self._event_write_socket.send(b'\0')
 
     @staticmethod
     def _worker_process_main(logging_level: int, server_address):
@@ -484,8 +488,6 @@ class ProcessEventNotifier:
     Intended to be used in multiprocessing workers, to let the main process know the unfinished children subprocesses
     that should be killed.
     """
-
-    _EVENT_LOOP_STEP = 1  # seconds
 
     def __init__(self, pid_queue: queue.Queue | None = None):
         self._my_pid = os.getpid()
