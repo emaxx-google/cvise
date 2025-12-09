@@ -68,11 +68,8 @@ class ProcessPool:
         return future
 
     def _pool_thread_main(self) -> None:
-        try:
-            self._pool_runner.run()
-            self._pool_runner.close()
-        except:
-            logging.exception('_pool_thread_main')
+        self._pool_runner.run()
+        self._pool_runner.shut_down()
 
 
 @dataclass(slots=True)
@@ -98,6 +95,8 @@ class _ScheduledAbort:
 
 @dataclass(slots=True)
 class _SharedState:
+    """State shared between the main and the pool runner threads."""
+
     event_read_socket: socket.socket
     event_write_socket: socket.socket
     lock: threading.Lock
@@ -128,6 +127,12 @@ class _SharedState:
             task = self.task_queue.popleft()
             has_more_tasks = bool(self.task_queue)
         return task, has_more_tasks
+
+    def take_all_tasks(self) -> list[_Task]:
+        with self.lock:
+            tasks = list(self.task_queue)
+            self.task_queue.clear()
+        return tasks
 
     def notify_shutdown(self) -> None:
         with self.lock:
@@ -211,63 +216,62 @@ class _PoolRunner:
         self._event_selector.register(self._shared_state.event_read_socket, selectors.EVENT_READ)
 
     def run(self) -> None:
-        while True:
-            assert len(self._free_worker_pids) <= len(self._workers)
-            assert 0 <= len(self._workers) - self._stopping_workers <= self._max_active_workers
-            assert 0 <= len(self._workers) - len(self._free_worker_pids) <= self._max_active_workers
-            assert (
-                sum(1 for w in self._workers.values() if w.active_task_future is not None) <= self._max_active_workers
-            )
+        while self._do_step():
+            pass
 
-            self._mark_timed_out_tasks()
+    def _do_step(self) -> bool:
+        assert len(self._free_worker_pids) <= len(self._workers)
+        assert 0 <= len(self._workers) - self._stopping_workers <= self._max_active_workers
+        assert 0 <= len(self._workers) - len(self._free_worker_pids) <= self._max_active_workers
+        assert sum(1 for w in self._workers.values() if w.active_task_future is not None) <= self._max_active_workers
 
-            max_new_tasks = self._max_active_workers - len(self._workers) + len(self._free_worker_pids)
-            assert 0 <= max_new_tasks <= self._max_active_workers
+        # 1. If there are timed-out tasks, resolve their futures and schedule worker aborts.
+        self._mark_timed_out_tasks()
 
-            tasks_to_send: deque[_Task | _PickledTask] = self._take_pickled_tasks(max_tasks=max_new_tasks)
-            batch = self._shared_state.take_work_batch(max_tasks=max_new_tasks - len(tasks_to_send))
-            if batch is None:
-                break  # shutdown
-            tasks_to_send.extend(batch.tasks)
-            assert len(tasks_to_send) <= max_new_tasks
+        # 2. Prepare the new batch of work (scheduled tasks, aborts, etc.).
+        max_new_tasks = self._max_active_workers - len(self._workers) + len(self._free_worker_pids)
+        assert 0 <= max_new_tasks <= self._max_active_workers
+        tasks_to_send: deque[_Task | _PickledTask] = self._take_pickled_tasks(max_tasks=max_new_tasks)
+        batch = self._shared_state.take_work_batch(max_tasks=max_new_tasks - len(tasks_to_send))
+        if batch is None:
+            return False  # shutdown
+        tasks_to_send.extend(batch.tasks)
+        assert len(tasks_to_send) <= max_new_tasks
 
-            for abort in batch.aborts:
-                self._abort_task(abort.worker_pid, abort.task_future)
+        # 3. Abort running workers for canceled/timedout tasks - preferably as early as possible here.
+        for abort in batch.aborts:
+            self._abort_task(abort.worker_pid, abort.task_future)
 
-            while tasks_to_send and self._free_worker_pids:
-                task = tasks_to_send.popleft()
-                worker_pid = self._free_worker_pids.popleft()
-                self._send_task(task, self._workers[worker_pid])
+        # 4. Send new tasks to free workers.
+        self._send_tasks_to_free_workers(tasks_to_send)
 
-            workers_to_start = self._max_active_workers - len(self._workers) + self._stopping_workers
-            assert 0 <= workers_to_start <= self._max_active_workers
-            for _ in range(workers_to_start):
-                worker_pid = self._start_worker()
-                if tasks_to_send:
-                    self._send_task(tasks_to_send.popleft(), self._workers[worker_pid])
-                else:
-                    self._free_worker_pids.append(worker_pid)
-            assert not tasks_to_send
+        # 5. Start fresh workers (on startup or after aborts); if possible, immediately send them tasks.
+        workers_to_start = self._max_active_workers - len(self._workers) + self._stopping_workers
+        assert 0 <= workers_to_start <= self._max_active_workers
+        for _ in range(workers_to_start):
+            self._start_worker()
+        self._send_tasks_to_free_workers(tasks_to_send)
+        assert not tasks_to_send
 
-            has_tasks_to_pickle = batch.has_more_tasks
-            while has_tasks_to_pickle:
-                if self._pump_event_queue(wait=False):
-                    break
-                has_tasks_to_pickle = self._pickle_one_task()
-            else:
-                self._pump_event_queue(wait=True)
+        # 6. Wait for asynchronous events (messages from workers, process terminations, signals). When applicable, spend
+        # the waiting time on pickling previously scheduled tasks.
+        has_tasks_to_pickle = batch.has_more_tasks
+        while has_tasks_to_pickle:
+            if self._pump_event_queue(wait=False):
+                break
+            has_tasks_to_pickle = self._pickle_one_task()
+        else:
+            self._pump_event_queue(wait=True)
+        return True
 
-    def close(self) -> None:
+    def shut_down(self) -> None:
         # print(f'poolrunner.close: event_selector.close()', file=sys.stderr)
         self._event_selector.close()
         # Cancel pending tasks.
         for task in self._pickled_task_queue:
             task.future.cancel()
         self._pickled_task_queue.clear()
-        with self._shared_state.lock:
-            scheduled_tasks = list(self._shared_state.task_queue)
-            self._shared_state.task_queue.clear()
-        for task in scheduled_tasks:
+        for task in self._shared_state.take_all_tasks():
             task.future.cancel()
         # Abort running tasks and terminate all workers.
         for worker in self._workers.values():
@@ -311,7 +315,7 @@ class _PoolRunner:
                 self._on_worker_proc_joinable(self._workers[pid])
         return bool(events)
 
-    def _start_worker(self) -> int:
+    def _start_worker(self) -> None:
         parent_conn, child_conn = multiprocessing.Pipe()
         proc = multiprocessing.Process(
             target=_worker_process_main,
@@ -323,7 +327,7 @@ class _PoolRunner:
         assert proc.pid not in self._workers
         self._workers[proc.pid] = _Worker(pid=proc.pid, process=proc, connection=parent_conn, active_task_future=None)
         self._event_selector.register(parent_conn, selectors.EVENT_READ, data=proc.pid)
-        return proc.pid
+        self._free_worker_pids.append(proc.pid)
 
     def _on_worker_conn_ready(self, worker: _Worker) -> None:
         assert worker.connection is not None
@@ -335,6 +339,12 @@ class _PoolRunner:
             if self._handle_message_from_worker(worker, raw_message):
                 if not self._maybe_send_pickled_task(worker):
                     self._free_worker_pids.append(worker.pid)
+
+    def _send_tasks_to_free_workers(self, tasks: deque[_Task | _PickledTask]) -> None:
+        while tasks and self._free_worker_pids:
+            task = tasks.popleft()
+            worker_pid = self._free_worker_pids.popleft()
+            self._send_task(task, self._workers[worker_pid])
 
     def _send_task(self, task: _Task | _PickledTask, worker: _Worker) -> None:
         assert worker.process is not None
