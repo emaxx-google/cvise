@@ -16,7 +16,7 @@ from typing import Any
 
 import psutil
 
-from cvise.utils import mplogging, sigmonitor
+from cvise.utils import sigmonitor
 
 
 class ProcessEventNotifier:
