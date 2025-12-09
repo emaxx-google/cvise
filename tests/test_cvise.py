@@ -79,7 +79,7 @@ def _communicate(proc: subprocess.Popen, timeout=None) -> tuple[str, str]:
 def check_cvise(
     testcase: str, arguments: list[str], expected: list[str], tmp_path: Path, overridden_subprocess_tmpdir: Path
 ) -> None:
-    print(f'check_cvise: testcase={testcase} tmp_path={tmp_path}')
+    # print(f'check_cvise: testcase={testcase} tmp_path={tmp_path}')
     work_path = tmp_path / testcase
     shutil.copy(get_source_path(testcase), work_path)
     work_path.chmod(0o644)

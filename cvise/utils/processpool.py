@@ -26,9 +26,15 @@ class ProcessPoolError(Exception):
 
 
 class ProcessPool:
-    def __init__(self, max_active_workers: int):
-        self._max_active_workers = max_active_workers
+    """Multiprocessing task pool with active task cancellation support.
 
+    The worker pool is orchestrated by an event loop on a background thread. Implementation attempts to be highly
+    parallelizable, using i/o multiplexing, task pre-pickling, worker precreation (concurrently to aborted worker
+    shutdown), signals with file descriptor based handlers, and fine-tuned operation ordering (focused on workloads that
+    take place in C-Vise).
+    """
+
+    def __init__(self, max_active_workers: int):
         event_read_socket, event_write_socket = socket.socketpair()
         event_read_socket.setblocking(False)
         event_write_socket.setblocking(False)
@@ -41,7 +47,7 @@ class ProcessPool:
             task_queue=deque(),
             scheduled_aborts=[],
         )
-        self._pool_runner = _PoolRunner(self._max_active_workers, self._shared_state)
+        self._pool_runner = _PoolRunner(max_active_workers, self._shared_state)
         self._pool_runner_thread = threading.Thread(target=self._pool_thread_main)
 
     def __enter__(self):
@@ -95,7 +101,10 @@ class _ScheduledAbort:
 
 @dataclass(slots=True)
 class _SharedState:
-    """State shared between the main and the pool runner threads."""
+    """State shared between the pool runner thread and other threads.
+
+    Most importantly, this is used to deliver newly scheduled tasks and task cancellations.
+    """
 
     event_read_socket: socket.socket
     event_write_socket: socket.socket
@@ -228,7 +237,7 @@ class _PoolRunner:
         # 1. If there are timed-out tasks, resolve their futures and schedule worker aborts.
         self._mark_timed_out_tasks()
 
-        # 2. Prepare the new batch of work (scheduled tasks, aborts, etc.).
+        # 2. Load work to be done (tasks, aborts, shutdown flag, etc.) from the state shared across threads.
         max_new_tasks = self._max_active_workers - len(self._workers) + len(self._free_worker_pids)
         assert 0 <= max_new_tasks <= self._max_active_workers
         tasks_to_send: deque[_Task | _PickledTask] = self._take_pickled_tasks(max_tasks=max_new_tasks)
@@ -238,14 +247,16 @@ class _PoolRunner:
         tasks_to_send.extend(batch.tasks)
         assert len(tasks_to_send) <= max_new_tasks
 
-        # 3. Abort running workers for canceled/timedout tasks - preferably as early as possible here.
+        # 3. Initiate stopping of workers for canceled/timed-out tasks. Note we'll spawn new workers below immediately,
+        # however for the purpose of starting new tasks we'll treat the "in the process of stopping" workers as busy -
+        # to avoid exceeding the concurrency limit even in this transition period.
         for abort in batch.aborts:
-            self._abort_task(abort.worker_pid, abort.task_future)
+            self._trigger_worker_stop(abort.worker_pid, abort.task_future)
 
         # 4. Send new tasks to free workers.
         self._send_tasks_to_free_workers(tasks_to_send)
 
-        # 5. Start fresh workers (on startup or after aborts); if possible, immediately send them tasks.
+        # 5. Start fresh workers (on pool startup or after aborts); if possible, immediately send them tasks.
         workers_to_start = self._max_active_workers - len(self._workers) + self._stopping_workers
         assert 0 <= workers_to_start <= self._max_active_workers
         for _ in range(workers_to_start):
@@ -257,11 +268,11 @@ class _PoolRunner:
         # the waiting time on pickling previously scheduled tasks.
         has_tasks_to_pickle = batch.has_more_tasks
         while has_tasks_to_pickle:
-            if self._pump_event_queue(wait=False):
+            if self._pump_file_descriptors(wait=False):
                 break
             has_tasks_to_pickle = self._pickle_one_task()
         else:
-            self._pump_event_queue(wait=True)
+            self._pump_file_descriptors(wait=True)
         return True
 
     def shut_down(self) -> None:
@@ -292,7 +303,7 @@ class _PoolRunner:
                 worker.process.join()
         self._workers.clear()
 
-    def _pump_event_queue(self, wait: bool) -> bool:
+    def _pump_file_descriptors(self, wait: bool) -> bool:
         if not wait:
             poll_timeout = 0
         elif self._timeouts_heap:
@@ -310,7 +321,7 @@ class _PoolRunner:
             elif isinstance(fileobj, multiprocessing.connection.Connection):
                 pid: int = selector_key.data
                 self._on_worker_conn_ready(self._workers[pid])
-            else:
+            else:  # must be the process sentinel
                 pid: int = selector_key.data
                 self._on_worker_proc_joinable(self._workers[pid])
         return bool(events)
@@ -337,6 +348,8 @@ class _PoolRunner:
             self._handle_worker_conn_eof(worker)
         else:
             if self._handle_message_from_worker(worker, raw_message):
+                # If the worker has gotten free, try sending it a task immediately - if we have one without the need in
+                # taking a mutex. We could've just let the event loop do it, but the latency is lower this way.
                 if not self._maybe_send_pickled_task(worker):
                     self._free_worker_pids.append(worker.pid)
 
@@ -371,7 +384,7 @@ class _PoolRunner:
         self._send_task(task, worker)
         return True
 
-    def _abort_task(self, worker_pid: int, task_future: Future) -> None:
+    def _trigger_worker_stop(self, worker_pid: int, task_future: Future) -> None:
         if worker_pid not in self._workers:
             return  # already died
         worker = self._workers[worker_pid]
@@ -380,6 +393,7 @@ class _PoolRunner:
         assert worker.process is not None
         assert worker.process.pid is not None
         worker.stopping = True
+        worker.active_task_future = None
         worker.process.terminate()
         self._stopping_workers += 1
         assert worker.connection is not None
@@ -446,7 +460,7 @@ class _PoolRunner:
 
     def _handle_worker_conn_eof(self, worker: _Worker) -> None:
         assert worker.connection is not None
-        if not worker.stopping and worker.active_task_future is not None:
+        if worker.active_task_future is not None:
             if not worker.active_task_future.done():
                 _assign_future_exception(worker.active_task_future, ProcessPoolError(f'Worker {worker.pid} died'))
             worker.active_task_future = None
@@ -459,40 +473,30 @@ class _PoolRunner:
             self._stopping_workers -= 1
 
 
-def _worker_process_main(logging_level: int, server_conn: multiprocessing.connection.Connection):
+def _worker_process_main(logging_level: int, server_conn: multiprocessing.connection.Connection) -> None:
     # print(f'worker[{os.getpid()}]: started', file=sys.stderr)
     sigmonitor.init(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND, handle_sigint=False)
-    try:
-        mplogging.init_in_worker(logging_level=logging_level, server_conn=server_conn)
-        with selectors.DefaultSelector() as event_selector:
-            event_selector.register(server_conn, selectors.EVENT_READ)
-            event_selector.register(sigmonitor.get_wakeup_fd(), selectors.EVENT_READ)
-            # Handle incoming tasks in an infinite loop (until stopped by a signal).
-            while True:
-                events = event_selector.select()
-                can_recv = False
-                for selector_key, _event_mask in events:
-                    if selector_key.fileobj != sigmonitor.get_wakeup_fd():
-                        can_recv = True
+    mplogging.init_in_worker(logging_level=logging_level, server_conn=server_conn)
+    with selectors.DefaultSelector() as event_selector:
+        event_selector.register(server_conn, selectors.EVENT_READ)
+        event_selector.register(sigmonitor.get_wakeup_fd(), selectors.EVENT_READ)
+        # Handle incoming tasks in an infinite loop (until stopped by a signal).
+        while True:
+            events = event_selector.select()
+            can_recv = False
+            for selector_key, _event_mask in events:
+                if selector_key.fileobj != sigmonitor.get_wakeup_fd():
+                    can_recv = True
+            sigmonitor.maybe_retrigger_action()
+            if can_recv:
+                f, args = server_conn.recv()
+                try:
+                    result = f(*args)
+                except Exception as e:
+                    result = e
                 sigmonitor.maybe_retrigger_action()
-                if can_recv:
-                    f, args = server_conn.recv()
-                    try:
-                        result = f(*args)
-                    except Exception as e:
-                        result = e
-                    sigmonitor.maybe_retrigger_action()
-                    pickled = multiprocessing.reduction.ForkingPickler.dumps(result)
-                    server_conn.send_bytes(pickled)
-    except (EOFError, OSError):
-        # print(f'worker[{os.getpid()}]: exit on {sys.exc_info()}', file=sys.stderr)
-        return
-    except (KeyboardInterrupt, SystemExit):
-        # print(f'worker[{os.getpid()}]: exit on {sys.exc_info()}', file=sys.stderr)
-        os._exit(1)
-    except Exception as e:
-        # print(f'worker[{os.getpid()}]: died on {sys.exc_info()}', file=sys.stderr)
-        raise
+                pickled = multiprocessing.reduction.ForkingPickler.dumps(result)
+                server_conn.send_bytes(pickled)
 
 
 def _future_aborted(future: Future) -> bool:
