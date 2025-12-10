@@ -316,7 +316,7 @@ class _PoolRunner:
         for selector_key, _event_mask in events:
             fileobj = selector_key.fileobj
             if fileobj == self._shared_state.event_read_socket:
-                # Just eat the notification(s) - the next iteration of the run loop will pick up the changes.
+                # Just drain the notification(s) - the next iteration of the run loop will pick up the changes.
                 self._shared_state.event_read_socket.recv(1000)
             elif isinstance(fileobj, multiprocessing.connection.Connection):
                 pid: int = selector_key.data
@@ -475,7 +475,7 @@ class _PoolRunner:
 
 def _worker_process_main(logging_level: int, server_conn: multiprocessing.connection.Connection) -> None:
     # print(f'worker[{os.getpid()}]: started', file=sys.stderr)
-    sigmonitor.init(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND, handle_sigint=False)
+    sigmonitor.init(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND, sigint=False, sigchld=True)
     mplogging.init_in_worker(logging_level=logging_level, server_conn=server_conn)
     with selectors.DefaultSelector() as event_selector:
         event_selector.register(server_conn, selectors.EVENT_READ)

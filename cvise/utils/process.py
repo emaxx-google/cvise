@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import os
 import queue
 import selectors
 import shlex
 import socket
 import subprocess
+import sys
 import threading
+import time
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -51,7 +54,7 @@ class ProcessEventNotifier:
             env=env,
             **kwargs,
         ) as proc:
-            with _auto_kill_descendants(proc):  # TODO: filter by own PID to avoid race
+            with _auto_kill_descendants(proc):
                 stdout_data, stderr_data = self._communicate_with_sig_checks(proc, input, timeout)
         return stdout_data, stderr_data, proc.returncode
 
@@ -77,6 +80,89 @@ class ProcessEventNotifier:
         return stdout_data
 
     def _communicate_with_sig_checks(
+        self, proc: subprocess.Popen, input: bytes | None, timeout: float | None
+    ) -> tuple[bytes, bytes]:
+        if os.name == 'posix':
+            return self._communicate_with_sig_checks_posix(proc, input, timeout)
+        else:
+            return self._communicate_with_sig_checks_portable(proc, input, timeout)
+
+    def _communicate_with_sig_checks_posix(
+        self, proc: subprocess.Popen, input: bytes | None, timeout: float | None
+    ) -> tuple[bytes, bytes]:
+        max_time = None if timeout is None else time.monotonic() + timeout
+        with selectors.DefaultSelector() as selector:
+            stdout_chunks = []
+            stderr_chunks = []
+
+            input_view = memoryview(input) if input else None
+            input_offset = 0
+
+            def set_non_blocking(file_obj):
+                fd = file_obj.fileno()
+                flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+                fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+            wakeup_fd = sigmonitor.get_wakeup_fd()
+            selector.register(wakeup_fd, selectors.EVENT_READ, data='WAKEUP')
+
+            if proc.stdin:
+                if input_view:
+                    set_non_blocking(proc.stdin)
+                    selector.register(proc.stdin, selectors.EVENT_WRITE, data='STDIN')
+                else:
+                    proc.stdin.close()
+
+            if proc.stdout:
+                set_non_blocking(proc.stdout)
+                selector.register(proc.stdout, selectors.EVENT_READ, data='STDOUT')
+            if proc.stderr:
+                set_non_blocking(proc.stderr)
+                selector.register(proc.stderr, selectors.EVENT_READ, data='STDERR')
+
+            while len(selector.get_map()) > 1 or proc.poll() is None:
+                poll_timeout = None if max_time is None else max(0, max_time - time.monotonic())
+                if poll_timeout == 0:
+                    raise TimeoutError('Timed out')
+                # print(f'[{os.getpid()}] select()', file=sys.stderr)
+                events = selector.select(timeout=poll_timeout)
+
+                for key, mask in events:
+                    fileobj = key.fileobj
+                    if fileobj == wakeup_fd:
+                        # print(f'[{os.getpid()}] select(): wakeup_fd', file=sys.stderr)
+                        with contextlib.suppress(OSError):
+                            os.read(wakeup_fd, 1024)
+                        sigmonitor.maybe_retrigger_action()
+                    elif mask & selectors.EVENT_READ:
+                        try:
+                            chunk = os.read(fileobj.fileno(), 32768)
+                        except OSError:
+                            chunk = b''
+                        # print(f'[{os.getpid()}] select(): read {key.data} len={len(chunk)}', file=sys.stderr)
+                        if chunk:
+                            if key.data == 'STDOUT':
+                                stdout_chunks.append(chunk)
+                            else:
+                                stderr_chunks.append(chunk)
+                        else:
+                            selector.unregister(fileobj)
+                            fileobj.close()
+                    elif mask & selectors.EVENT_WRITE:
+                        try:
+                            written = os.write(fileobj.fileno(), input_view[input_offset:])
+                            # print(f'[{os.getpid()}] select(): wrote len={written}', file=sys.stderr)
+                            input_offset += written
+                            if input_offset >= len(input_view):
+                                selector.unregister(fileobj)
+                                fileobj.close()
+                        except OSError:
+                            selector.unregister(fileobj)
+                            fileobj.close()
+
+        return b''.join(stdout_chunks), b''.join(stderr_chunks)
+
+    def _communicate_with_sig_checks_portable(
         self, proc: subprocess.Popen, input: bytes | None, timeout: float | None
     ) -> tuple[bytes, bytes]:
         comm_read_socket, comm_write_socket = socket.socketpair()

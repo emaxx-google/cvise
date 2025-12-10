@@ -16,7 +16,6 @@ and letting the code raise the exception to trigger the shutdown.
 
 from __future__ import annotations
 
-import atexit
 import concurrent.futures
 import contextlib
 import enum
@@ -40,7 +39,6 @@ class Mode(enum.Enum):
 
 
 _mode: Mode = Mode.OFF
-_handle_sigint: bool = True
 _sigint_observed: bool = False
 _sigterm_observed: bool = False
 _future: Future | None = None
@@ -48,11 +46,9 @@ _wakeup_read_fd: int | None = None
 _wakeup_write_fd: int | None = None
 
 
-def init(mode: Mode, handle_sigint: bool = True) -> None:
+def init(mode: Mode, sigint: bool = True, sigchld: bool = False) -> None:
     global _mode
     _mode = mode
-    global _handle_sigint
-    _handle_sigint = handle_sigint
 
     global _wakeup_read_fd, _wakeup_write_fd
     if _wakeup_read_fd is not None:
@@ -74,7 +70,9 @@ def init(mode: Mode, handle_sigint: bool = True) -> None:
     # Ignore old signal handlers (in tests, the old handler could've been installed by ourselves as well; calling it
     # would result in an infinite recursion).
     signal.signal(signal.SIGTERM, _on_signal)
-    signal.signal(signal.SIGINT, _on_signal if _handle_sigint else signal.SIG_IGN)
+    signal.signal(signal.SIGINT, _on_signal if sigint else signal.SIG_IGN)
+    if sigchld:
+        signal.signal(signal.SIGCHLD, _on_signal)
 
 
 def maybe_retrigger_action() -> None:
@@ -125,6 +123,8 @@ def _on_signal(signum: int, frame) -> None:
             _sigterm_observed = True
         case signal.SIGINT:
             _sigint_observed = True
+        case signal.SIGCHLD:
+            return  # no action needed besides notifying the wakeup fd
 
     exception = _create_exception(signum)
     # Set the exception on the future, unless it's already done. We don't use done() because it'd be potentially racy.
