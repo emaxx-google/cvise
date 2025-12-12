@@ -478,17 +478,23 @@ def _worker_process_main(logging_level: int, server_conn: multiprocessing.connec
     # print(f'worker[{os.getpid()}]: started', file=sys.stderr)
     sigmonitor.init(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND, sigint=False, sigchld=True)
     mplogging.init_in_worker(logging_level=logging_level, server_conn=server_conn)
+    wakeup_fd = sigmonitor.get_wakeup_fd()
     with selectors.DefaultSelector() as event_selector:
         event_selector.register(server_conn, selectors.EVENT_READ)
-        event_selector.register(sigmonitor.get_wakeup_fd(), selectors.EVENT_READ)
+        event_selector.register(wakeup_fd, selectors.EVENT_READ)
         # Handle incoming tasks in an infinite loop (until stopped by a signal).
         while True:
             events = event_selector.select()
             can_recv = False
             for selector_key, _event_mask in events:
-                if selector_key.fileobj != sigmonitor.get_wakeup_fd():
+                if selector_key.fileobj == wakeup_fd:
+                    try:
+                        os.read(wakeup_fd, 1024)
+                    except OSError:
+                        pass
+                    sigmonitor.maybe_retrigger_action()
+                else:
                     can_recv = True
-            sigmonitor.maybe_retrigger_action()
             if can_recv:
                 f, args = server_conn.recv()
                 try:

@@ -164,16 +164,16 @@ class ProcessEventNotifier:
                 elif mask & selectors.EVENT_READ:
                     chunk = os.read(fd, 32768)
                     # print(
-                        # f'[{os.getpid()}] select(): read {"stdout" if key.data is stdout_chunks else "stderr"} {fileobj} len={len(chunk)}',
-                        # file=sys.stderr,
+                    # f'[{os.getpid()}] select(): read {"stdout" if key.data is stdout_chunks else "stderr"} {fileobj} len={len(chunk)}',
+                    # file=sys.stderr,
                     # )
                     key.data.append(chunk)
                     if not chunk:
                         selector.unregister(fileobj)
                         fileobj.close()
                         # print(
-                            # f'[{os.getpid()}] select(): close {"stdout" if key.data is stdout_chunks else "stderr"} {fileobj}',
-                            # file=sys.stderr,
+                        # f'[{os.getpid()}] select(): close {"stdout" if key.data is stdout_chunks else "stderr"} {fileobj}',
+                        # file=sys.stderr,
                         # )
                 elif mask & selectors.EVENT_WRITE:
                     try:
