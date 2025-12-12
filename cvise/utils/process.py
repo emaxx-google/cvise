@@ -54,8 +54,10 @@ class ProcessEventNotifier:
             env=env,
             **kwargs,
         ) as proc:
+            # print(f'[{os.getpid()}] run_process begin pid={proc.pid}', file=sys.stderr)
             with _auto_kill_descendants(proc):
                 stdout_data, stderr_data = self._communicate_with_sig_checks(proc, input, timeout)
+            # print(f'[{os.getpid()}] run_process end pid={proc.pid}', file=sys.stderr)
         return stdout_data, stderr_data, proc.returncode
 
     def check_output(
@@ -91,40 +93,44 @@ class ProcessEventNotifier:
         self, proc: subprocess.Popen, input: bytes | None, timeout: float | None
     ) -> tuple[bytes, bytes]:
         max_time = None if timeout is None else time.monotonic() + timeout
+        stdout_chunks = []
+        stderr_chunks = []
+
+        input_view = memoryview(input) if input else None
+        input_offset = 0
+
+        def set_non_blocking(file_obj):
+            fd = file_obj.fileno()
+            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+            fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
         with selectors.DefaultSelector() as selector:
-            stdout_chunks = []
-            stderr_chunks = []
-
-            input_view = memoryview(input) if input else None
-            input_offset = 0
-
-            def set_non_blocking(file_obj):
-                fd = file_obj.fileno()
-                flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-                fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
             wakeup_fd = sigmonitor.get_wakeup_fd()
-            selector.register(wakeup_fd, selectors.EVENT_READ, data='WAKEUP')
+            selector.register(wakeup_fd, selectors.EVENT_READ)
 
             if proc.stdin:
                 if input_view:
                     set_non_blocking(proc.stdin)
-                    selector.register(proc.stdin, selectors.EVENT_WRITE, data='STDIN')
+                    selector.register(proc.stdin, selectors.EVENT_WRITE)
+                    # print(f'[{os.getpid()}] listen stdin', file=sys.stderr)
                 else:
                     proc.stdin.close()
 
             if proc.stdout:
                 set_non_blocking(proc.stdout)
-                selector.register(proc.stdout, selectors.EVENT_READ, data='STDOUT')
+                selector.register(proc.stdout, selectors.EVENT_READ, data=stdout_chunks)
+                # print(f'[{os.getpid()}] listen stdout {proc.stdout}', file=sys.stderr)
             if proc.stderr:
                 set_non_blocking(proc.stderr)
-                selector.register(proc.stderr, selectors.EVENT_READ, data='STDERR')
+                selector.register(proc.stderr, selectors.EVENT_READ, data=stderr_chunks)
+                # print(f'[{os.getpid()}] listen stderr {proc.stderr}', file=sys.stderr)
 
-            while len(selector.get_map()) > 1 or proc.poll() is None:
+            exited = False
+            while len(selector.get_map()) > 1 or not exited:
                 poll_timeout = None if max_time is None else max(0, max_time - time.monotonic())
                 if poll_timeout == 0:
                     raise TimeoutError('Timed out')
-                # print(f'[{os.getpid()}] select()', file=sys.stderr)
+                # print(f'[{os.getpid()}] select() timeout={poll_timeout}', file=sys.stderr)
                 events = selector.select(timeout=poll_timeout)
 
                 for key, mask in events:
@@ -134,20 +140,20 @@ class ProcessEventNotifier:
                         with contextlib.suppress(OSError):
                             os.read(wakeup_fd, 1024)
                         sigmonitor.maybe_retrigger_action()
+                        exited = proc.poll() is not None
+                        # print(f'[{os.getpid()}] select(): exited', file=sys.stderr)
                     elif mask & selectors.EVENT_READ:
                         try:
                             chunk = os.read(fileobj.fileno(), 32768)
                         except OSError:
                             chunk = b''
-                        # print(f'[{os.getpid()}] select(): read {key.data} len={len(chunk)}', file=sys.stderr)
+                        # print(f'[{os.getpid()}] select(): read {"stdout" if key.data is stdout_chunks else "stderr"} {fileobj} len={len(chunk)}', file=sys.stderr)
                         if chunk:
-                            if key.data == 'STDOUT':
-                                stdout_chunks.append(chunk)
-                            else:
-                                stderr_chunks.append(chunk)
+                            key.data.append(chunk)
                         else:
                             selector.unregister(fileobj)
                             fileobj.close()
+                            # print(f'[{os.getpid()}] select(): close {"stdout" if key.data is stdout_chunks else "stderr"} {fileobj}', file=sys.stderr)
                     elif mask & selectors.EVENT_WRITE:
                         try:
                             written = os.write(fileobj.fileno(), input_view[input_offset:])
@@ -156,10 +162,13 @@ class ProcessEventNotifier:
                             if input_offset >= len(input_view):
                                 selector.unregister(fileobj)
                                 fileobj.close()
+                                # print(f'[{os.getpid()}] select(): close stdin', file=sys.stderr)
                         except OSError:
                             selector.unregister(fileobj)
                             fileobj.close()
+                            # print(f'[{os.getpid()}] select(): close stdin', file=sys.stderr)
 
+        # print(f'[{os.getpid()}] finish', file=sys.stderr)
         return b''.join(stdout_chunks), b''.join(stderr_chunks)
 
     def _communicate_with_sig_checks_portable(
@@ -224,8 +233,16 @@ def _auto_kill_descendants(proc: subprocess.Popen) -> Iterator[None]:
         yield
     finally:
         if proc.returncode is None:
+            if proc.stdin:
+                proc.stdin.close()
+            if proc.stderr:
+                proc.stderr.close()
+            if proc.stdout:
+                proc.stdout.close()
+            # print(f'[{os.getpid()}] run_process kill_subtree pid={proc.pid}', file=sys.stderr)
             _kill_subtree(proc.pid)
             proc.wait()
+            # print(f'[{os.getpid()}] run_process killed_subtree pid={proc.pid}', file=sys.stderr)
 
 
 def _kill_subtree(pid: int) -> None:

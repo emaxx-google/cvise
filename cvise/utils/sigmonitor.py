@@ -46,7 +46,7 @@ _wakeup_read_fd: int | None = None
 _wakeup_write_fd: int | None = None
 
 
-def init(mode: Mode, sigint: bool = True, sigchld: bool = False) -> None:
+def init(mode: Mode, sigint: bool = True, sigchld: bool = True) -> None:
     global _mode
     _mode = mode
 
