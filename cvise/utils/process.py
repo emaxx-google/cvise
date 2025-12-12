@@ -6,6 +6,7 @@ import contextlib
 import fcntl
 import os
 import queue
+import select
 import selectors
 import shlex
 import socket
@@ -99,6 +100,8 @@ class ProcessEventNotifier:
         input_view = memoryview(input) if input else None
         input_offset = 0
 
+        write_chunk = select.PIPE_BUF
+
         with (
             selectors.PollSelector() if hasattr(selectors, 'PollSelector') else selectors.DefaultSelector()
         ) as selector:
@@ -147,7 +150,7 @@ class ProcessEventNotifier:
                             # print(f'[{os.getpid()}] select(): close {"stdout" if key.data is stdout_chunks else "stderr"} {fileobj}', file=sys.stderr)
                     elif mask & selectors.EVENT_WRITE:
                         try:
-                            written = os.write(fd, input_view[input_offset:])
+                            written = os.write(fd, input_view[input_offset:input_offset + write_chunk])
                             # print(f'[{os.getpid()}] select(): wrote len={written}', file=sys.stderr)
                             input_offset += written
                             if input_offset >= len(input_view):
