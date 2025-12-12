@@ -138,14 +138,10 @@ class ProcessEventNotifier:
                         exited = proc.poll() is not None
                         # print(f'[{os.getpid()}] select(): exited', file=sys.stderr)
                     elif mask & selectors.EVENT_READ:
-                        try:
-                            chunk = os.read(fd, 32768)
-                        except OSError:
-                            chunk = b''
+                        chunk = os.read(fd, 32768)
                         # print(f'[{os.getpid()}] select(): read {"stdout" if key.data is stdout_chunks else "stderr"} {fileobj} len={len(chunk)}', file=sys.stderr)
-                        if chunk:
-                            key.data.append(chunk)
-                        else:
+                        key.data.append(chunk)
+                        if not chunk:
                             selector.unregister(fileobj)
                             fileobj.close()
                             # print(f'[{os.getpid()}] select(): close {"stdout" if key.data is stdout_chunks else "stderr"} {fileobj}', file=sys.stderr)
