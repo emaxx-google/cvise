@@ -104,7 +104,9 @@ class ProcessEventNotifier:
             flags = fcntl.fcntl(fd, fcntl.F_GETFL)
             fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
 
-        with selectors.DefaultSelector() as selector:
+        with (
+            selectors.PollSelector() if hasattr(selectors, 'PollSelector') else selectors.DefaultSelector()
+        ) as selector:
             wakeup_fd = sigmonitor.get_wakeup_fd()
             selector.register(wakeup_fd, selectors.EVENT_READ)
 
