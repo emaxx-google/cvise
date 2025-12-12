@@ -99,11 +99,6 @@ class ProcessEventNotifier:
         input_view = memoryview(input) if input else None
         input_offset = 0
 
-        def set_non_blocking(file_obj):
-            fd = file_obj.fileno()
-            flags = fcntl.fcntl(fd, fcntl.F_GETFL)
-            fcntl.fcntl(fd, fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
         with (
             selectors.PollSelector() if hasattr(selectors, 'PollSelector') else selectors.DefaultSelector()
         ) as selector:
@@ -112,18 +107,15 @@ class ProcessEventNotifier:
 
             if proc.stdin:
                 if input_view:
-                    set_non_blocking(proc.stdin)
                     selector.register(proc.stdin, selectors.EVENT_WRITE)
                     # print(f'[{os.getpid()}] listen stdin', file=sys.stderr)
                 else:
                     proc.stdin.close()
 
             if proc.stdout:
-                set_non_blocking(proc.stdout)
                 selector.register(proc.stdout, selectors.EVENT_READ, data=stdout_chunks)
                 # print(f'[{os.getpid()}] listen stdout {proc.stdout}', file=sys.stderr)
             if proc.stderr:
-                set_non_blocking(proc.stderr)
                 selector.register(proc.stderr, selectors.EVENT_READ, data=stderr_chunks)
                 # print(f'[{os.getpid()}] listen stderr {proc.stderr}', file=sys.stderr)
 
