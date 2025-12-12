@@ -154,8 +154,10 @@ class ProcessEventNotifier:
                 fd = key.fd
                 if fd == wakeup_fd:
                     # print(f'[{os.getpid()}] select(): wakeup_fd', file=sys.stderr)
-                    with contextlib.suppress(OSError):
+                    try:
                         os.read(wakeup_fd, 1024)
+                    except OSError:
+                        pass
                     sigmonitor.maybe_retrigger_action()
                     exited = proc.poll() is not None
                     # print(f'[{os.getpid()}] select(): {"" if exited else "NOT YET "}exited', file=sys.stderr)

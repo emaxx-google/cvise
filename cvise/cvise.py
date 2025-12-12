@@ -218,6 +218,7 @@ class CVise:
         self._check_prerequisites(pass_group)
         if not self.skip_interestingness_test_check:
             self.test_manager.check_sanity()
+        sigmonitor.update_sigchld(False)
 
         logging.info(f'===< {os.getpid()} >===')
         logging.info(
