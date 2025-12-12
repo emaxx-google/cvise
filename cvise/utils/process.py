@@ -135,7 +135,8 @@ class ProcessEventNotifier:
 
                 for key, mask in events:
                     fileobj = key.fileobj
-                    if fileobj == wakeup_fd:
+                    fd = key.fd
+                    if fd == wakeup_fd:
                         # print(f'[{os.getpid()}] select(): wakeup_fd', file=sys.stderr)
                         with contextlib.suppress(OSError):
                             os.read(wakeup_fd, 1024)
@@ -144,7 +145,7 @@ class ProcessEventNotifier:
                         # print(f'[{os.getpid()}] select(): exited', file=sys.stderr)
                     elif mask & selectors.EVENT_READ:
                         try:
-                            chunk = os.read(fileobj.fileno(), 32768)
+                            chunk = os.read(fd, 32768)
                         except OSError:
                             chunk = b''
                         # print(f'[{os.getpid()}] select(): read {"stdout" if key.data is stdout_chunks else "stderr"} {fileobj} len={len(chunk)}', file=sys.stderr)
@@ -156,7 +157,7 @@ class ProcessEventNotifier:
                             # print(f'[{os.getpid()}] select(): close {"stdout" if key.data is stdout_chunks else "stderr"} {fileobj}', file=sys.stderr)
                     elif mask & selectors.EVENT_WRITE:
                         try:
-                            written = os.write(fileobj.fileno(), input_view[input_offset:])
+                            written = os.write(fd, input_view[input_offset:])
                             # print(f'[{os.getpid()}] select(): wrote len={written}', file=sys.stderr)
                             input_offset += written
                             if input_offset >= len(input_view):
