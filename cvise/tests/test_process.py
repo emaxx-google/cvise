@@ -1,24 +1,19 @@
-# import multiprocessing
-# import os
-# import queue
-# import signal
-# import subprocess
-# import sys
-# import threading
-# import time
-# from pathlib import Path
-# from typing import Callable
+import multiprocessing
+import os
+import queue
+import signal
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+from typing import Callable
 
-# import pebble
-# import pytest
+import pebble
+import pytest
 
-# from cvise.utils.process import (
-#     ProcessEvent,
-#     ProcessEventNotifier,
-#     ProcessEventType,
-#     ProcessKiller,
-#     ProcessMonitor,
-# )
+from cvise.utils import sigmonitor
+from cvise.utils.process import ProcessEventNotifier
 
 
 # @pytest.fixture
@@ -45,9 +40,10 @@
 #     return multiprocessing.Manager().Queue()
 
 
-# @pytest.fixture
-# def process_event_notifier(pid_queue: queue.Queue) -> ProcessEventNotifier:
-#     return ProcessEventNotifier(pid_queue)
+@pytest.fixture
+def process_event_notifier() -> ProcessEventNotifier:
+    sigmonitor.init(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND)
+    return ProcessEventNotifier(pid_queue=None)
 
 
 # def read_pid_queue(pid_queue: queue.Queue, expected_size: int) -> list[ProcessEvent]:
@@ -60,64 +56,54 @@
 #     return result
 
 
-# @pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
-# def test_run_process_success(process_event_notifier: ProcessEventNotifier, pid_queue: queue.Queue):
-#     stdout, stderr, returncode = process_event_notifier.run_process(['echo', 'foo'])
+@pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
+def test_run_process_success(process_event_notifier: ProcessEventNotifier):
+    stdout, stderr, returncode = process_event_notifier.run_process(['echo', 'foo'])
 
-#     assert stdout == b'foo\n'
-#     assert stderr == b''
-#     assert returncode == 0
-#     q = read_pid_queue(pid_queue, 2)
-#     assert q[0].type == ProcessEventType.STARTED
-#     assert q[0].child_pid == q[1].child_pid
-#     assert q[1].type == ProcessEventType.FINISHED
+    assert stdout == b'foo\n'
+    assert stderr == b''
+    assert returncode == 0
 
 
-# @pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
-# def test_run_process_slow(process_event_notifier: ProcessEventNotifier):
-#     stdout, stderr, returncode = process_event_notifier.run_process(
-#         'echo a && sleep 1 && echo b && sleep 1 && echo c', shell=True
-#     )
+@pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
+def test_run_process_slow(process_event_notifier: ProcessEventNotifier):
+    stdout, stderr, returncode = process_event_notifier.run_process(
+        'echo a && sleep 1 && echo b && sleep 1 && echo c', shell=True
+    )
 
-#     assert stdout == b'a\nb\nc\n'
-#     assert stderr == b''
-#     assert returncode == 0
-
-
-# @pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
-# def test_run_process_nonzero_return_code(process_event_notifier: ProcessEventNotifier, pid_queue: queue.Queue):
-#     stdout, stderr, returncode = process_event_notifier.run_process(['false'])
-
-#     assert stdout == b''
-#     assert stderr == b''
-#     assert returncode == 1
-#     q = read_pid_queue(pid_queue, 2)
-#     assert q[0].type == ProcessEventType.STARTED
-#     assert q[0].child_pid == q[1].child_pid
-#     assert q[1].type == ProcessEventType.FINISHED
+    assert stdout == b'a\nb\nc\n'
+    assert stderr == b''
+    assert returncode == 0
 
 
-# @pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
-# def test_run_process_stderr(process_event_notifier: ProcessEventNotifier):
-#     stdout, stderr, returncode = process_event_notifier.run_process(['cp'])
+@pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
+def test_run_process_nonzero_return_code(process_event_notifier: ProcessEventNotifier):
+    stdout, stderr, returncode = process_event_notifier.run_process(['false'])
 
-#     assert stdout == b''
-#     assert stderr != b''
-#     assert returncode != 0
+    assert stdout == b''
+    assert stderr == b''
+    assert returncode == 1
 
 
-# @pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
-# def test_run_process_pid(process_event_notifier: ProcessEventNotifier, pid_queue: queue.Queue):
-#     stdout, _stderr, returncode = process_event_notifier.run_process('echo $$', shell=True)
+@pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
+def test_run_process_stderr(process_event_notifier: ProcessEventNotifier):
+    stdout, stderr, returncode = process_event_notifier.run_process(['cp'])
 
-#     assert returncode == 0
-#     q = read_pid_queue(pid_queue, 2)
-#     assert q[0].child_pid == q[1].child_pid == int(stdout.strip())
+    assert stdout == b''
+    assert stderr != b''
+    assert returncode != 0
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
+def test_run_process_pid(process_event_notifier: ProcessEventNotifier):
+    stdout, _stderr, returncode = process_event_notifier.run_process('echo $$', shell=True)
+
+    assert returncode == 0
 
 
 # @pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
 # def test_run_process_finish_notification_after_exit(
-#     process_event_notifier: ProcessEventNotifier, pid_queue: queue.Queue
+#     process_event_notifier: ProcessEventNotifier
 # ):
 #     INFINITY = 100
 #     SLEEP_DURATION = 1
@@ -130,13 +116,9 @@
 
 #         # Still so a bit later.
 #         time.sleep(SLEEP_DURATION)
-#         read_pid_queue(pid_queue, 0)
 
 #         # After killing the child, the finish notification is seen.
 #         os.kill(pid, signal.SIGTERM)
-#         q2 = read_pid_queue(pid_queue, 1)
-#         assert q2[0].type == ProcessEventType.FINISHED
-#         assert q2[0].child_pid == pid
 
 #     thread = threading.Thread(target=thread_main)
 #     thread.start()
@@ -148,62 +130,56 @@
 #     thread.join()
 
 
-# @pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
-# def test_run_process_stdin(process_event_notifier: ProcessEventNotifier):
-#     stdout, stderr, returncode = process_event_notifier.run_process(
-#         'cat', shell=True, stdin=subprocess.PIPE, input=b'foo'
-#     )
+@pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
+def test_run_process_stdin(process_event_notifier: ProcessEventNotifier):
+    stdout, stderr, returncode = process_event_notifier.run_process(
+        'cat', shell=True, stdin=subprocess.PIPE, input=b'foo'
+    )
 
-#     assert stdout == b'foo'
-#     assert stderr == b''
-#     assert returncode == 0
-
-
-# @pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
-# def test_run_process_stdin_slow(process_event_notifier: ProcessEventNotifier):
-#     stdout, stderr, returncode = process_event_notifier.run_process(
-#         'sleep 3 && cat', shell=True, stdin=subprocess.PIPE, input=b'foo'
-#     )
-
-#     assert stdout == b'foo'
-#     assert stderr == b''
-#     assert returncode == 0
+    assert stdout == b'foo'
+    assert stderr == b''
+    assert returncode == 0
 
 
-# @pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
-# def test_run_process_timeout(process_event_notifier: ProcessEventNotifier, pid_queue: queue.Queue):
-#     TIMEOUT = 1
-#     CHILD_DURATION = 100
+@pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
+def test_run_process_stdin_slow(process_event_notifier: ProcessEventNotifier):
+    stdout, stderr, returncode = process_event_notifier.run_process(
+        'sleep 3 && cat', shell=True, stdin=subprocess.PIPE, input=b'foo'
+    )
 
-#     start_time = time.monotonic()
-#     with pytest.raises(subprocess.TimeoutExpired):
-#         process_event_notifier.run_process(['sleep', str(CHILD_DURATION)], timeout=TIMEOUT)
-
-#     assert TIMEOUT <= time.monotonic() - start_time < CHILD_DURATION / 2
-#     q = read_pid_queue(pid_queue, 2)
-#     assert q[0].type == ProcessEventType.STARTED
-#     assert q[0].child_pid == q[1].child_pid
-#     assert q[1].type == ProcessEventType.FINISHED
+    assert stdout == b'foo'
+    assert stderr == b''
+    assert returncode == 0
 
 
-# @pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
-# def test_run_process_non_existing_command(process_event_notifier: ProcessEventNotifier, pid_queue: queue.Queue):
-#     with pytest.raises(FileNotFoundError):
-#         process_event_notifier.run_process(['nonexistingnonexisting'])
+@pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
+def test_run_process_timeout(process_event_notifier: ProcessEventNotifier):
+    TIMEOUT = 1
+    CHILD_DURATION = 100
 
-#     read_pid_queue(pid_queue, 0)
+    start_time = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        process_event_notifier.run_process(['sleep', str(CHILD_DURATION)], timeout=TIMEOUT)
 
-
-# @pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
-# def test_check_output_success(process_event_notifier: ProcessEventNotifier):
-#     stdout = process_event_notifier.check_output(['echo', 'foo'])
-#     assert stdout == b'foo\n'
+    assert TIMEOUT <= time.monotonic() - start_time < CHILD_DURATION / 2
 
 
-# @pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
-# def test_check_output_failure(process_event_notifier: ProcessEventNotifier):
-#     with pytest.raises(RuntimeError):
-#         process_event_notifier.check_output(['false'])
+@pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
+def test_run_process_non_existing_command(process_event_notifier: ProcessEventNotifier):
+    with pytest.raises(FileNotFoundError):
+        process_event_notifier.run_process(['nonexistingnonexisting'])
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
+def test_check_output_success(process_event_notifier: ProcessEventNotifier):
+    stdout = process_event_notifier.check_output(['echo', 'foo'])
+    assert stdout == b'foo\n'
+
+
+@pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
+def test_check_output_failure(process_event_notifier: ProcessEventNotifier):
+    with pytest.raises(RuntimeError):
+        process_event_notifier.check_output(['false'])
 
 
 # @pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
@@ -342,7 +318,3 @@
 # def _wait_until(predicate: Callable) -> None:
 #     while not predicate():
 #         time.sleep(0.1)
-
-
-# def _run_with_process_event_notifier(pid_queue: queue.Queue, *args):
-#     ProcessEventNotifier(pid_queue).run_process(*args)

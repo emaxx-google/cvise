@@ -51,17 +51,17 @@ def init(mode: Mode, sigint: bool = True, sigchld: bool = True) -> None:
     _mode = mode
 
     global _wakeup_read_fd, _wakeup_write_fd
-    if _wakeup_read_fd is not None:
-        # Clean up the previous descriptors (presumably only relevant for tests that reuse the same process).
-        signal.set_wakeup_fd(-1)
-        os.close(_wakeup_read_fd)
-        assert _wakeup_write_fd is not None
-        os.close(_wakeup_write_fd)
-    read_socket, write_socket = socket.socketpair()
-    read_socket.setblocking(False)
-    write_socket.setblocking(False)
-    _wakeup_read_fd = read_socket.detach()
-    _wakeup_write_fd = write_socket.detach()
+    if _wakeup_read_fd is None:
+        read_socket, write_socket = socket.socketpair()
+        read_socket.setblocking(False)
+        write_socket.setblocking(False)
+        _wakeup_read_fd = read_socket.detach()
+        _wakeup_write_fd = write_socket.detach()
+    else:
+        # Pump previous wakeup FD notifications (presumably only relevant for tests that reuse the same process).
+        with contextlib.suppress(OSError):
+            os.read(_wakeup_read_fd, 1024)
+    assert _wakeup_write_fd is not None
     signal.set_wakeup_fd(_wakeup_write_fd, warn_on_full_buffer=False)
 
     global _future

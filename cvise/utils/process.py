@@ -119,6 +119,8 @@ class ProcessEventNotifier:
                 # print(f'[{os.getpid()}] listen stdin', file=sys.stderr)
             else:
                 proc.stdin.close()
+        else:
+            assert not input_view
 
         if proc.stdout:
             selector.register(proc.stdout, selectors.EVENT_READ, data=stdout_chunks)
@@ -131,7 +133,19 @@ class ProcessEventNotifier:
         while len(selector.get_map()) > 1 or not exited:
             poll_timeout = None if max_time is None else max(0, max_time - time.monotonic())
             if poll_timeout == 0:
-                raise TimeoutError('Timed out')
+                assert timeout is not None
+                if proc.stdin and not proc.stdin.closed:
+                    selector.unregister(proc.stdin)
+                if proc.stdout and not proc.stdout.closed:
+                    selector.unregister(proc.stdout)
+                if proc.stderr and not proc.stderr.closed:
+                    selector.unregister(proc.stderr)
+                raise subprocess.TimeoutExpired(
+                    cmd=proc.args,
+                    timeout=timeout,
+                    output=b''.join(stdout_chunks) if stdout_chunks else None,
+                    stderr=b''.join(stderr_chunks) if stderr_chunks else None,
+                )
             # print(f'[{os.getpid()}] select() timeout={poll_timeout}', file=sys.stderr)
             events = selector.select(timeout=poll_timeout)
 
@@ -144,15 +158,21 @@ class ProcessEventNotifier:
                         os.read(wakeup_fd, 1024)
                     sigmonitor.maybe_retrigger_action()
                     exited = proc.poll() is not None
-                    # print(f'[{os.getpid()}] select(): exited', file=sys.stderr)
+                    # print(f'[{os.getpid()}] select(): {"" if exited else "NOT YET "}exited', file=sys.stderr)
                 elif mask & selectors.EVENT_READ:
                     chunk = os.read(fd, 32768)
-                    # print(f'[{os.getpid()}] select(): read {"stdout" if key.data is stdout_chunks else "stderr"} {fileobj} len={len(chunk)}', file=sys.stderr)
+                    # print(
+                        # f'[{os.getpid()}] select(): read {"stdout" if key.data is stdout_chunks else "stderr"} {fileobj} len={len(chunk)}',
+                        # file=sys.stderr,
+                    # )
                     key.data.append(chunk)
                     if not chunk:
                         selector.unregister(fileobj)
                         fileobj.close()
-                        # print(f'[{os.getpid()}] select(): close {"stdout" if key.data is stdout_chunks else "stderr"} {fileobj}', file=sys.stderr)
+                        # print(
+                            # f'[{os.getpid()}] select(): close {"stdout" if key.data is stdout_chunks else "stderr"} {fileobj}',
+                            # file=sys.stderr,
+                        # )
                 elif mask & selectors.EVENT_WRITE:
                     try:
                         written = os.write(fd, input_view[input_offset : input_offset + write_chunk])
