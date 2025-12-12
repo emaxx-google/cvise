@@ -75,6 +75,10 @@ def init(mode: Mode, sigint: bool = True, sigchld: bool = True) -> None:
         signal.signal(signal.SIGCHLD, _on_signal)
 
 
+def update_sigchld(sigchld: bool) -> None:
+    signal.signal(signal.SIGCHLD, _on_signal if sigchld else signal.SIG_IGN)
+
+
 def maybe_retrigger_action() -> None:
     # If multiple signals occurred, prefer SIGTERM.
     if _sigterm_observed:

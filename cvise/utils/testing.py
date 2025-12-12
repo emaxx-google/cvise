@@ -660,6 +660,8 @@ class TestManager:
         else:
             raise InsaneTestCaseError(self.test_cases, self.test_script)
 
+        sigmonitor.update_sigchld(False)
+
     @classmethod
     def log_key_event(cls, event):
         logging.info(f'****** {event} ******')
