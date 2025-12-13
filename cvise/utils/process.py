@@ -165,7 +165,7 @@ class ProcessEventNotifier:
                     exited = proc.poll() is not None
                     # print(f'[{os.getpid()}] select(): {"" if exited else "NOT YET "}exited', file=sys.stderr)
                 elif mask & selectors.EVENT_READ:
-                    while True:
+                    for _ in range(2):
                         try:
                             chunk = os.read(fd, 32768)
                         except BlockingIOError:
@@ -185,7 +185,7 @@ class ProcessEventNotifier:
                         key.data.append(chunk)
                 elif mask & selectors.EVENT_WRITE:
                     try:
-                        while True:
+                        for _ in range(2):
                             try:
                                 written = os.write(fd, input_view[input_offset : input_offset + write_chunk])
                             except BlockingIOError:
