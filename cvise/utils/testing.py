@@ -885,7 +885,10 @@ class TestManager:
             sigmonitor.maybe_retrigger_action()
 
             # schedule new jobs, as long as there are free workers
-            while len(self.jobs) < self.parallel_tests + self.OVERCOMMIT_JOBS and self.maybe_schedule_job():
+            ready_hint_types = self.get_fully_initialized_hint_types()
+            while len(self.jobs) < self.parallel_tests + self.OVERCOMMIT_JOBS and self.maybe_schedule_job(
+                ready_hint_types
+            ):
                 pass
 
             # no more jobs could be scheduled at the moment - wait for some results
@@ -1115,10 +1118,9 @@ class TestManager:
             self.order - self.current_batch_start_order, self.parallel_tests, len(self.pass_contexts)
         )
 
-    def maybe_schedule_job(self) -> bool:
+    def maybe_schedule_job(self, ready_hint_types: set[bytes]) -> bool:
         # The order matters below - higher-priority job types come earlier:
         # 1. Initializing a pass regularly (at the beginning of the batch of jobs).
-        ready_hint_types = self.get_fully_initialized_hint_types()
         for pass_id, ctx in enumerate(self.pass_contexts):
             if ctx.can_init_now(ready_hint_types):
                 self.schedule_init(pass_id, ready_hint_types)
