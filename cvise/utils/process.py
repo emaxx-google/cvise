@@ -115,7 +115,6 @@ class ProcessEventNotifier:
 
         if proc.stdin:
             if input_view:
-                os.set_blocking(proc.stdin.fileno(), False)
                 selector.register(proc.stdin, selectors.EVENT_WRITE)
                 # print(f'[{os.getpid()}] listen stdin', file=sys.stderr)
             else:
@@ -124,11 +123,9 @@ class ProcessEventNotifier:
             assert not input_view
 
         if proc.stdout:
-            os.set_blocking(proc.stdout.fileno(), False)
             selector.register(proc.stdout, selectors.EVENT_READ, data=stdout_chunks)
             # print(f'[{os.getpid()}] listen stdout {proc.stdout}', file=sys.stderr)
         if proc.stderr:
-            os.set_blocking(proc.stderr.fileno(), False)
             selector.register(proc.stderr, selectors.EVENT_READ, data=stderr_chunks)
             # print(f'[{os.getpid()}] listen stderr {proc.stderr}', file=sys.stderr)
 
@@ -165,38 +162,28 @@ class ProcessEventNotifier:
                     exited = proc.poll() is not None
                     # print(f'[{os.getpid()}] select(): {"" if exited else "NOT YET "}exited', file=sys.stderr)
                 elif mask & selectors.EVENT_READ:
-                    while True:
-                        try:
-                            chunk = os.read(fd, 32768)
-                        except BlockingIOError:
-                            break
-                        if not chunk:
-                            selector.unregister(fileobj)
-                            fileobj.close()
-                            # print(
-                            # f'[{os.getpid()}] select(): close {"stdout" if key.data is stdout_chunks else "stderr"} {fileobj}',
-                            # file=sys.stderr,
-                            # )
-                            break
+                    chunk = os.read(fd, 32768)
+                    # print(
+                    # f'[{os.getpid()}] select(): read {"stdout" if key.data is stdout_chunks else "stderr"} {fileobj} len={len(chunk)}',
+                    # file=sys.stderr,
+                    # )
+                    key.data.append(chunk)
+                    if not chunk:
+                        selector.unregister(fileobj)
+                        fileobj.close()
                         # print(
-                        # f'[{os.getpid()}] select(): read {"stdout" if key.data is stdout_chunks else "stderr"} {fileobj} len={len(chunk)}',
+                        # f'[{os.getpid()}] select(): close {"stdout" if key.data is stdout_chunks else "stderr"} {fileobj}',
                         # file=sys.stderr,
                         # )
-                        key.data.append(chunk)
                 elif mask & selectors.EVENT_WRITE:
                     try:
-                        while True:
-                            try:
-                                written = os.write(fd, input_view[input_offset : input_offset + write_chunk])
-                            except BlockingIOError:
-                                break
-                            # print(f'[{os.getpid()}] select(): wrote len={written}', file=sys.stderr)
-                            input_offset += written
-                            if input_offset >= len(input_view):
-                                selector.unregister(fileobj)
-                                fileobj.close()
-                                break
-                                # print(f'[{os.getpid()}] select(): close stdin', file=sys.stderr)
+                        written = os.write(fd, input_view[input_offset : input_offset + write_chunk])
+                        # print(f'[{os.getpid()}] select(): wrote len={written}', file=sys.stderr)
+                        input_offset += written
+                        if input_offset >= len(input_view):
+                            selector.unregister(fileobj)
+                            fileobj.close()
+                            # print(f'[{os.getpid()}] select(): close stdin', file=sys.stderr)
                     except OSError:
                         selector.unregister(fileobj)
                         fileobj.close()
