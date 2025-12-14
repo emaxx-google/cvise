@@ -135,7 +135,7 @@ def main():
     )
     parser.add_argument(
         '--action',
-        choices=['reduce', 'apply-hints'],
+        choices=['reduce', 'apply-hints', 'stress'],
         default='reduce',
         help='Action to perform ("reduce" by default)',
     )
@@ -358,6 +358,8 @@ def main():
         root_logger.addHandler(syslog)
 
     match args.action:
+        case 'stress':
+            do_stress(args)
         case 'reduce':
             do_reduce(args)
         case 'apply-hints':
@@ -560,6 +562,45 @@ def do_apply_hints(args):
         tmp_file.close()
         apply_hints([bundle], source_path=Path(args.test_cases[0]), destination_path=tmp_path)
         sys.stdout.buffer.write(tmp_path.read_bytes())
+
+
+def do_stress(args):
+    N = 10000
+    REP = 100
+    from cvise.utils import processpool
+    from cvise.passes import hint_based, blank
+    from concurrent.futures import wait
+    durs = []
+    p = blank.BlankPass()
+    for _ in range(REP):
+        arg = hint_based.HintState.create(tmp_dir=Path('kjfajshfsakjhfakjfhdskjhkjfhadf'), per_type_states=[
+            hint_based.PerTypeHintState(type=b'foo' + str(i).encode(),
+                                        hints_file_name=Path('akjfdkjfhdakjfhfjhfjhfdjkhfajkhjsadhafkjh'),
+                                        underlying_state=hint_based.BinaryState.create(100))
+            for i in range(10)
+        ], special_hints=[])
+        start = time.monotonic()
+        futures = []
+        with processpool.ProcessPool(max_active_workers=args.n) as pool:
+            for _ in range(N):
+                futures.append(pool.schedule(_stress, args=(arg, p.transform), timeout=100))
+                if len(futures) > args.n:
+                    done, futures = wait(futures, return_when='FIRST_COMPLETED')
+                    for f in done:
+                        assert not f.exception()
+                    futures = list(futures)
+            wait(futures)
+        dur = (time.monotonic() - start) / N
+        durs.append(dur)
+        print(f'{dur*1000:.2f}ms min={min(durs)*1000:.2f}ms')
+        time.sleep(1)
+    print(f'min={min(durs)*1000:.2f}ms')
+
+
+from cvise.utils import process
+
+def _stress(*args):
+    return process.ProcessEventNotifier().check_output('ls ~', shell=True)
 
 
 if __name__ == '__main__':
