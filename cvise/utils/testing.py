@@ -5,6 +5,7 @@ import contextlib
 import filecmp
 import logging
 import math
+import multiprocessing
 import os
 import platform
 import queue
@@ -1329,3 +1330,89 @@ def override_tmpdir_env(old_env: Mapping[str, str], tmp_override: Path) -> Mappi
     for var in ('TMPDIR', 'TEMP', 'TMP'):
         new_env[var] = str(tmp_override)
     return new_env
+
+
+def do_stress(args):
+    N = 30000
+    REP = args.max_improvement
+    CANCEL_EVERY = N / 10
+    from cvise.utils import processpool, sigmonitor
+    from cvise.passes import hint_based, blank
+    from concurrent.futures import wait
+    import random
+
+    multiprocessing.set_start_method('forkserver')
+    multiprocessing.set_forkserver_preload(['__main__'] + list(sys.modules.keys()))
+    multiprocessing.forkserver.ensure_running()
+
+    sigmonitor.init(sigmonitor.Mode.QUICK_EXIT, sigchld=False)
+    durs = []
+    p = blank.BlankPass()
+    for _ in range(REP):
+        arg_arr = [
+            hint_based.HintState.create(
+                tmp_dir=Path('kjfajshfsakjhfakjfhdskjhkjfhadf'),
+                per_type_states=[
+                    hint_based.PerTypeHintState(
+                        type=b'foo' + str(i).encode(),
+                        hints_file_name=Path('akjfdkjfhdakjfhfjhfjhfdjkhfajkhjsadhafkjh'),
+                        underlying_state=hint_based.BinaryState.create(100),
+                    )
+                    for i in range(j + 1)
+                ],
+                special_hints=[],
+            )
+            for j in range(9)
+        ]
+        start = time.monotonic()
+        futures = []
+        with processpool.ProcessPool(max_active_workers=args.n) as pool:
+            for i in range(N):
+                arg = TestEnvironment(
+                    state=random.choice(arg_arr),
+                    order=123,
+                    test_script=Path('fjdsfkjsfkfssfdsfdfdsjdhfd'),
+                    folder=Path('fkljfdfsffsfsfdsfdfsd'),
+                    test_case=Path('jfsfhskjffsfdsfshsfkjhsjf'),
+                    all_test_cases={Path('jfsfhskjffsfdsfshsfkjhsjf')},
+                    should_copy_test_cases=False,
+                    transform=p.transform,
+                )
+                futures.append(pool.schedule(_stress, args=(arg,), timeout=100))
+                if i % CANCEL_EVERY == 0:
+                    for f in futures:
+                        f.cancel()
+                    futures.clear()
+                elif len(futures) > args.n:
+                    done, futures = wait(futures, return_when='FIRST_COMPLETED')
+                    for f in done:
+                        assert not f.exception(), f'{f.exception()} {type(f.exception())}'
+                    futures = list(futures)
+            wait(futures)
+        dur = (time.monotonic() - start) / N
+        durs.append(dur)
+        print(f'{dur * 1000:.4f}ms min={min(durs) * 1000:.4f}ms')
+        time.sleep(args.timeout)
+    print(f'min={min(durs) * 1000:.4f}ms')
+
+
+from cvise.utils import process
+
+
+def _stress(a: TestEnvironment):
+    # for _ in range(len(a.state.per_type_states)):
+    #     try:
+    #         sigmonitor.get_future().result(timeout=0.001)
+    #     except TimeoutError:
+    #         pass
+        # process.ProcessEventNotifier().check_output('ls ~', shell=True)
+    return TestResult(
+        test_script=Path('dadsdadsadaaljafdjfasf'),
+        folder=Path('fdakjlkfdjfsakjafkdjsfkjfdsfdsfsdfds'),
+        all_test_cases={Path('kljsfsjflksajfalkfjdalkfjafdlkjafdkaf')},
+        test_case=Path('kljsfsjflksajfalkfjdalkfjafdlkjafdkaf'),
+        pass_result=PassResult.OK,
+        updated_state=a.state,
+        test_exitcode=0,
+        size_improvement=0,
+    )

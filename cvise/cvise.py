@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import threading
 from dataclasses import dataclass
 from itertools import chain
 
@@ -33,6 +34,22 @@ from cvise.passes.treesitter import TreeSitterPass
 from cvise.passes.unifdef import UnIfDefPass
 from cvise.utils import sigmonitor
 from cvise.utils.error import CViseError, PassOptionError
+
+
+def custom_thread_hook(args):
+    """
+    args is a named tuple containing:
+    - exc_type: Exception type
+    - exc_value: Exception value
+    - exc_traceback: Traceback object
+    - thread: The thread where the exception occurred
+    """
+    logging.error(
+        f"Caught exception in thread: {args.thread.name}",
+        exc_info=(args.exc_type, args.exc_value, args.exc_traceback)
+    )
+
+threading.excepthook = custom_thread_hook
 
 
 class CVise:

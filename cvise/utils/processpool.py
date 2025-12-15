@@ -328,7 +328,9 @@ class _PoolRunner:
         return bool(events)
 
     def _start_worker(self) -> None:
-        parent_conn, child_conn = multiprocessing.Pipe()  # TODO: check if duplex=False or direct os.pipe() would be better
+        parent_conn, child_conn = (
+            multiprocessing.Pipe()
+        )  # TODO: check if duplex=False or direct os.pipe() would be better
         proc = multiprocessing.Process(
             target=_worker_process_main,
             args=(logging.getLogger().getEffectiveLevel(), child_conn),
