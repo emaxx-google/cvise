@@ -45,9 +45,9 @@ def custom_thread_hook(args):
     - thread: The thread where the exception occurred
     """
     logging.error(
-        f"Caught exception in thread: {args.thread.name}",
-        exc_info=(args.exc_type, args.exc_value, args.exc_traceback)
+        f'Caught exception in thread: {args.thread.name}', exc_info=(args.exc_type, args.exc_value, args.exc_traceback)
     )
+
 
 threading.excepthook = custom_thread_hook
 

@@ -1,12 +1,14 @@
 """Collects logs from multiprocessing workers and filters out canceled workers."""
 
 import copy
+import io
 import logging
 import multiprocessing
 import multiprocessing.connection
+import multiprocessing.reduction
+import socket
+import struct
 from typing import Any
-
-from cvise.utils import sigmonitor
 
 
 def init_in_worker(logging_level: int, server_conn: multiprocessing.connection.Connection) -> None:
@@ -37,8 +39,16 @@ class _MPConnSendingHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         prepared = self._prepare_record(record)
-        with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND):
-            self._server_conn.send(prepared)
+        buf = io.BytesIO()
+        buf.write(b'\0\0\0\0')
+        multiprocessing.reduction.ForkingPickler(buf).dump(prepared)
+        view = buf.getbuffer()
+        struct.Struct('i').pack_into(view, 0, len(view) - 4)
+        sock = socket.socket(fileno=self._server_conn.fileno(), family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+        while view:
+            nbytes = sock.send(view)
+            view = view[nbytes:]
+        sock.detach()
 
     def _prepare_record(self, record: logging.LogRecord) -> logging.LogRecord:
         """Formats the message, removes unpickleable fields and those not necessary for formatting."""

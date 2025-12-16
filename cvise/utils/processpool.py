@@ -3,13 +3,16 @@ from __future__ import annotations
 import concurrent.futures
 import contextlib
 import heapq
+import io
 import logging
 import multiprocessing
 import multiprocessing.connection
 import multiprocessing.reduction
 import os
+import pickle
 import selectors
 import socket
+import struct
 import sys
 import threading
 import time
@@ -89,7 +92,7 @@ class _Task:
 
 @dataclass(slots=True)
 class _PickledTask:
-    data: memoryview
+    packet: bytes
     future: Future
     timeout: float
 
@@ -196,6 +199,7 @@ class _Worker:
     pid: int
     process: multiprocessing.Process | None
     connection: multiprocessing.connection.Connection | None
+    sock: socket.socket | None
     active_task_future: Future | None
     stopping: bool = False
 
@@ -208,6 +212,7 @@ class _PoolRunner:
         '_free_worker_pids',
         '_max_active_workers',
         '_pickled_task_queue',
+        '_read_buf',
         '_shared_state',
         '_stopping_workers',
         '_timeouts_heap',
@@ -224,12 +229,14 @@ class _PoolRunner:
         self._timeouts_heap: list[_TimeoutsHeapNode] = []
         self._event_selector = selectors.DefaultSelector()
         self._event_selector.register(self._shared_state.event_read_socket, selectors.EVENT_READ)
+        self._read_buf = bytearray(1000000)
 
     def run(self) -> None:
         while self._do_step():
             pass
 
     def _do_step(self) -> bool:
+        # print(f'step', file=sys.stderr)
         assert len(self._free_worker_pids) <= len(self._workers)
         assert 0 <= len(self._workers) - self._stopping_workers <= self._max_active_workers
         assert 0 <= len(self._workers) - len(self._free_worker_pids) <= self._max_active_workers
@@ -296,6 +303,7 @@ class _PoolRunner:
                         worker.connection.recv_bytes()
                     except (EOFError, OSError):
                         break
+                worker.sock.detach()
                 worker.connection.close()
             if worker.active_task_future:
                 worker.active_task_future.cancel()
@@ -328,9 +336,7 @@ class _PoolRunner:
         return bool(events)
 
     def _start_worker(self) -> None:
-        parent_conn, child_conn = (
-            multiprocessing.Pipe()
-        )  # TODO: check if duplex=False or direct os.pipe() would be better
+        parent_conn, child_conn = multiprocessing.Pipe()
         proc = multiprocessing.Process(
             target=_worker_process_main,
             args=(logging.getLogger().getEffectiveLevel(), child_conn),
@@ -339,22 +345,40 @@ class _PoolRunner:
         child_conn.close()
         assert proc.pid is not None
         assert proc.pid not in self._workers
-        self._workers[proc.pid] = _Worker(pid=proc.pid, process=proc, connection=parent_conn, active_task_future=None)
+        sock = socket.socket(fileno=parent_conn.fileno(), family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+        self._workers[proc.pid] = _Worker(
+            pid=proc.pid, process=proc, connection=parent_conn, sock=sock, active_task_future=None
+        )
         self._event_selector.register(parent_conn, selectors.EVENT_READ, data=proc.pid)
         self._free_worker_pids.append(proc.pid)
 
     def _on_worker_conn_ready(self, worker: _Worker) -> None:
         assert worker.connection is not None
+        # print(f'reading from pid={worker.pid}', file=sys.stderr)
         try:
-            raw_message = worker.connection.recv_bytes()
-        except (EOFError, OSError):
+            nbytes = worker.sock.recv_into(self._read_buf)
+        except OSError:
             self._handle_worker_conn_eof(worker)
-        else:
-            if self._handle_message_from_worker(worker, raw_message):
+            return
+        # print(f'read from pid={worker.pid} len={nbytes}', file=sys.stderr)
+        view = memoryview(self._read_buf[:nbytes])
+        if not view:
+            self._handle_worker_conn_eof(worker)
+            return
+        handled_task_completion = False
+        while view:
+            assert len(view) >= 4
+            sz: int = view[:4].cast('i')[0]
+            assert sz >= 0, f'buf={bytes(view[:4])} sz={sz}'
+            raw_message = view[4 : 4 + sz]
+            # print(f'handling msg from pid={worker.pid} len={sz}', file=sys.stderr)
+            if self._handle_message_from_worker(worker, raw_message) and not handled_task_completion:
+                handled_task_completion = True
                 # If the worker has gotten free, try sending it a task immediately - if we have one without the need in
                 # taking a mutex. We could've just let the event loop do it, but the latency is lower this way.
                 if not self._maybe_send_pickled_task(worker):
                     self._free_worker_pids.append(worker.pid)
+            view = view[4 + sz :]
 
     def _send_tasks_to_free_workers(self, tasks: deque[_Task | _PickledTask]) -> None:
         while tasks and self._free_worker_pids:
@@ -364,20 +388,22 @@ class _PoolRunner:
 
     def _send_task(self, task: _Task | _PickledTask, worker: _Worker) -> None:
         assert worker.process is not None
-        assert worker.process.pid is not None
-        task.future.add_done_callback(lambda future: self._on_future_resolved(worker.process.pid, future))
+        task.future.add_done_callback(lambda future: self._on_future_resolved(worker.pid, future))
         assert worker.connection is not None
         match task:
             case _Task():
-                # TODO: try packing via zstd
-                data = multiprocessing.reduction.ForkingPickler.dumps((task.f, task.args))
+                packet = _create_packet((task.f, task.args))
             case _PickledTask():
-                data = task.data
-        worker.connection.send_bytes(data)
+                packet = memoryview(task.packet)
+        # print(f'sending task to pid={worker.pid} len={len(packet)}', file=sys.stderr)
+        while packet:
+            nbytes = worker.sock.send(packet)
+            packet = packet[nbytes:]
         assert worker.active_task_future is None
         worker.active_task_future = task.future
         timeout_when = time.monotonic() + task.timeout
         heapq.heappush(self._timeouts_heap, _TimeoutsHeapNode(when=timeout_when, task_future=task.future))
+        # print(f'sent task to pid={worker.pid}', file=sys.stderr)
 
     def _maybe_send_pickled_task(self, worker: _Worker) -> bool:
         if not self._pickled_task_queue:
@@ -395,14 +421,13 @@ class _PoolRunner:
         if worker.active_task_future != task_future:
             return  # a new task started already
         assert worker.process is not None
-        assert worker.process.pid is not None
         worker.stopping = True
         worker.active_task_future = None
         worker.process.terminate()
         self._stopping_workers += 1
         assert worker.connection is not None
         # observe when the process will become join'able
-        self._event_selector.register(worker.process.sentinel, selectors.EVENT_READ, data=worker.process.pid)
+        self._event_selector.register(worker.process.sentinel, selectors.EVENT_READ, data=worker.pid)
 
     def _take_pickled_tasks(self, max_tasks: int) -> deque[_PickledTask]:
         taken = deque()
@@ -412,12 +437,12 @@ class _PoolRunner:
                 taken.append(task)
         return taken
 
-    def _handle_message_from_worker(self, worker: _Worker, raw_message: bytes) -> bool:
+    def _handle_message_from_worker(self, worker: _Worker, raw_message: memoryview) -> bool:
         if worker.stopping:
             return False  # worker shutdown produces spurious errors; we simply wait till EOF
         if worker.active_task_future is not None and worker.active_task_future.done():
             return False  # similar to above, but the future cancellation didn't propagate as the worker shutdown yet
-        message = multiprocessing.reduction.ForkingPickler.loads(raw_message)
+        message = pickle.loads(raw_message)
         if mplogging.maybe_handle_message_from_worker(message):
             return False
         return self._handle_task_result(worker, message)
@@ -434,8 +459,8 @@ class _PoolRunner:
 
     def _pickle_one_task(self) -> bool:
         task, has_more_tasks = self._shared_state.take_one_task()
-        data = multiprocessing.reduction.ForkingPickler.dumps((task.f, task.args))
-        self._pickled_task_queue.append(_PickledTask(data=data, future=task.future, timeout=task.timeout))
+        packet = bytes(_create_packet((task.f, task.args)))
+        self._pickled_task_queue.append(_PickledTask(packet=packet, future=task.future, timeout=task.timeout))
         return has_more_tasks
 
     def _mark_timed_out_tasks(self) -> None:
@@ -456,6 +481,7 @@ class _PoolRunner:
         assert worker.process is not None
         self._event_selector.unregister(worker.process.sentinel)
         worker.process.join()
+        # print(f'joined pid={worker.pid}', file=sys.stderr)
         worker.process = None
         if worker.connection is None:
             self._workers.pop(worker.pid)
@@ -469,9 +495,11 @@ class _PoolRunner:
                 _assign_future_exception(worker.active_task_future, ProcessPoolError(f'Worker {worker.pid} died'))
             worker.active_task_future = None
         self._event_selector.unregister(worker.connection)
+        worker.sock.detach()
+        worker.sock = None
         worker.connection.close()
         worker.connection = None
-        # print(f'closing conn to worker={pid}', file=sys.stderr)
+        # print(f'closed conn to worker={worker.pid}', file=sys.stderr)
         if worker.process is None:
             self._workers.pop(worker.pid)
             self._stopping_workers -= 1
@@ -479,34 +507,82 @@ class _PoolRunner:
 
 def _worker_process_main(logging_level: int, server_conn: multiprocessing.connection.Connection) -> None:
     # print(f'worker[{os.getpid()}]: started', file=sys.stderr)
-    sigmonitor.init(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND, sigint=False, sigchld=True)
+    sigmonitor.init(sigmonitor.Mode.QUICK_EXIT, sigint=False, sigchld=True)
     mplogging.init_in_worker(logging_level=logging_level, server_conn=server_conn)
     wakeup_fd = sigmonitor.get_wakeup_fd()
-    with selectors.DefaultSelector() as event_selector:
-        event_selector.register(server_conn, selectors.EVENT_READ)
-        event_selector.register(wakeup_fd, selectors.EVENT_READ)
-        # Handle incoming tasks in an infinite loop (until stopped by a signal).
-        while True:
-            events = event_selector.select()
-            can_recv = False
-            for selector_key, _event_mask in events:
-                if selector_key.fileobj == wakeup_fd:
-                    try:
-                        os.read(wakeup_fd, 1024)
-                    except OSError:
-                        pass
-                    sigmonitor.maybe_retrigger_action()
-                else:
-                    can_recv = True
-            if can_recv:
-                f, args = server_conn.recv()
-                try:
-                    result = f(*args)
-                except Exception as e:
-                    result = e
-                sigmonitor.maybe_retrigger_action()
-                pickled = multiprocessing.reduction.ForkingPickler.dumps(result)
-                server_conn.send_bytes(pickled)
+    read_buf = bytearray(1000000)
+    sock = socket.socket(fileno=server_conn.fileno(), family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+    with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND):
+        try:
+            with selectors.DefaultSelector() as event_selector:
+                event_selector.register(server_conn, selectors.EVENT_READ)
+                event_selector.register(wakeup_fd, selectors.EVENT_READ)
+                # Handle incoming tasks in an infinite loop (until stopped by a signal).
+                while True:
+                    events = event_selector.select()
+                    can_recv = False
+                    for selector_key, _event_mask in events:
+                        if selector_key.fileobj == wakeup_fd:
+                            try:
+                                os.read(wakeup_fd, 1024)
+                            except OSError:
+                                pass
+                            sigmonitor.maybe_retrigger_action()
+                        else:
+                            can_recv = True
+                    if can_recv:
+                        try:
+                            nbytes = sock.recv_into(read_buf)
+                        except OSError:
+                            break
+                        view = memoryview(read_buf[:nbytes])
+                        if not view:
+                            break
+                        sz: int = view[:4].cast('i')[0]
+                        # print(f'worker[{os.getpid()}]: received sz={sz}', file=sys.stderr)
+                        raw_message = view[4 : 4 + sz]
+                        assert sz == len(view) - 4, f'sz={sz} len={len(view)} pid={os.getpid()}'
+                        f, args = pickle.loads(raw_message)
+                        # print(f'worker[{os.getpid()}]: task begin', file=sys.stderr)
+                        try:
+                            result = f(*args)
+                        except Exception as e:
+                            result = e
+                        # print(f'worker[{os.getpid()}]: task end', file=sys.stderr)
+                        sigmonitor.maybe_retrigger_action()
+                        # print(f'worker[{os.getpid()}]: task reply begin', file=sys.stderr)
+                        packet = _create_packet(result)
+                        while packet:
+                            nbytes = sock.send(packet)
+                            packet = packet[nbytes:]
+                        packet.release()
+                        # print(f'worker[{os.getpid()}]: task reply end', file=sys.stderr)
+        finally:
+            # print(f'worker[{os.getpid()}]: dying', file=sys.stderr)
+            sock.detach()
+            server_conn.close()
+
+
+_pickler_bytes_io: io.BytesIO | None = None
+_pickler: multiprocessing.reduction.ForkingPickler | None = None
+_packer = struct.Struct('i')
+
+
+def _create_packet(value: Any) -> memoryview:
+    global _pickler
+    global _pickler_bytes_io
+    if _pickler is None:
+        _pickler_bytes_io = io.BytesIO()
+        _pickler = multiprocessing.reduction.ForkingPickler(_pickler_bytes_io)
+    else:
+        _pickler_bytes_io.seek(0)
+        _pickler_bytes_io.truncate(0)
+        _pickler.clear_memo()
+    _pickler_bytes_io.write(b'\0\0\0\0')  # length
+    _pickler.dump(value)
+    view = _pickler_bytes_io.getbuffer()
+    _packer.pack_into(view, 0, len(view) - 4)
+    return view
 
 
 def _future_aborted(future: Future) -> bool:
