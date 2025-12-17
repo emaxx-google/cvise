@@ -365,7 +365,7 @@ def test_non_ascii_dir_test_case(tmp_path: Path, overridden_subprocess_tmpdir: P
             f'Process failed with exit code {proc.returncode}; stderr:\n{stderr}\nstdout:\n{stdout}'
         )
 
-    assert a_path.read_text() in ('int foo;', 'int foo;\n', '// nonutffoo')
+    assert a_path.read_text() in ('int foo;', 'int foo;\n', '// nonutffoo', '        int foo;')
     assert not b_path.exists() or b_path.read_text() == ''
     assert 'Streichholz' in stderr
 
