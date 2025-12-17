@@ -52,7 +52,7 @@ class ProcessPool:
             scheduled_aborts=[],
         )
         self._pool_runner = _PoolRunner(max_active_workers, self._shared_state)
-        self._pool_runner_thread = threading.Thread(target=self._pool_thread_main)
+        self._pool_runner_thread = threading.Thread(target=self._pool_thread_main, name='PoolThread')
 
     def __enter__(self):
         self._pool_runner_thread.start()
@@ -239,14 +239,19 @@ class _PoolRunner:
         # print(f'step', file=sys.stderr)
         assert len(self._free_worker_pids) <= len(self._workers)
         assert 0 <= len(self._workers) - self._stopping_workers <= self._max_active_workers
-        assert 0 <= len(self._workers) - len(self._free_worker_pids) <= self._max_active_workers
-        assert sum(1 for w in self._workers.values() if w.active_task_future is not None) <= self._max_active_workers
+        assert 0 <= len(self._workers) - len(self._free_worker_pids) <= self._max_active_workers, (
+            f'workers={len(self._workers)} free={len(self._free_worker_pids)} max={self._max_active_workers}'
+        )
+        # assert sum(1 for w in self._workers.values() if w.active_task_future is not None) <= self._max_active_workers
 
         # 1. If there are timed-out tasks, resolve their futures and schedule worker aborts.
         self._mark_timed_out_tasks()
 
         # 2. Load work to be done (tasks, aborts, shutdown flag, etc.) from the state shared across threads.
-        max_new_tasks = self._max_active_workers - len(self._workers) + len(self._free_worker_pids)
+        can_send_to_new_worker = len(self._workers) < self._max_active_workers
+        max_new_tasks = min(
+            len(self._free_worker_pids), self._max_active_workers - len(self._workers) + len(self._free_worker_pids)
+        ) + (1 if can_send_to_new_worker else 0)
         assert 0 <= max_new_tasks <= self._max_active_workers
         tasks_to_send: deque[_Task | _PickledTask] = self._take_pickled_tasks(max_tasks=max_new_tasks)
         batch = self._shared_state.take_work_batch(max_tasks=max_new_tasks - len(tasks_to_send))
@@ -255,30 +260,36 @@ class _PoolRunner:
         tasks_to_send.extend(batch.tasks)
         assert len(tasks_to_send) <= max_new_tasks
 
-        # 3. Initiate stopping of workers for canceled/timed-out tasks. Note we'll spawn new workers below immediately,
-        # however for the purpose of starting new tasks we'll treat the "in the process of stopping" workers as busy -
-        # to avoid exceeding the concurrency limit even in this transition period.
+        # 3. Initiate stopping of workers for canceled/timed-out tasks.
         for abort in batch.aborts:
             self._trigger_worker_stop(abort.worker_pid, abort.task_future)
 
         # 4. Send new tasks to free workers.
         self._send_tasks_to_free_workers(tasks_to_send)
 
-        # 5. Start fresh workers (on pool startup or after aborts); if possible, immediately send them tasks.
-        workers_to_start = self._max_active_workers - len(self._workers) + self._stopping_workers
-        assert 0 <= workers_to_start <= self._max_active_workers
-        for _ in range(workers_to_start):
-            self._start_worker()
-        self._send_tasks_to_free_workers(tasks_to_send)
+        # 5. Start a new worker (in case of pool startup or after aborts); if possible, immediately send it a task.
+        if len(self._workers) - self._stopping_workers < self._max_active_workers:
+            worker = self._start_worker()
+            if tasks_to_send:
+                self._send_task(tasks_to_send.popleft(), worker)
+            else:
+                self._free_worker_pids.append(worker.pid)
         assert not tasks_to_send
 
         # 6. Wait for asynchronous events (messages from workers, process terminations, signals). When applicable, spend
-        # the waiting time on pickling previously scheduled tasks.
+        # the waiting time on pickling previously scheduled tasks or starting new workers.
         has_tasks_to_pickle = batch.has_more_tasks
-        while has_tasks_to_pickle:
+        while has_tasks_to_pickle or len(self._workers) - self._stopping_workers < self._max_active_workers:
             if self._pump_file_descriptors(wait=False):
                 break
-            has_tasks_to_pickle = self._pickle_one_task()
+            if len(self._workers) - self._stopping_workers < self._max_active_workers and (
+                self._pickled_task_queue or not has_tasks_to_pickle
+            ):
+                worker = self._start_worker()
+                if not self._maybe_send_pickled_task(worker):
+                    self._free_worker_pids.append(worker.pid)
+            elif has_tasks_to_pickle:
+                has_tasks_to_pickle = self._pickle_one_task()
         else:
             self._pump_file_descriptors(wait=True)
         return True
@@ -335,7 +346,7 @@ class _PoolRunner:
                 self._on_worker_proc_joinable(self._workers[pid])
         return bool(events)
 
-    def _start_worker(self) -> None:
+    def _start_worker(self) -> _Worker:
         parent_conn, child_conn = multiprocessing.Pipe()
         proc = multiprocessing.Process(
             target=_worker_process_main,
@@ -346,17 +357,16 @@ class _PoolRunner:
         assert proc.pid is not None
         assert proc.pid not in self._workers
         sock = socket.socket(fileno=parent_conn.fileno(), family=socket.AF_UNIX, type=socket.SOCK_STREAM)
-        self._workers[proc.pid] = _Worker(
-            pid=proc.pid, process=proc, connection=parent_conn, sock=sock, active_task_future=None
-        )
+        worker = _Worker(pid=proc.pid, process=proc, connection=parent_conn, sock=sock, active_task_future=None)
+        self._workers[proc.pid] = worker
         self._event_selector.register(parent_conn, selectors.EVENT_READ, data=proc.pid)
-        self._free_worker_pids.append(proc.pid)
+        return worker
 
     def _on_worker_conn_ready(self, worker: _Worker) -> None:
         assert worker.connection is not None
         # print(f'reading from pid={worker.pid}', file=sys.stderr)
         try:
-            nbytes = worker.sock.recv_into(self._read_buf)
+            nbytes = worker.sock.recv_into(self._read_buf)  # TODO: loop? or only read until gets blocked?
         except OSError:
             self._handle_worker_conn_eof(worker)
             return
@@ -429,7 +439,7 @@ class _PoolRunner:
         # observe when the process will become join'able
         self._event_selector.register(worker.process.sentinel, selectors.EVENT_READ, data=worker.pid)
 
-    def _take_pickled_tasks(self, max_tasks: int) -> deque[_PickledTask]:
+    def _take_pickled_tasks(self, max_tasks: int) -> deque[_PickledTask | _Task]:
         taken = deque()
         while len(taken) < max_tasks and self._pickled_task_queue:
             task = self._pickled_task_queue.popleft()
