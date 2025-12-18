@@ -348,6 +348,7 @@ class _PoolRunner:
 
     def _start_worker(self) -> _Worker:
         parent_conn, child_conn = multiprocessing.Pipe()
+        os.set_blocking(parent_conn.fileno(), False)
         proc = multiprocessing.Process(
             target=_worker_process_main,
             args=(logging.getLogger().getEffectiveLevel(), child_conn),
@@ -357,6 +358,8 @@ class _PoolRunner:
         assert proc.pid is not None
         assert proc.pid not in self._workers
         sock = socket.socket(fileno=parent_conn.fileno(), family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+        sock.setblocking(False)
+        sock.settimeout(0)
         worker = _Worker(pid=proc.pid, process=proc, connection=parent_conn, sock=sock, active_task_future=None)
         self._workers[proc.pid] = worker
         self._event_selector.register(parent_conn, selectors.EVENT_READ, data=proc.pid)
@@ -367,6 +370,8 @@ class _PoolRunner:
         # print(f'reading from pid={worker.pid}', file=sys.stderr)
         try:
             nbytes = worker.sock.recv_into(self._read_buf)  # TODO: loop? or only read until gets blocked?
+        except (BlockingIOError, TimeoutError):
+            raise
         except OSError:
             self._handle_worker_conn_eof(worker)
             return
@@ -535,23 +540,35 @@ def _worker_process_main(logging_level: int, server_conn: multiprocessing.connec
                         if selector_key.fileobj == wakeup_fd:
                             try:
                                 os.read(wakeup_fd, 1024)
+                            except (BlockingIOError, TimeoutError):
+                                raise
                             except OSError:
                                 pass
                             sigmonitor.maybe_retrigger_action()
                         else:
                             can_recv = True
                     if can_recv:
-                        try:
-                            nbytes = sock.recv_into(read_buf)
-                        except OSError:
-                            break
-                        view = memoryview(read_buf[:nbytes])
-                        if not view:
-                            break
-                        sz: int = view[:4].cast('i')[0]
+                        sz: int | None = None
+                        view = memoryview(read_buf)
+                        total = 0
+                        while True:
+                            try:
+                                nbytes = sock.recv_into(view[total:])
+                            except (BlockingIOError, TimeoutError):
+                                raise
+                            except OSError:
+                                return
+                            if not nbytes:
+                                return
+                            total += nbytes
+                            if sz is None:
+                                assert total >= 4
+                                sz: int = view[:4].cast('i')[0]
+                                if total >= 4 + sz:
+                                    break
+                        assert total == 4 + sz
                         # print(f'worker[{os.getpid()}]: received sz={sz}', file=sys.stderr)
                         raw_message = view[4 : 4 + sz]
-                        assert sz == len(view) - 4, f'sz={sz} len={len(view)} pid={os.getpid()}'
                         f, args = pickle.loads(raw_message)
                         # print(f'worker[{os.getpid()}]: task begin', file=sys.stderr)
                         try:
@@ -563,7 +580,12 @@ def _worker_process_main(logging_level: int, server_conn: multiprocessing.connec
                         # print(f'worker[{os.getpid()}]: task reply begin', file=sys.stderr)
                         packet = _create_packet(result)
                         while packet:
-                            nbytes = sock.send(packet)
+                            try:
+                                nbytes = sock.send(packet)
+                            except (BlockingIOError, TimeoutError):
+                                raise
+                            except OSError:
+                                break
                             packet = packet[nbytes:]
                         packet.release()
                         # print(f'worker[{os.getpid()}]: task reply end', file=sys.stderr)
