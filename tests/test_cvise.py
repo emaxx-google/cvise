@@ -109,7 +109,7 @@ def test_simple_reduction(tmp_path: Path, overridden_subprocess_tmpdir: Path):
     check_cvise(
         'blocksort-part.c',
         ['-c', r"gcc -c blocksort-part.c && grep '\<nextHi\>' blocksort-part.c"],
-        ['#define nextHi', '#define nextHi\n', '#undef nextHi', '#undef nextHi\n'],
+        ['#define nextHi', '#define nextHi\n', '#undef nextHi', '#undef nextHi\n', '#if 2\n#endif nextHi'],
         tmp_path,
         overridden_subprocess_tmpdir,
     )
@@ -277,7 +277,7 @@ def test_non_ascii_interestingness_test(tmp_path: Path, overridden_subprocess_tm
     check_cvise(
         'blocksort-part.c',
         ['-c', r"printf '\xc3\xa4\xff'; gcc -c blocksort-part.c && grep '\<nextHi\>' blocksort-part.c"],
-        ['#define nextHi', '#define nextHi\n', '#undef nextHi', '#undef nextHi\n'],
+        ['#define nextHi', '#define nextHi\n', '#undef nextHi', '#undef nextHi\n', '#if 2\n#endif nextHi'],
         tmp_path,
         overridden_subprocess_tmpdir,
     )
