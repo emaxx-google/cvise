@@ -1401,6 +1401,7 @@ from cvise.utils import process
 
 
 def _stress(a: TestEnvironment):
+    time.sleep(0.01)
     # for _ in range(len(a.state.per_type_states)):
     #     try:
     #         sigmonitor.get_future().result(timeout=0.001)
