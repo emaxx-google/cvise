@@ -890,7 +890,7 @@ class TestManager:
             while len(self.jobs) < self.parallel_tests + self.OVERCOMMIT_JOBS and self.maybe_schedule_job(
                 ready_hint_types
             ):
-                pass
+                sigmonitor.maybe_retrigger_action()
 
             # no more jobs could be scheduled at the moment - wait for some results
             wait([j.future for j in self.jobs] + [sigmonitor.get_future()], return_when=FIRST_COMPLETED)
