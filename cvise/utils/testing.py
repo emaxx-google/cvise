@@ -1336,6 +1336,7 @@ def do_stress(args):
     N = 30000
     REP = args.max_improvement
     CANCEL_EVERY = N / 10
+    OVERCOMMIT = 1
     from cvise.utils import processpool, sigmonitor
     from cvise.passes import hint_based, blank
     from concurrent.futures import wait
@@ -1379,11 +1380,11 @@ def do_stress(args):
                     transform=p.transform,
                 )
                 futures.append(pool.schedule(_stress, args=(arg,), timeout=100))
-                if i % CANCEL_EVERY == 0:
+                if i and i % CANCEL_EVERY == 0:
                     for f in futures:
                         f.cancel()
                     futures.clear()
-                elif len(futures) > args.n:
+                elif len(futures) >= args.n + OVERCOMMIT:
                     done, futures = wait(futures, return_when='FIRST_COMPLETED')
                     for f in done:
                         assert not f.exception(), f'{f.exception()} {type(f.exception())}'

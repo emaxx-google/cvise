@@ -423,8 +423,8 @@ class _PoolRunner:
     def _maybe_send_pickled_task(self, worker: _Worker) -> bool:
         if not self._pickled_task_queue:
             return False  # nothing to send
-        if len(self._workers) - len(self._free_worker_pids) >= self._max_active_workers:
-            return False  # would exceed allowed concurrency
+        if len(self._workers) - len(self._free_worker_pids) > self._max_active_workers:
+            return False  # would exceed allowed concurrency (equality is allowed because this specific worker hasn't been added to _free_worker_pids yet)
         task = self._pickled_task_queue.popleft()
         self._send_task(task, worker)
         return True
