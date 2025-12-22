@@ -1333,7 +1333,7 @@ def override_tmpdir_env(old_env: Mapping[str, str], tmp_override: Path) -> Mappi
 
 
 def do_stress(args):
-    profiling = os.environ.get("PROF")
+    profiling = os.environ.get('PROF')
     N = 3000 if profiling else 30000
     REP = 1 if profiling else args.max_improvement
     CANCEL_EVERY = N / 10

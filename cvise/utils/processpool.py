@@ -50,8 +50,10 @@ class ProcessPool:
             shutdown=False,
             task_queue=deque(),
             scheduled_aborts=[],
+            new_workers=[],
         )
-        self._pool_runner = _PoolRunner(max_active_workers, self._shared_state)
+        self._worker_creator = _WorkerCreator(self._shared_state)
+        self._pool_runner = _PoolRunner(max_active_workers, self._shared_state, worker_creator=self._worker_creator)
         self._pool_runner_thread = threading.Thread(target=self._pool_thread_main, name='PoolThread')
 
     def __enter__(self):
@@ -60,6 +62,7 @@ class ProcessPool:
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.stop()
+        self._worker_creator.join()
         self._pool_runner_thread.join(60)
         if self._pool_runner_thread.is_alive():
             logging.warning('Failed to stop process pool thread')
@@ -69,6 +72,7 @@ class ProcessPool:
     def stop(self) -> None:
         """Initiates cancellation of pending tasks and termination of already running ones."""
         self._shared_state.notify_shutdown()
+        self._worker_creator.notify_shutdown()
 
     def schedule(self, f: Callable, args: Sequence[Any], timeout: float) -> Future:
         future = Future()
@@ -116,24 +120,31 @@ class _SharedState:
     shutdown: bool
     task_queue: deque[_Task]
     scheduled_aborts: list[_ScheduledAbort]
+    new_workers: list[tuple[multiprocessing.Process, multiprocessing.connection.Connection]]
 
     def close(self) -> None:
         self.event_read_socket.close()
         self.event_write_socket.close()
 
-    def take_work_batch(self, max_tasks: int) -> _WorkBatch | None:
+    def take_work_batch(
+        self, workers: int, free_workers: int, max_active_workers: int, pickled_task_queue: deque[_PickledTask]
+    ) -> _WorkBatch | None:
         with self.lock:
             if self.shutdown:
                 return None
-            tasks = []
-            while self.task_queue and len(tasks) < max_tasks:
-                task = self.task_queue.popleft()
-                if not task.future.done():
-                    tasks.append(task)
+            max_tasks = min(free_workers + len(self.new_workers), max_active_workers - workers + free_workers)
+            tasks = deque()
+            for queue in (pickled_task_queue, self.task_queue):
+                while queue and len(tasks) < max_tasks:
+                    task = queue.popleft()
+                    if not task.future.done():
+                        tasks.append(task)
             has_more_tasks = bool(self.task_queue)
             aborts = self.scheduled_aborts
             self.scheduled_aborts = []
-        return _WorkBatch(tasks=tasks, aborts=aborts, has_more_tasks=has_more_tasks)
+            new_workers = self.new_workers
+            self.new_workers = []
+        return _WorkBatch(tasks=tasks, aborts=aborts, has_more_tasks=has_more_tasks, new_workers=new_workers)
 
     def take_one_task(self) -> tuple[_Task, bool]:
         with self.lock:
@@ -171,8 +182,17 @@ class _SharedState:
         if should_notify:
             self._notify()
 
+    def enqueue_new_worker(self, proc: multiprocessing.Process, conn: multiprocessing.connection.Connection) -> None:
+        with self.lock:
+            if self.shutdown:
+                return  # all pending & active tasks are canceled anyway during shutdown
+            self.new_workers.append((proc, conn))
+            should_notify = self._should_notify()
+        if should_notify:
+            self._notify()
+
     def _should_notify(self) -> bool:
-        return len(self.task_queue) + len(self.scheduled_aborts) == 1
+        return len(self.task_queue) + len(self.scheduled_aborts) + len(self.new_workers) == 1
 
     def _notify(self) -> None:
         self.event_write_socket.send(b'\0')
@@ -180,9 +200,10 @@ class _SharedState:
 
 @dataclass(slots=True)
 class _WorkBatch:
-    tasks: list[_Task]
+    tasks: deque[_Task | _PickledTask]
     aborts: list[_ScheduledAbort]
     has_more_tasks: bool
+    new_workers: list[tuple[multiprocessing.Process, multiprocessing.connection.Connection]]
 
 
 @dataclass(slots=True)
@@ -204,6 +225,52 @@ class _Worker:
     stopping: bool = False
 
 
+class _WorkerCreator:
+    def __init__(self, shared_state: _SharedState):
+        self._shared_state = shared_state
+        self._cond = threading.Condition()
+        self._scheduled_count = 0
+        self._shutdown = False
+        self._thread = threading.Thread(target=self._worker_creator_thread_main, name='WorkerCreator', daemon=True)
+        self._thread.start()
+
+    def schedule_creation(self):
+        with self._cond:
+            self._scheduled_count += 1
+            self._cond.notify()
+
+    def notify_shutdown(self):
+        with self._cond:
+            self._shutdown = True
+            self._cond.notify()
+
+    def join(self):
+        self._thread.join(60)
+        if self._thread.is_alive():
+            logging.warning('Failed to stop WorkerCreator thread')
+
+    def _worker_creator_thread_main(self):
+        while True:
+            with self._cond:
+                if self._shutdown:
+                    return
+                if not self._scheduled_count:
+                    self._cond.wait()
+                    continue
+                self._scheduled_count -= 1
+
+            parent_conn, child_conn = multiprocessing.Pipe()
+            os.set_blocking(parent_conn.fileno(), False)
+            proc = multiprocessing.Process(
+                target=_worker_process_main,
+                args=(logging.getLogger().getEffectiveLevel(), child_conn),
+            )
+            proc.start()
+            child_conn.close()
+            assert proc.pid is not None
+            self._shared_state.enqueue_new_worker(proc, parent_conn)
+
+
 class _PoolRunner:
     """Implements the process pool event loop; is expected to be used on a background thread."""
 
@@ -216,12 +283,14 @@ class _PoolRunner:
         '_shared_state',
         '_stopping_workers',
         '_timeouts_heap',
+        '_worker_creator',
         '_workers',
     )
 
-    def __init__(self, max_worker_count: int, shared_state: _SharedState):
+    def __init__(self, max_worker_count: int, shared_state: _SharedState, worker_creator: _WorkerCreator):
         self._max_active_workers = max_worker_count
         self._shared_state = shared_state
+        self._worker_creator = worker_creator
         self._workers: dict[int, _Worker] = {}
         self._pickled_task_queue: deque[_PickledTask] = deque()
         self._free_worker_pids: deque[int] = deque()
@@ -232,6 +301,8 @@ class _PoolRunner:
         self._read_buf = bytearray(1000000)
 
     def run(self) -> None:
+        for _ in range(self._max_active_workers):
+            self._worker_creator.schedule_creation()
         while self._do_step():
             pass
 
@@ -248,49 +319,43 @@ class _PoolRunner:
         self._mark_timed_out_tasks()
 
         # 2. Load work to be done (tasks, aborts, shutdown flag, etc.) from the state shared across threads.
-        can_send_to_new_worker = len(self._workers) < self._max_active_workers
-        max_new_tasks = min(
-            len(self._free_worker_pids), self._max_active_workers - len(self._workers) + len(self._free_worker_pids)
-        ) + (1 if can_send_to_new_worker else 0)
-        assert 0 <= max_new_tasks <= self._max_active_workers
-        tasks_to_send: deque[_Task | _PickledTask] = self._take_pickled_tasks(max_tasks=max_new_tasks)
-        batch = self._shared_state.take_work_batch(max_tasks=max_new_tasks - len(tasks_to_send))
+        batch = self._shared_state.take_work_batch(
+            workers=len(self._workers),
+            free_workers=len(self._free_worker_pids),
+            max_active_workers=self._max_active_workers,
+            pickled_task_queue=self._pickled_task_queue,
+        )
         if batch is None:
             return False  # shutdown
-        tasks_to_send.extend(batch.tasks)
-        assert len(tasks_to_send) <= max_new_tasks
 
         # 3. Initiate stopping of workers for canceled/timed-out tasks.
         for abort in batch.aborts:
             self._trigger_worker_stop(abort.worker_pid, abort.task_future)
+            self._worker_creator.schedule_creation()
 
-        # 4. Send new tasks to free workers.
-        self._send_tasks_to_free_workers(tasks_to_send)
+        # 4. Take new workers into account.
+        for proc, parent_conn in batch.new_workers:
+            assert proc.pid is not None
+            assert proc.pid not in self._workers
+            sock = socket.socket(fileno=parent_conn.fileno(), family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+            sock.setblocking(False)
+            sock.settimeout(0)
+            worker = _Worker(pid=proc.pid, process=proc, connection=parent_conn, sock=sock, active_task_future=None)
+            self._workers[proc.pid] = worker
+            self._event_selector.register(parent_conn, selectors.EVENT_READ, data=proc.pid)
+            self._free_worker_pids.append(proc.pid)
 
-        # 5. Start a new worker (in case of pool startup or after aborts); if possible, immediately send it a task.
-        if len(self._workers) - self._stopping_workers < self._max_active_workers:
-            worker = self._start_worker()
-            if tasks_to_send:
-                self._send_task(tasks_to_send.popleft(), worker)
-            else:
-                self._free_worker_pids.append(worker.pid)
-        assert not tasks_to_send
+        # 5. Send new tasks to free workers.
+        self._send_tasks_to_free_workers(batch.tasks)
 
         # 6. Wait for asynchronous events (messages from workers, process terminations, signals). When applicable, spend
         # the waiting time on pickling previously scheduled tasks or starting new workers.
         has_tasks_to_pickle = batch.has_more_tasks
-        while has_tasks_to_pickle or len(self._workers) - self._stopping_workers < self._max_active_workers:
+        while has_tasks_to_pickle:
             # print(f'_do_step: wait=false has_tasks_to_pickle={has_tasks_to_pickle} workers={len(self._workers)} working_workers={sum(1 for w in self._workers.values() if w.active_task_future)} stopping_workers={self._stopping_workers} free_worker_pids={len(self._free_worker_pids)} max_active_workers={self._max_active_workers} task_queue={len(self._shared_state.task_queue)} pickled_task_queue={len(self._pickled_task_queue)}', file=sys.stderr)
             if self._pump_file_descriptors(wait=False):
                 break
-            if len(self._workers) - self._stopping_workers < self._max_active_workers and (
-                self._pickled_task_queue or not has_tasks_to_pickle
-            ):
-                worker = self._start_worker()
-                if not self._maybe_send_pickled_task(worker):
-                    self._free_worker_pids.append(worker.pid)
-            elif has_tasks_to_pickle:
-                has_tasks_to_pickle = self._pickle_one_task()
+            has_tasks_to_pickle = self._pickle_one_task()
         else:
             # print(f'_do_step: wait=true has_tasks_to_pickle={has_tasks_to_pickle} workers={len(self._workers)} working_workers={sum(1 for w in self._workers.values() if w.active_task_future)} stopping_workers={self._stopping_workers} free_worker_pids={len(self._free_worker_pids)} max_active_workers={self._max_active_workers} task_queue={len(self._shared_state.task_queue)} pickled_task_queue={len(self._pickled_task_queue)}', file=sys.stderr)
             self._pump_file_descriptors(wait=True)
@@ -347,26 +412,6 @@ class _PoolRunner:
                 pid: int = selector_key.data
                 self._on_worker_proc_joinable(self._workers[pid])
         return bool(events)
-
-    def _start_worker(self) -> _Worker:
-        # print(f'start_worker', file=sys.stderr)
-        parent_conn, child_conn = multiprocessing.Pipe()
-        os.set_blocking(parent_conn.fileno(), False)
-        proc = multiprocessing.Process(
-            target=_worker_process_main,
-            args=(logging.getLogger().getEffectiveLevel(), child_conn),
-        )
-        proc.start()
-        child_conn.close()
-        assert proc.pid is not None
-        assert proc.pid not in self._workers
-        sock = socket.socket(fileno=parent_conn.fileno(), family=socket.AF_UNIX, type=socket.SOCK_STREAM)
-        sock.setblocking(False)
-        sock.settimeout(0)
-        worker = _Worker(pid=proc.pid, process=proc, connection=parent_conn, sock=sock, active_task_future=None)
-        self._workers[proc.pid] = worker
-        self._event_selector.register(parent_conn, selectors.EVENT_READ, data=proc.pid)
-        return worker
 
     def _on_worker_conn_ready(self, worker: _Worker) -> None:
         assert worker.connection is not None
