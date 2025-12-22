@@ -280,6 +280,7 @@ class _PoolRunner:
         # the waiting time on pickling previously scheduled tasks or starting new workers.
         has_tasks_to_pickle = batch.has_more_tasks
         while has_tasks_to_pickle or len(self._workers) - self._stopping_workers < self._max_active_workers:
+            # print(f'_do_step: wait=false has_tasks_to_pickle={has_tasks_to_pickle} workers={len(self._workers)} working_workers={sum(1 for w in self._workers.values() if w.active_task_future)} stopping_workers={self._stopping_workers} free_worker_pids={len(self._free_worker_pids)} max_active_workers={self._max_active_workers} task_queue={len(self._shared_state.task_queue)} pickled_task_queue={len(self._pickled_task_queue)}', file=sys.stderr)
             if self._pump_file_descriptors(wait=False):
                 break
             if len(self._workers) - self._stopping_workers < self._max_active_workers and (
@@ -291,6 +292,7 @@ class _PoolRunner:
             elif has_tasks_to_pickle:
                 has_tasks_to_pickle = self._pickle_one_task()
         else:
+            # print(f'_do_step: wait=true has_tasks_to_pickle={has_tasks_to_pickle} workers={len(self._workers)} working_workers={sum(1 for w in self._workers.values() if w.active_task_future)} stopping_workers={self._stopping_workers} free_worker_pids={len(self._free_worker_pids)} max_active_workers={self._max_active_workers} task_queue={len(self._shared_state.task_queue)} pickled_task_queue={len(self._pickled_task_queue)}', file=sys.stderr)
             self._pump_file_descriptors(wait=True)
         return True
 
@@ -347,6 +349,7 @@ class _PoolRunner:
         return bool(events)
 
     def _start_worker(self) -> _Worker:
+        # print(f'start_worker', file=sys.stderr)
         parent_conn, child_conn = multiprocessing.Pipe()
         os.set_blocking(parent_conn.fileno(), False)
         proc = multiprocessing.Process(
@@ -418,7 +421,7 @@ class _PoolRunner:
         worker.active_task_future = task.future
         timeout_when = time.monotonic() + task.timeout
         heapq.heappush(self._timeouts_heap, _TimeoutsHeapNode(when=timeout_when, task_future=task.future))
-        # print(f'sent task to pid={worker.pid}', file=sys.stderr)
+        # print(f'{"send_task" if isinstance(task, _Task) else "send_pickled_task"} task to pid={worker.pid}', file=sys.stderr)
 
     def _maybe_send_pickled_task(self, worker: _Worker) -> bool:
         if not self._pickled_task_queue:
@@ -473,6 +476,7 @@ class _PoolRunner:
         return True
 
     def _pickle_one_task(self) -> bool:
+        # print('pickle_one_task', file=sys.stderr)
         task, has_more_tasks = self._shared_state.take_one_task()
         packet = bytes(_create_packet((task.f, task.args)))
         self._pickled_task_queue.append(_PickledTask(packet=packet, future=task.future, timeout=task.timeout))
@@ -629,6 +633,7 @@ def _assign_future_result(future: Future, result: Any) -> None:
         return
     with contextlib.suppress(concurrent.futures.InvalidStateError):  # cover against concurrent changes
         future.set_result(result)
+        # print(f'set_result', file=sys.stderr)
 
 
 def _assign_future_exception(future: Future, exc: BaseException) -> None:
@@ -636,3 +641,4 @@ def _assign_future_exception(future: Future, exc: BaseException) -> None:
         return
     with contextlib.suppress(concurrent.futures.InvalidStateError):  # cover against concurrent changes
         future.set_exception(exc)
+        # print(f'set_exception', file=sys.stderr)

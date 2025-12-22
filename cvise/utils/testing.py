@@ -1380,13 +1380,16 @@ def do_stress(args):
                     should_copy_test_cases=False,
                     transform=p.transform,
                 )
+                # print(f'enqueue task', file=sys.stderr)
                 futures.append(pool.schedule(_stress, args=(arg,), timeout=100))
                 if i and i % CANCEL_EVERY == 0:
                     for f in futures:
                         f.cancel()
                     futures.clear()
                 elif len(futures) >= args.n + OVERCOMMIT:
+                    # print('wait begin', file=sys.stderr)
                     done, futures = wait(futures, return_when='FIRST_COMPLETED')
+                    # print('wait end', file=sys.stderr)
                     for f in done:
                         assert not f.exception(), f'{f.exception()} {type(f.exception())}'
                     futures = list(futures)
