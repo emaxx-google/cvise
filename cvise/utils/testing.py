@@ -1336,7 +1336,7 @@ def do_stress(args):
     profiling = os.environ.get('PROF')
     N = 3000 if profiling else 30000
     REP = 1 if profiling else args.max_improvement
-    CANCEL_EVERY = N / 10
+    CANCEL_EVERY = N / 3 if profiling else N / 10
     OVERCOMMIT = 1
     from cvise.utils import processpool, sigmonitor
     from cvise.passes import hint_based, blank
