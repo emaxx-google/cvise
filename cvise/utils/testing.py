@@ -1333,8 +1333,9 @@ def override_tmpdir_env(old_env: Mapping[str, str], tmp_override: Path) -> Mappi
 
 
 def do_stress(args):
-    N = 30000
-    REP = args.max_improvement
+    profiling = os.environ.get("PROF")
+    N = 3000 if profiling else 30000
+    REP = 1 if profiling else args.max_improvement
     CANCEL_EVERY = N / 10
     OVERCOMMIT = 1
     from cvise.utils import processpool, sigmonitor
