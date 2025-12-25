@@ -56,7 +56,8 @@ class IfPass(AbstractPass):
         return None
 
     def advance_on_success(self, test_case: Path, state, *args, **kwargs):
-        return state.advance_on_success(self.__count_instances(test_case))
+        new = state.advance_on_success(self.__count_instances(test_case))
+        return IfsState(value=0, **{s: getattr(new, s) for s in new.__struct_fields__})
 
     def transform(self, test_case: Path, state, process_event_notifier, *args, **kwargs):
         with tempfile.NamedTemporaryFile(mode='w+', delete=False, dir=test_case.parent) as tmp_file:

@@ -5,6 +5,7 @@ import contextlib
 import heapq
 import io
 import logging
+import msgspec
 import multiprocessing
 import multiprocessing.connection
 import multiprocessing.reduction
@@ -94,29 +95,25 @@ class ProcessPool:
         self._pool_runner.shut_down()
 
 
-@dataclass(slots=True)
-class _Task:
+class _Task(msgspec.Struct):
     f: Callable
     args: Sequence[Any]
     future: Future
     timeout: float
 
 
-@dataclass(slots=True)
-class _PickledTask:
+class _PickledTask(msgspec.Struct):
     packet: bytes
     future: Future
     timeout: float
 
 
-@dataclass(slots=True)
-class _ScheduledAbort:
+class _ScheduledAbort(msgspec.Struct):
     worker_pid: int
     task_future: Future
 
 
-@dataclass(slots=True)
-class _SharedState:
+class _SharedState(msgspec.Struct):
     """State shared between the pool runner thread and other threads.
 
     Most importantly, this is used to deliver newly scheduled tasks and task cancellations.
@@ -128,7 +125,9 @@ class _SharedState:
     shutdown: bool
     task_queue: deque[_Task]
     scheduled_aborts: list[_ScheduledAbort]
-    new_workers: list[tuple[multiprocessing.Process, multiprocessing.connection.Connection]]
+    new_workers: list[
+        tuple[multiprocessing.Process, multiprocessing.connection.Connection, multiprocessing.connection.Connection]
+    ]
     new_workers_event_read_socket: socket.socket
     new_workers_event_write_socket: socket.socket
 
@@ -137,32 +136,6 @@ class _SharedState:
         self.event_write_socket.close()
         self.new_workers_event_read_socket.close()
         self.new_workers_event_write_socket.close()
-
-    def take_work_batch(
-        self, workers: int, free_workers: int, max_active_workers: int, pickled_task_queue: deque[_PickledTask]
-    ) -> _WorkBatch | None:
-        with self.lock:
-            if self.shutdown:
-                return None
-            max_tasks = min(free_workers + len(self.new_workers), max_active_workers - workers + free_workers)
-            tasks = deque()
-            for queue in (pickled_task_queue, self.task_queue):
-                while queue and len(tasks) < max_tasks:
-                    task = queue.popleft()
-                    if not task.future.done():
-                        tasks.append(task)
-            has_more_tasks = bool(self.task_queue)
-            aborts = self.scheduled_aborts
-            self.scheduled_aborts = []
-            new_workers = self.new_workers
-            self.new_workers = []
-        return _WorkBatch(tasks=tasks, aborts=aborts, has_more_tasks=has_more_tasks, new_workers=new_workers)
-
-    def take_one_task(self) -> tuple[_Task, bool]:
-        with self.lock:
-            task = self.task_queue.popleft()
-            has_more_tasks = bool(self.task_queue)
-        return task, has_more_tasks
 
     def take_all_tasks(self) -> list[_Task]:
         with self.lock:
@@ -194,11 +167,16 @@ class _SharedState:
         if should_notify:
             self._notify()
 
-    def enqueue_new_worker(self, proc: multiprocessing.Process, conn: multiprocessing.connection.Connection) -> None:
+    def enqueue_new_worker(
+        self,
+        proc: multiprocessing.Process,
+        task_conn: multiprocessing.connection.Connection,
+        log_conn: multiprocessing.connection.Connection,
+    ) -> None:
         with self.lock:
             if self.shutdown:
                 return  # all pending & active tasks are canceled anyway during shutdown
-            self.new_workers.append((proc, conn))
+            self.new_workers.append((proc, task_conn, log_conn))
             should_notify = len(self.new_workers) == 1
         if should_notify:
             self.new_workers_event_write_socket.send(b'\0')
@@ -210,16 +188,7 @@ class _SharedState:
         self.event_write_socket.send(b'\0')
 
 
-@dataclass(slots=True)
-class _WorkBatch:
-    tasks: deque[_Task | _PickledTask]
-    aborts: list[_ScheduledAbort]
-    has_more_tasks: bool
-    new_workers: list[tuple[multiprocessing.Process, multiprocessing.connection.Connection]]
-
-
-@dataclass(slots=True)
-class _TimeoutsHeapNode:
+class _TimeoutsHeapNode(msgspec.Struct):
     when: float
     task_future: Future
 
@@ -227,12 +196,13 @@ class _TimeoutsHeapNode:
         return self.when < other.when
 
 
-@dataclass(slots=True)
-class _Worker:
+class _Worker(msgspec.Struct):
     pid: int
     process: multiprocessing.Process | None
-    connection: multiprocessing.connection.Connection | None
-    sock: socket.socket | None
+    task_conn: multiprocessing.connection.Connection | None
+    log_conn: multiprocessing.connection.Connection | None
+    task_sock: socket.socket | None
+    log_sock: socket.socket | None
     active_task_future: Future | None
     stopping: bool = False
 
@@ -271,23 +241,27 @@ class _WorkerCreator:
                     continue
                 self._scheduled_count -= 1
 
-            parent_conn, child_conn = multiprocessing.Pipe()
-            os.set_blocking(parent_conn.fileno(), False)
+            task_conn, task_child_conn = multiprocessing.Pipe()
+            os.set_blocking(task_conn.fileno(), False)
+
+            log_conn, log_child_conn = multiprocessing.Pipe()
+            os.set_blocking(log_conn.fileno(), False)
+
             proc = multiprocessing.Process(
                 target=_worker_process_main,
-                args=(logging.getLogger().getEffectiveLevel(), child_conn),
+                args=(logging.getLogger().getEffectiveLevel(), task_child_conn, log_child_conn),
             )
             proc.start()
-            child_conn.close()
+            task_child_conn.close()
+            log_child_conn.close()
             assert proc.pid is not None
-            self._shared_state.enqueue_new_worker(proc, parent_conn)
+            self._shared_state.enqueue_new_worker(proc, task_conn, log_conn)
 
 
 class _PoolRunner:
     """Implements the process pool event loop; is expected to be used on a background thread."""
 
     __slots__ = (
-        '_awaiting_new_workers',
         '_event_selector',
         '_free_worker_pids',
         '_max_active_workers',
@@ -317,8 +291,11 @@ class _PoolRunner:
             self._shared_state.event_read_socket, selectors.EVENT_READ, data=(self._on_readable_event_read_socket, None)
         )
         self._read_buf = bytearray(1000000)
-        self._awaiting_new_workers = True
-        self._event_selector.register(self._shared_state.new_workers_event_read_socket, selectors.EVENT_READ, data=(self._on_readable_new_workers_event_read_socket, None))
+        self._event_selector.register(
+            self._shared_state.new_workers_event_read_socket,
+            selectors.EVENT_READ,
+            data=(self._on_readable_new_workers_event_read_socket, None),
+        )
         self._shutdown = False
 
     def run(self) -> None:
@@ -330,7 +307,7 @@ class _PoolRunner:
     def _do_step(self) -> None:
         # print(f'[{datetime.now()}] step', file=sys.stderr)
         assert len(self._free_worker_pids) <= len(self._workers)
-        assert 0 <= len(self._workers) - self._stopping_workers <= self._max_active_workers, (
+        assert 0 <= len(self._workers) - self._stopping_workers, (
             f'workers={len(self._workers)} free={len(self._free_worker_pids)} stopping={self._stopping_workers} max={self._max_active_workers}'
         )
         assert 0 <= len(self._workers) - len(self._free_worker_pids) <= self._max_active_workers, (
@@ -348,21 +325,6 @@ class _PoolRunner:
                     break
         self._pump_file_descriptors(wait=True)
 
-    # def _toggle_awaiting_new_workers(self) -> None:
-    #     await_new_workers = (len(self._workers) - len(self._free_worker_pids) < self._max_active_workers) and (
-    #         bool(self._task_queue) or bool(self._pickled_task_queue)
-    #     )
-    #     if await_new_workers == self._awaiting_new_workers:
-    #         return
-    #     # print(f'[{datetime.now()}] toggle_awaiting_new_workers: {await_new_workers}', file=sys.stderr)
-    #     awated_events = selectors.EVENT_READ if await_new_workers else 0
-    #     self._event_selector.modify(
-    #         self._shared_state.new_workers_event_read_socket,
-    #         awated_events,
-    #         data=(self._on_readable_new_workers_event_read_socket, None),
-    #     )
-    #     self._awaiting_new_workers = await_new_workers
-
     def shut_down(self) -> None:
         # print(f'[{datetime.now()}] poolrunner.shut_down: event_selector.close()', file=sys.stderr)
         self._event_selector.close()
@@ -377,14 +339,22 @@ class _PoolRunner:
             if not worker.stopping:
                 assert worker.process is not None
                 worker.process.terminate()
-            if worker.connection:
+            if worker.task_conn:
                 while True:
                     try:
-                        worker.connection.recv_bytes()
+                        worker.task_conn.recv_bytes()
                     except (EOFError, OSError):
                         break
-                worker.sock.detach()
-                worker.connection.close()
+                worker.task_sock.detach()
+                worker.task_conn.close()
+            if worker.log_conn:
+                while True:
+                    try:
+                        worker.log_conn.recv_bytes()
+                    except (EOFError, OSError):
+                        break
+                worker.log_sock.detach()
+                worker.log_conn.close()
             if worker.active_task_future:
                 worker.active_task_future.cancel()
         for worker in self._workers.values():
@@ -435,8 +405,6 @@ class _PoolRunner:
             self._trigger_worker_stop(abort.worker_pid, abort.task_future)
             self._worker_creator.schedule_creation()
 
-        # self._toggle_awaiting_new_workers()
-
     def _on_readable_new_workers_event_read_socket(self, _unused) -> None:
         self._shared_state.new_workers_event_read_socket.recv(10)  # drain the notification(s)
 
@@ -444,28 +412,45 @@ class _PoolRunner:
             new_workers = self._shared_state.new_workers
             self._shared_state.new_workers = []
 
-        # print(f'[{datetime.now()}] new_workers_event: new_workers={[w[0].pid for w in new_workers]}; BEFORE: workers={len(self._workers)} free={len(self._free_worker_pids)} stopping={self._stopping_workers}', file=sys.stderr)
-
-        for proc, parent_conn in new_workers:
+        for proc, task_conn, log_conn in new_workers:
             assert proc.pid is not None
             assert proc.pid not in self._workers
-            sock = socket.socket(fileno=parent_conn.fileno(), family=socket.AF_UNIX, type=socket.SOCK_STREAM)
-            sock.setblocking(False)
-            sock.settimeout(0)
-            worker = _Worker(pid=proc.pid, process=proc, connection=parent_conn, sock=sock, active_task_future=None)
+
+            task_sock = socket.socket(fileno=task_conn.fileno(), family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+            task_sock.setblocking(False)
+            task_sock.settimeout(0)
+
+            log_sock = socket.socket(fileno=log_conn.fileno(), family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+            log_sock.setblocking(False)
+            log_sock.settimeout(0)
+
+            worker = _Worker(
+                pid=proc.pid,
+                process=proc,
+                task_conn=task_conn,
+                log_conn=log_conn,
+                task_sock=task_sock,
+                log_sock=log_sock,
+                active_task_future=None,
+            )
             self._workers[proc.pid] = worker
             self._event_selector.register(
-                parent_conn, selectors.EVENT_READ, data=(self._on_readable_worker_conn, proc.pid)
+                task_conn, selectors.EVENT_READ, data=(self._on_readable_worker_task_conn, proc.pid)
+            )
+            self._event_selector.register(
+                log_conn, selectors.EVENT_READ, data=(self._on_readable_worker_log_conn, proc.pid)
             )
             self._send_task_or_mark_free(worker)
 
-    def _on_readable_worker_conn(self, pid: int) -> None:
+    def _on_readable_worker_task_conn(self, pid: int) -> None:
         worker = self._workers[pid]
-        assert worker.connection is not None
+        assert worker.task_conn is not None
         view = memoryview(self._read_buf)
         # print(f'[{datetime.now()}] on_readable_worker_conn: pid={pid}', file=sys.stderr)
         try:
-            nbytes = worker.sock.recv_into(view)  # TODO: loop? or only read until gets blocked? consider limiting size
+            nbytes = worker.task_sock.recv_into(
+                view
+            )  # TODO: loop? or only read until gets blocked? consider limiting size
         except (BlockingIOError, TimeoutError):
             raise
         except OSError:
@@ -476,17 +461,45 @@ class _PoolRunner:
         if not view:
             self._handle_worker_conn_eof(worker)
             return
-        handled_task_completion = False
-        while view:
-            assert len(view) >= 4
-            sz: int = view[:4].cast('i')[0]
-            assert sz >= 0, f'buf={bytes(view[:4])} packet_size={4+sz} payload_size={sz}'
-            raw_message = view[4 : 4 + sz]
-            # print(f'handling msg from pid={worker.pid} packet_size={4+sz} payload_size={sz}', file=sys.stderr)
-            if self._handle_message_from_worker(worker, raw_message) and not handled_task_completion:
-                handled_task_completion = True
-                self._send_task_or_mark_free(worker)
-            view = view[4 + sz :]
+        assert len(view) >= 4
+        sz: int = view[:4].cast('i')[0]
+        assert sz >= 0, f'buf={bytes(view[:4])} packet_size={4 + sz} payload_size={sz}'
+        assert len(view) == 4 + sz
+        raw_message = view[4 : 4 + sz]
+        # print(f'handling msg from pid={worker.pid} packet_size={4+sz} payload_size={sz}', file=sys.stderr)
+
+        if worker.stopping:
+            return  # worker shutdown produces spurious errors; we simply wait till EOF
+
+        original_future = worker.active_task_future
+        worker.active_task_future = None
+        self._send_task_or_mark_free(worker)
+        # print(f'eager sending success = {worker.active_task_future is not None}', file=sys.stderr)
+
+        if original_future is not None and original_future.done():
+            return  # similar to above, but the future cancellation didn't propagate as the worker shutdown yet
+        message = pickle.loads(raw_message)
+        assert original_future is not None
+        if isinstance(message, Exception):
+            _assign_future_exception(original_future, message)
+        else:
+            _assign_future_result(original_future, message)
+
+    def _on_readable_worker_log_conn(self, pid: int) -> None:
+        if pid not in self._workers:
+            return
+        worker = self._workers[pid]
+        if worker.log_sock is None:
+            return
+        view = memoryview(self._read_buf)
+        try:
+            nbytes = worker.log_sock.recv_into(
+                view
+            )  # TODO: loop? or only read until gets blocked? consider limiting size
+        except (BlockingIOError, TimeoutError):
+            raise
+        except OSError:
+            return
 
     def _on_worker_proc_fd_joinable(self, worker_pid: int) -> None:
         worker = self._workers[worker_pid]
@@ -495,17 +508,16 @@ class _PoolRunner:
         worker.process.join()
         # print(f'joined pid={worker.pid}', file=sys.stderr)
         worker.process = None
-        if worker.connection is None:
+        if worker.task_conn is None:
             self._workers.pop(worker.pid)
             self._stopping_workers -= 1
             assert self._stopping_workers >= 0
-            # self._toggle_awaiting_new_workers()
             self._maybe_send_task_to_free_worker()
 
     def _send_task(self, task: _Task | _PickledTask, worker: _Worker) -> None:
         assert worker.process is not None
         task.future.add_done_callback(lambda future: self._on_future_resolved(worker.pid, future))
-        assert worker.connection is not None
+        assert worker.task_conn is not None
         match task:
             case _Task():
                 packet = _create_packet((task.f, task.args))
@@ -513,7 +525,7 @@ class _PoolRunner:
                 packet = memoryview(task.packet)
         # print(f'sending task to pid={worker.pid} len={len(packet)}', file=sys.stderr)
         while packet:
-            nbytes = worker.sock.send(packet)
+            nbytes = worker.task_sock.send(packet)
             packet = packet[nbytes:]
         assert worker.active_task_future is None
         worker.active_task_future = task.future
@@ -522,7 +534,7 @@ class _PoolRunner:
         # print(f'[{datetime.now()}] {"send_task" if isinstance(task, _Task) else "send_pickled_task"} task to pid={worker.pid}', file=sys.stderr)
 
     def _send_task_or_mark_free(self, worker: _Worker) -> None:
-        if len(self._workers) - len(self._free_worker_pids) < self._max_active_workers:
+        if len(self._workers) - len(self._free_worker_pids) <= self._max_active_workers:
             if self._pickled_task_queue:
                 self._send_task(self._pickled_task_queue.popleft(), worker)
                 return
@@ -548,7 +560,7 @@ class _PoolRunner:
         worker.active_task_future = None
         worker.process.terminate()
         self._stopping_workers += 1
-        assert worker.connection is not None
+        assert worker.task_conn is not None
         # observe when the process will become join'able
         self._event_selector.register(
             worker.process.sentinel, selectors.EVENT_READ, data=(self._on_worker_proc_fd_joinable, worker_pid)
@@ -596,42 +608,61 @@ class _PoolRunner:
             self._shared_state.enqueue_abort(_ScheduledAbort(worker_pid=worker_pid, task_future=future))
 
     def _handle_worker_conn_eof(self, worker: _Worker) -> None:
-        assert worker.connection is not None
+        assert worker.task_conn is not None
+        assert worker.log_conn is not None
         if worker.active_task_future is not None:
             if not worker.active_task_future.done():
                 _assign_future_exception(worker.active_task_future, ProcessPoolError(f'Worker {worker.pid} died'))
             worker.active_task_future = None
-        self._event_selector.unregister(worker.connection)
-        worker.sock.detach()
-        worker.sock = None
-        worker.connection.close()
-        worker.connection = None
+        self._event_selector.unregister(worker.task_conn)
+        self._event_selector.unregister(worker.log_conn)
+
+        worker.task_sock.detach()
+        worker.task_sock = None
+        worker.task_conn.close()
+        worker.task_conn = None
+
+        worker.log_sock.detach()
+        worker.log_sock = None
+        worker.log_conn.close()
+        worker.log_conn = None
+
         # print(f'[{datetime.now()}] worker_conn_eof: pid={worker.pid}', file=sys.stderr)
         if worker.process is None:
             self._workers.pop(worker.pid)
             self._stopping_workers -= 1
-            # self._toggle_awaiting_new_workers()
             self._maybe_send_task_to_free_worker()
 
 
-def _worker_process_main(logging_level: int, server_conn: multiprocessing.connection.Connection) -> None:
+def _worker_process_main(
+    logging_level: int,
+    server_conn: multiprocessing.connection.Connection,
+    log_conn: multiprocessing.connection.Connection,
+) -> None:
     # try:
-        _do_worker_process_main(logging_level, server_conn)
-    # except Exception as exc:
-    #     print(f'worker_process_main exception: {exc.__traceback__}', file=sys.stderr)
-    #     raise
+    _do_worker_process_main(logging_level, server_conn, log_conn)
 
-def _do_worker_process_main(logging_level: int, server_conn: multiprocessing.connection.Connection) -> None:
+
+# except Exception as exc:
+#     print(f'worker_process_main exception: {exc.__traceback__}', file=sys.stderr)
+#     raise
+
+
+def _do_worker_process_main(
+    logging_level: int,
+    task_conn: multiprocessing.connection.Connection,
+    log_conn: multiprocessing.connection.Connection,
+) -> None:
     # print(f'worker[{os.getpid()}]: started', file=sys.stderr)
     sigmonitor.init(sigmonitor.Mode.QUICK_EXIT, sigint=False, sigchld=True)
-    mplogging.init_in_worker(logging_level=logging_level, server_conn=server_conn)
+    mplogging.init_in_worker(logging_level=logging_level, server_conn=log_conn)
     wakeup_fd = sigmonitor.get_wakeup_fd()
     read_buf = bytearray(1000000)
-    sock = socket.socket(fileno=server_conn.fileno(), family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+    task_sock = socket.socket(fileno=task_conn.fileno(), family=socket.AF_UNIX, type=socket.SOCK_STREAM)
     with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND):
         try:
             with selectors.DefaultSelector() as event_selector:
-                event_selector.register(server_conn, selectors.EVENT_READ)
+                event_selector.register(task_conn, selectors.EVENT_READ)
                 event_selector.register(wakeup_fd, selectors.EVENT_READ)
                 # Handle incoming tasks in an infinite loop (until stopped by a signal).
                 while True:
@@ -654,7 +685,7 @@ def _do_worker_process_main(logging_level: int, server_conn: multiprocessing.con
                         total = 0
                         while True:
                             try:
-                                nbytes = sock.recv_into(view[total:])
+                                nbytes = task_sock.recv_into(view[total:])
                             except (BlockingIOError, TimeoutError):
                                 raise
                             except OSError:
@@ -683,7 +714,7 @@ def _do_worker_process_main(logging_level: int, server_conn: multiprocessing.con
                         # print(f'worker[{os.getpid()}]: task reply size={len(packet)}', file=sys.stderr)
                         while packet:
                             try:
-                                nbytes = sock.send(packet)
+                                nbytes = task_sock.send(packet)
                             except (BlockingIOError, TimeoutError):
                                 raise
                             except OSError:
@@ -692,8 +723,9 @@ def _do_worker_process_main(logging_level: int, server_conn: multiprocessing.con
                         packet.release()
         finally:
             # print(f'worker[{os.getpid()}]: dying', file=sys.stderr)
-            sock.detach()
-            server_conn.close()
+            task_sock.detach()
+            task_conn.close()
+            log_conn.close()
 
 
 _pickler_bytes_io: io.BytesIO | None = None
