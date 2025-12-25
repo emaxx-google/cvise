@@ -1,8 +1,13 @@
+import msgspec
 import re
 import tempfile
 from pathlib import Path
 
 from cvise.passes.abstract import AbstractPass, BinaryState, PassResult
+
+
+class IfsState(BinaryState, frozen=True):
+    value: int | None = None
 
 
 class IfPass(AbstractPass):
@@ -37,19 +42,18 @@ class IfPass(AbstractPass):
 
     def new(self, test_case: Path, *args, **kwargs):
         bs = BinaryState.create(self.__count_instances(test_case))
-        if bs:
-            bs.value = 0  # type: ignore
-        return bs
+        if bs is None:
+            return None
+        return IfsState(value=0, **{s: getattr(bs, s) for s in bs.__struct_fields__})
 
     def advance(self, test_case: Path, state):
         if state.value == 0:
-            state = state.copy()
-            state.value = 1
+            return msgspec.structs.replace(state, value=1)
         else:
             state = state.advance()
             if state:
-                state.value = 0
-        return state
+                return IfsState(value=0, **{s: getattr(state, s) for s in state.__struct_fields__})
+        return None
 
     def advance_on_success(self, test_case: Path, state, *args, **kwargs):
         return state.advance_on_success(self.__count_instances(test_case))

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import logging
+import msgspec
 import random
 import shutil
 from dataclasses import dataclass
@@ -84,28 +85,16 @@ class SubsegmentState:
         )
 
 
-class BinaryState:
-    def __init__(self, instances: int, chunk: int, index: int):
-        self.instances: int = instances
-        self.chunk: int = chunk
-        self.index: int = index
+class BinaryState(msgspec.Struct, frozen=True):
+    instances: int
+    chunk: int
+    index: int
 
     def __repr__(self):
         return f'BinaryState({self.index}-{self.end()}, {self.instances} instances, step: {self.chunk})'
 
     def compact_repr(self) -> str:
         return f'{self.index}-{self.end()} out of {self.instances} with step {self.chunk}'
-
-    # FIXME: Remove this and __hash__ in favor of dataclass, once all passes and this class are updated to not
-    # modify/add properties.
-    def __eq__(self, other):
-        return isinstance(other, BinaryState) and self._key() == other._key()
-
-    def __hash__(self):
-        return hash(self._key())
-
-    def _key(self):
-        return (self.instances, self.chunk, self.index)
 
     @staticmethod
     def create(instances):
@@ -123,26 +112,27 @@ class BinaryState:
         return self.end() - self.index
 
     def advance(self):
-        self = self.copy()
-        self.index += self.chunk
-        if self.index >= self.instances:
-            self.chunk = int(self.chunk / 2)
-            if self.chunk < 1:
+        index = self.index + self.chunk
+        chunk = self.chunk
+        if index >= self.instances:
+            chunk = chunk // 2
+            if chunk < 1:
                 return None
-            logging.debug(f'granularity reduced to {self.chunk}')
-            self.index = 0
+            logging.debug(f'granularity reduced to {chunk}')
+            return BinaryState(instances=self.instances, chunk=chunk, index=0)
         else:
-            logging.debug(f'***ADVANCE*** to {self}')
-        return self
+            new = BinaryState(instances=self.instances, chunk=chunk, index=index)
+            logging.debug(f'***ADVANCE*** to {new}')
+            return new
 
     def advance_on_success(self, instances):
         if not instances:
             return None
-        self.instances = instances
-        if self.index >= self.instances:
-            return self.advance()
+        new = BinaryState(instances=instances, chunk=self.chunk, index=self.index)
+        if new.index >= new.instances:
+            return new.advance()
         else:
-            return self
+            return new
 
 
 class AbstractPass:

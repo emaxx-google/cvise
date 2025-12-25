@@ -1,10 +1,16 @@
 import logging
+import msgspec
 import re
 import subprocess
 import time
 from pathlib import Path
 
 from cvise.passes.abstract import AbstractPass, BinaryState, PassResult
+
+
+class ClangBinarySearchState(BinaryState, frozen=True):
+    clang_delta_std: str | None = None
+    real_num_instances: int | None = None
 
 
 class ClangBinarySearchPass(AbstractPass):
@@ -29,7 +35,7 @@ class ClangBinarySearchPass(AbstractPass):
     def check_prerequisites(self):
         return self.check_external_program('clang_delta')
 
-    def detect_best_standard(self, test_case: Path, timeout):
+    def detect_best_standard(self, test_case: Path, timeout) -> str:
         best = None
         best_count = -1
         for std in ('c++98', 'c++11', 'c++14', 'c++17', 'c++20', 'c++2b'):
@@ -44,6 +50,7 @@ class ClangBinarySearchPass(AbstractPass):
             logging.debug('available transformation opportunities for %s: %d, took: %.2f s' % (std, instances, took))
         logging.info('using C++ standard: %s with %d transformation opportunities' % (best, best_count))
         # Use the best standard option
+        assert best is not None
         return best
 
     def new(self, test_case: Path, job_timeout, *args, **kwargs):
@@ -61,8 +68,6 @@ class ClangBinarySearchPass(AbstractPass):
     def advance_on_success(self, test_case: Path, state, succeeded_state, *args, **kwargs):
         instances = succeeded_state.real_num_instances - succeeded_state.real_chunk()
         new_state = state.advance_on_success(instances)
-        if new_state:
-            new_state.real_num_instances = None
         return attach_clang_delta_std(new_state, state.clang_delta_std)
 
     def count_instances(self, test_case: Path, std, timeout):
@@ -96,14 +101,15 @@ class ClangBinarySearchPass(AbstractPass):
         else:
             return int(m.group(1))
 
-    def parse_stderr(self, state, stderr):
+    def parse_stderr(self, stderr) -> int | None:
+        real_num_instances = None
         for line in stderr.split(b'\n'):
             if line.startswith(b'Available transformation instances:'):
                 real_num_instances = int(line.decode().split(':')[1])
-                state.real_num_instances = real_num_instances
             elif line.startswith(b'Warning: number of transformation instances exceeded'):
                 # TODO: report?
                 pass
+        return real_num_instances
 
     def transform(self, test_case: Path, state, process_event_notifier, *args, **kwargs):
         logging.debug(f'TRANSFORM: {state}')
@@ -124,7 +130,9 @@ class ClangBinarySearchPass(AbstractPass):
         logging.debug(' '.join(cmd))
 
         stdout, stderr, returncode = process_event_notifier.run_process(cmd)
-        self.parse_stderr(state, stderr)
+        real_num_instances = self.parse_stderr(stderr)
+        if real_num_instances is not None:
+            state = msgspec.structs.replace(state, real_num_instances=real_num_instances)
         match returncode:
             case 0:
                 test_case.write_bytes(stdout)
@@ -135,8 +143,8 @@ class ClangBinarySearchPass(AbstractPass):
                 return (PassResult.ERROR, state)
 
 
-def attach_clang_delta_std(state, std):
+def attach_clang_delta_std(state: BinaryState | None, std: str):
     if state is None:
         return None
-    state.clang_delta_std = std
-    return state
+    attrs = {attr: getattr(state, attr) for attr in state.__struct_fields__}
+    return ClangBinarySearchState(clang_delta_std=std, **attrs)

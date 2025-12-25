@@ -5,6 +5,7 @@ import contextlib
 import filecmp
 import logging
 import math
+import msgspec
 import multiprocessing
 import os
 import platform
@@ -103,8 +104,7 @@ class AdvanceOnSuccessEnvironment:
         )
 
 
-@dataclass(slots=True)
-class TestResult:
+class TestResult(msgspec.Struct):
     test_script: Path
     folder: Path
     all_test_cases: set[Path]
@@ -128,8 +128,7 @@ class TestResult:
         shutil.copy(self.test_script, dst)
 
 
-@dataclass(slots=True)
-class TestEnvironment:
+class TestEnvironment(msgspec.Struct):
     """Holds data for running a Pass transform() method and the interestingness test in a worker.
 
     The transform call is optional - in that case, the interestingness test is simply executed for the unchanged input

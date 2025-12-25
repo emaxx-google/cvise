@@ -15,6 +15,7 @@ import socket
 import struct
 import sys
 import threading
+import traceback
 import time
 from collections import deque
 from collections.abc import Callable, Sequence
@@ -464,7 +465,7 @@ class _PoolRunner:
         view = memoryview(self._read_buf)
         # print(f'[{datetime.now()}] on_readable_worker_conn: pid={pid}', file=sys.stderr)
         try:
-            nbytes = worker.sock.recv_into(view[:16384])  # TODO: loop? or only read until gets blocked?
+            nbytes = worker.sock.recv_into(view)  # TODO: loop? or only read until gets blocked? consider limiting size
         except (BlockingIOError, TimeoutError):
             raise
         except OSError:
@@ -479,9 +480,9 @@ class _PoolRunner:
         while view:
             assert len(view) >= 4
             sz: int = view[:4].cast('i')[0]
-            assert sz >= 0, f'buf={bytes(view[:4])} sz={sz}'
+            assert sz >= 0, f'buf={bytes(view[:4])} packet_size={4+sz} payload_size={sz}'
             raw_message = view[4 : 4 + sz]
-            # print(f'handling msg from pid={worker.pid} len={sz}', file=sys.stderr)
+            # print(f'handling msg from pid={worker.pid} packet_size={4+sz} payload_size={sz}', file=sys.stderr)
             if self._handle_message_from_worker(worker, raw_message) and not handled_task_completion:
                 handled_task_completion = True
                 self._send_task_or_mark_free(worker)
@@ -614,6 +615,13 @@ class _PoolRunner:
 
 
 def _worker_process_main(logging_level: int, server_conn: multiprocessing.connection.Connection) -> None:
+    # try:
+        _do_worker_process_main(logging_level, server_conn)
+    # except Exception as exc:
+    #     print(f'worker_process_main exception: {exc.__traceback__}', file=sys.stderr)
+    #     raise
+
+def _do_worker_process_main(logging_level: int, server_conn: multiprocessing.connection.Connection) -> None:
     # print(f'worker[{os.getpid()}]: started', file=sys.stderr)
     sigmonitor.init(sigmonitor.Mode.QUICK_EXIT, sigint=False, sigchld=True)
     mplogging.init_in_worker(logging_level=logging_level, server_conn=server_conn)
@@ -656,7 +664,7 @@ def _worker_process_main(logging_level: int, server_conn: multiprocessing.connec
                             total += nbytes
                             if sz is None:
                                 assert total >= 4
-                                sz: int = view[:4].cast('i')[0]
+                                sz = view[:4].cast('i')[0]
                                 if total >= 4 + sz:
                                     break
                         assert total == 4 + sz
@@ -667,11 +675,12 @@ def _worker_process_main(logging_level: int, server_conn: multiprocessing.connec
                         try:
                             result = f(*args)
                         except Exception as e:
+                            traceback.print_exception(e, file=sys.stderr)
                             result = e
                         # print(f'worker[{os.getpid()}]: task end', file=sys.stderr)
                         sigmonitor.maybe_retrigger_action()
-                        # print(f'worker[{os.getpid()}]: task reply begin', file=sys.stderr)
                         packet = _create_packet(result)
+                        # print(f'worker[{os.getpid()}]: task reply size={len(packet)}', file=sys.stderr)
                         while packet:
                             try:
                                 nbytes = sock.send(packet)
@@ -681,7 +690,6 @@ def _worker_process_main(logging_level: int, server_conn: multiprocessing.connec
                                 break
                             packet = packet[nbytes:]
                         packet.release()
-                        # print(f'worker[{os.getpid()}]: task reply end', file=sys.stderr)
         finally:
             # print(f'worker[{os.getpid()}]: dying', file=sys.stderr)
             sock.detach()

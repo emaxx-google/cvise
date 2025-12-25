@@ -16,8 +16,7 @@ from cvise.utils.process import ProcessEventNotifier
 CLANG_STD_CHOICES = ('c++98', 'c++11', 'c++14', 'c++17', 'c++20', 'c++2b')
 
 
-@dataclass(frozen=True, slots=True)
-class ClangState(HintState):
+class ClangState(HintState, frozen=True):
     """Extends HintState to store additional information needed by ClangHintsPass.
 
     See the comment in ClangHintsPass for the background."""
@@ -28,7 +27,7 @@ class ClangState(HintState):
     def wrap(parent: HintState | None, clang_std: str | None) -> HintState | None:
         if parent is None:
             return None
-        attrs = {f.name: getattr(parent, f.name) for f in dataclasses.fields(parent) if hasattr(parent, f.name)}
+        attrs = {attr: getattr(parent, attr) for attr in parent.__struct_fields__}
         return ClangState(clang_std=clang_std, **attrs)
 
 

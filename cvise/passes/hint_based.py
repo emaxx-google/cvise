@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import msgspec
 import os
 import tempfile
 from collections.abc import Sequence
@@ -24,8 +25,7 @@ _HINTS_FILE_NAME_PREFIX_TEMPLATE = 'hints{type}-'
 _HINTS_FILE_NAME_SUFFIX = '.jsonl.zst'
 
 
-@dataclass(frozen=True, slots=True)
-class PerTypeHintState:
+class PerTypeHintState(msgspec.Struct, frozen=True):
     """A sub-item of HintState storing information for a particular hint type.
 
     See the comment in the HintBasedPass.
@@ -79,8 +79,7 @@ class PerTypeHintState:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class SpecialHintState:
+class SpecialHintState(msgspec.Struct, frozen=True):
     """A sub-item of HintState for "special" hint types - those that start from "@".
 
     Such hints aren't attempted as reduction attempts themselves, instead they convey information from one pass to
@@ -92,8 +91,7 @@ class SpecialHintState:
     hint_count: int
 
 
-@dataclass(frozen=True, slots=True)
-class HintState:
+class HintState(msgspec.Struct, frozen=True):
     """Stores the current state of the HintBasedPass.
 
     Conceptually, it's representing multiple enumerations (by default - binary searches), one for each hint type. These
