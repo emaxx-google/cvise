@@ -462,7 +462,9 @@ class _PoolRunner:
                     _assign_future_result(original_future, message)
             elif tp == 1:  # log
                 message = pickle.loads(raw_message)
-                assert mplogging.maybe_handle_message_from_worker(message)
+                # Ignore logs if the future is already switched to "done" - these are likely spurious errors because the main process started deleting task's files.
+                if worker.active_task_future is None or not worker.active_task_future.done():
+                    assert mplogging.maybe_handle_message_from_worker(message)
             else:
                 assert False, f'Unknown message type {tp}'
 
@@ -531,16 +533,6 @@ class _PoolRunner:
         self._event_selector.register(
             worker.process.sentinel, selectors.EVENT_READ, data=(self._on_worker_proc_fd_joinable, worker_pid)
         )
-
-    def _handle_message_from_worker(self, worker: _Worker, raw_message: memoryview) -> bool:
-        if worker.stopping:
-            return False  # worker shutdown produces spurious errors; we simply wait till EOF
-        if worker.active_task_future is not None and worker.active_task_future.done():
-            return False  # similar to above, but the future cancellation didn't propagate as the worker shutdown yet
-        message = pickle.loads(raw_message)
-        if mplogging.maybe_handle_message_from_worker(message):
-            return False
-        return self._handle_task_result(worker, message)
 
     def _handle_task_result(self, worker: _Worker, result_message: Any) -> bool:
         if worker.active_task_future is None:

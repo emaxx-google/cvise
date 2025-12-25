@@ -6,7 +6,7 @@ import logging
 import multiprocessing
 import multiprocessing.connection
 import multiprocessing.reduction
-import socket
+import os
 import struct
 from typing import Any
 
@@ -44,11 +44,13 @@ class _MPConnSendingHandler(logging.Handler):
         multiprocessing.reduction.ForkingPickler(buf).dump(prepared)
         view = buf.getbuffer()
         struct.Struct('i').pack_into(view, 0, len(view) - 5)
-        sock = socket.socket(fileno=self._server_conn.fileno(), family=socket.AF_UNIX, type=socket.SOCK_STREAM)
         while view:
-            nbytes = sock.send(view)
+            try:
+                nbytes = os.write(self._server_conn.fileno(), view)
+            except OSError:
+                # most likely it's due to the main process closing the connection and about to terminate us
+                break
             view = view[nbytes:]
-        sock.detach()
 
     def _prepare_record(self, record: logging.LogRecord) -> logging.LogRecord:
         """Formats the message, removes unpickleable fields and those not necessary for formatting."""
