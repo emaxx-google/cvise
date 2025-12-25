@@ -41,6 +41,8 @@ class ProcessPool:
     take place in C-Vise).
     """
 
+    # TODO: bulk cancellation api
+
     def __init__(self, max_active_workers: int):
         event_read_socket, event_write_socket = socket.socketpair()
         event_read_socket.setblocking(False)
@@ -479,6 +481,7 @@ class _PoolRunner:
 
     def _send_task(self, task: _Task | _PickledTask, worker: _Worker) -> None:
         assert worker.process is not None
+        # TODO: consider using Pool.cancel() api, also to avoid deleting task's files while it's still being killed
         task.future.add_done_callback(lambda future: self._on_future_resolved(worker.pid, future))
         assert worker.conn is not None
         match task:

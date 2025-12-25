@@ -57,6 +57,8 @@ class IfPass(AbstractPass):
 
     def advance_on_success(self, test_case: Path, state, *args, **kwargs):
         new = state.advance_on_success(self.__count_instances(test_case))
+        if new is None:
+            return None
         return IfsState(value=0, **{s: getattr(new, s) for s in new.__struct_fields__})
 
     def transform(self, test_case: Path, state, process_event_notifier, *args, **kwargs):
