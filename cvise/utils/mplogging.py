@@ -40,10 +40,10 @@ class _MPConnSendingHandler(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         prepared = self._prepare_record(record)
         buf = io.BytesIO()
-        buf.write(b'\0\0\0\0')
+        buf.write(b'\0\0\0\0\1')
         multiprocessing.reduction.ForkingPickler(buf).dump(prepared)
         view = buf.getbuffer()
-        struct.Struct('i').pack_into(view, 0, len(view) - 4)
+        struct.Struct('i').pack_into(view, 0, len(view) - 5)
         sock = socket.socket(fileno=self._server_conn.fileno(), family=socket.AF_UNIX, type=socket.SOCK_STREAM)
         while view:
             nbytes = sock.send(view)
