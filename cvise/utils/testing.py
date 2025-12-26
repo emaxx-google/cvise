@@ -1398,7 +1398,9 @@ def do_stress(args):
         durs.append(dur)
         print(f'{dur * 1000:.4f}ms min={min(durs) * 1000:.4f}ms')
         time.sleep(args.timeout)
-    print(f'min={min(durs) * 1000:.4f}ms')
+    dur = min(durs)
+    overhead = dur * args.n - 0.01
+    print(f'min={dur * 1000:.4f}ms overhead_per_task={overhead * 1000:.4f}ms')
 
 
 from cvise.utils import process
