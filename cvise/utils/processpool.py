@@ -657,7 +657,6 @@ def _worker_process_main(
                         try:
                             result = f(*args)
                         except Exception as e:
-                            traceback.print_exception(e, file=sys.stderr)
                             result = e
                         # print(f'worker[{os.getpid()}]: task end', file=sys.stderr)
                         sigmonitor.maybe_retrigger_action()
