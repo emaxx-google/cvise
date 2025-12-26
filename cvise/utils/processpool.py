@@ -94,10 +94,9 @@ class ProcessPool:
         return future
 
     def cancel_all(self, futures: list[Future]) -> None:
-        if not self._shared_state.enqueue_cancels(futures):
-            # after shutdown, cancel explicitly
-            for future in futures:
-                future.cancel()
+        self._shared_state.enqueue_cancels(futures)
+        for future in futures:
+            future.cancel()
 
     def _pool_thread_main(self) -> None:
         self._pool_runner.run()
@@ -160,17 +159,16 @@ class _SharedState(msgspec.Struct):
             self._notify()
         return True
 
-    def enqueue_cancels(self, task_futures: list[Future]) -> bool:
+    def enqueue_cancels(self, task_futures: list[Future]) -> None:
         if not task_futures:
-            return False
+            return
         with self.lock:
             if self.shutdown:
-                return False
+                return
             should_notify = not self.task_queue and not self.scheduled_aborts
             self.scheduled_aborts.extend(task_futures)
         if should_notify:
             self._notify()
-        return True
 
     def enqueue_new_worker(
         self,
@@ -382,7 +380,6 @@ class _PoolRunner:
 
         need_recreate = 0
         for task_future in aborts:
-            task_future.cancel()
             worker_pid = self._future_to_worker_pid.pop(task_future, None)
             if worker_pid is not None:
                 # the task is actually running currently
