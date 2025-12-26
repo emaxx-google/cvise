@@ -851,13 +851,15 @@ class TestManager:
         self.success_candidate = new
 
     def terminate_all(self) -> None:
-        for job in self.jobs:
-            self.cancel_job(job)
+        self.cancel_jobs(self.jobs)
         self.worker_pool.stop()
         self.release_all_jobs()
 
     def cancel_job(self, job: Job) -> None:
-        job.future.cancel()
+        self.worker_pool.cancel_all([job.future])
+
+    def cancel_jobs(self, jobs: list[Job]) -> None:
+        self.worker_pool.cancel_all([job.future for job in jobs])
 
     def run_parallel_tests(self) -> None:
         assert self.worker_pool
@@ -902,8 +904,8 @@ class TestManager:
                 break
 
         if self.jobs:
+            self.cancel_jobs(self.jobs)
             for job in self.jobs:
-                self.cancel_job(job)
                 self.pass_statistic.add_aborted(
                     job.pass_, job.start_time, self.parallel_tests, job.type == JobType.TRANSFORM
                 )
@@ -1382,8 +1384,7 @@ def do_stress(args):
                 # print(f'enqueue task', file=sys.stderr)
                 futures.append(pool.schedule(_stress, args=(arg,), timeout=100))
                 if i and i % CANCEL_EVERY == 0:
-                    for f in futures:
-                        f.cancel()
+                    pool.cancel_all(futures)
                     futures.clear()
                 elif len(futures) >= args.n + OVERCOMMIT:
                     # print('wait begin', file=sys.stderr)
