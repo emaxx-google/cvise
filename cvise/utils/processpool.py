@@ -28,6 +28,9 @@ from typing import Any
 from cvise.utils import mplogging, sigmonitor
 
 
+_RECV_BUF_SIZE = 63536
+
+
 class ProcessPoolError(Exception):
     pass
 
@@ -202,6 +205,7 @@ class _Worker(msgspec.Struct):
     sock: socket.socket | None
     active_task_future: Future | None
     stopping: bool = False
+    partial_recv: bytearray | None = None
 
 
 class _WorkerCreator:
@@ -281,7 +285,7 @@ class _PoolRunner:
         self._event_selector.register(
             self._shared_state.event_read_socket, selectors.EVENT_READ, data=(self._on_readable_event_read_socket, None)
         )
-        self._read_buf = bytearray(1000000)
+        self._read_buf = bytearray(_RECV_BUF_SIZE)
         self._event_selector.register(
             self._shared_state.new_workers_event_read_socket,
             selectors.EVENT_READ,
@@ -399,10 +403,8 @@ class _PoolRunner:
             assert proc.pid is not None
             assert proc.pid not in self._workers
 
-            os.set_blocking(conn.fileno(), False)
             sock = socket.socket(fileno=conn.fileno(), family=socket.AF_UNIX, type=socket.SOCK_STREAM)
             sock.setblocking(False)
-            sock.settimeout(0)
 
             worker = _Worker(
                 pid=proc.pid,
@@ -418,29 +420,37 @@ class _PoolRunner:
     def _on_readable_worker_conn(self, pid: int) -> None:
         worker = self._workers[pid]
         assert worker.conn is not None
-        view = memoryview(self._read_buf)
         # print(f'[{datetime.now()}] on_readable_worker_conn: pid={pid}', file=sys.stderr)
+
+        try:
+            if worker.partial_recv is None:
+                view = memoryview(self._read_buf)
+                bytes_received = worker.sock.recv_into(view)
+                view = view[:bytes_received]
+            else:
+                buf = worker.sock.recv(_RECV_BUF_SIZE)
+                bytes_received = len(buf)
+                worker.partial_recv.extend(buf)
+                view = memoryview(worker.partial_recv)
+        except (BlockingIOError, TimeoutError):
+            raise
+        except OSError:
+            self._handle_worker_conn_eof(worker)
+            return
+        # print(f'read from pid={worker.pid} len={nbytes} begin={begin} end={end}', file=sys.stderr)
+        if not bytes_received:
+            self._handle_worker_conn_eof(worker)
+            return
+
         begin = 0
-        end = 0
-        while end == 0 or begin < end:
-            try:
-                nbytes = worker.sock.recv_into(view[end:])
-            except (BlockingIOError, TimeoutError):
-                raise
-            except OSError:
-                self._handle_worker_conn_eof(worker)
-                return
-            # print(f'read from pid={worker.pid} len={nbytes} begin={begin} end={end}', file=sys.stderr)
-            if not nbytes:
-                self._handle_worker_conn_eof(worker)
-                return
-            end += nbytes
+        end = len(view)
+        while begin < end:
             if end - begin < 5:
-                continue
+                break
             sz: int = view[begin : begin + 4].cast('i')[0]
             assert sz >= 0
             if begin + 5 + sz > end:
-                continue
+                break
             tp = view[begin + 4]
             raw_message = view[begin + 5 : begin + 5 + sz]
             begin += 5 + sz
@@ -467,6 +477,11 @@ class _PoolRunner:
                     assert mplogging.maybe_handle_message_from_worker(message)
             else:
                 assert False, f'Unknown message type {tp}'
+
+        if begin == end:
+            worker.partial_recv = None
+        elif worker.partial_recv is None:
+            worker.partial_recv = bytearray(view[begin:end])
 
     def _on_worker_proc_fd_joinable(self, worker_pid: int) -> None:
         worker = self._workers[worker_pid]
@@ -593,8 +608,9 @@ def _worker_process_main(
     sigmonitor.init(sigmonitor.Mode.QUICK_EXIT, sigint=False, sigchld=True)
     mplogging.init_in_worker(logging_level=logging_level, server_conn=conn)
     wakeup_fd = sigmonitor.get_wakeup_fd()
-    read_buf = bytearray(1000000)
-    task_sock = socket.socket(fileno=conn.fileno(), family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+    read_buf = bytearray(_RECV_BUF_SIZE)
+    sock = socket.socket(fileno=conn.fileno(), family=socket.AF_UNIX, type=socket.SOCK_STREAM)
+    sock.setblocking(True)
     with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND):
         try:
             with selectors.DefaultSelector() as event_selector:
@@ -617,11 +633,13 @@ def _worker_process_main(
                             can_recv = True
                     if can_recv:
                         sz: int | None = None
-                        view = memoryview(read_buf)
                         total = 0
                         while True:
+                            if total == len(read_buf):
+                                read_buf.extend(b'\0' * len(read_buf))
+                            view = memoryview(read_buf)
                             try:
-                                nbytes = task_sock.recv_into(view[total:])
+                                nbytes = sock.recv_into(view[total:])
                             except (BlockingIOError, TimeoutError):
                                 raise
                             except OSError:
@@ -632,13 +650,16 @@ def _worker_process_main(
                             if sz is None:
                                 assert total >= 4
                                 sz = view[:4].cast('i')[0]
-                                if total >= 5 + sz:
-                                    break
+                            if total >= 5 + sz:
+                                break
+                            view.release()
                         assert total == 5 + sz
                         assert view[4] == 0  # tp
                         # print(f'worker[{os.getpid()}]: received sz={sz}', file=sys.stderr)
                         raw_message = view[5:total]
+                        view.release()
                         f, args = pickle.loads(raw_message)
+                        raw_message.release()
                         # print(f'worker[{os.getpid()}]: task begin', file=sys.stderr)
                         try:
                             result = f(*args)
@@ -651,7 +672,7 @@ def _worker_process_main(
                         # print(f'worker[{os.getpid()}]: task reply size={len(packet)}', file=sys.stderr)
                         while packet:
                             try:
-                                nbytes = task_sock.send(packet)
+                                nbytes = sock.send(packet)
                             except (BlockingIOError, TimeoutError):
                                 raise
                             except OSError:
@@ -660,7 +681,7 @@ def _worker_process_main(
                         packet.release()
         finally:
             # print(f'worker[{os.getpid()}]: dying', file=sys.stderr)
-            task_sock.detach()
+            sock.detach()
             conn.close()
 
 
