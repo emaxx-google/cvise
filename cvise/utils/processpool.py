@@ -256,6 +256,7 @@ class _PoolRunner:
     """Implements the process pool event loop; is expected to be used on a background thread."""
 
     __slots__ = (
+        '_busy_workers',
         '_event_selector',
         '_future_to_worker_pid',
         '_free_worker_pids',
@@ -263,6 +264,7 @@ class _PoolRunner:
         '_pickled_task_queue',
         '_read_buf',
         '_shared_state',
+        '_shared_task_queue',
         '_shutdown',
         '_stopping_workers',
         '_timeouts_heap',
@@ -274,8 +276,10 @@ class _PoolRunner:
         self._max_active_workers = max_worker_count
         self._shared_state = shared_state
         self._worker_creator = worker_creator
+        self._shared_task_queue = shared_state.task_queue
         self._workers: dict[int, _Worker] = {}
         self._pickled_task_queue: deque[_PickledTask] = deque()
+        self._busy_workers: int = 0
         self._free_worker_pids: deque[int] = deque()
         self._stopping_workers: int = 0
         self._timeouts_heap: list[_TimeoutsHeapNode] = []
@@ -300,20 +304,30 @@ class _PoolRunner:
     def _do_step(self) -> None:
         # print(f'[{datetime.now()}] step', file=sys.stderr)
         assert len(self._free_worker_pids) <= len(self._workers)
+        assert self._busy_workers == len(self._workers) - len(self._free_worker_pids), (
+            f'workers={len(self._workers)} free={len(self._free_worker_pids)} busy={self._busy_workers} stopping={self._stopping_workers} max={self._max_active_workers}'
+        )
         assert 0 <= len(self._workers) - self._stopping_workers, (
             f'workers={len(self._workers)} free={len(self._free_worker_pids)} stopping={self._stopping_workers} max={self._max_active_workers}'
         )
         assert 0 <= len(self._workers) - len(self._free_worker_pids) <= self._max_active_workers, (
             f'workers={len(self._workers)} free={len(self._free_worker_pids)} max={self._max_active_workers}'
         )
-        # assert sum(1 for w in self._workers.values() if w.active_task_future is not None) <= self._max_active_workers
+        assert sum(1 for w in self._workers.values() if w.active_task_future is not None) <= self._max_active_workers
 
         self._mark_timed_out_tasks()
-        if self._shared_state.task_queue:
+        if self._shared_task_queue:
             while True:
                 self._select_and_process_fds(wait=False)
-                if self._shared_state.task_queue:
-                    self._pickle_one_task()
+                if self._shared_task_queue:
+                    if self._busy_workers < self._max_active_workers and self._free_worker_pids:
+                        assert not self._pickled_task_queue
+                        task = self._shared_task_queue.popleft()
+                        if not task.future.cancelled():
+                            worker_pid = self._free_worker_pids.popleft()
+                            self._send_task(task, self._workers[worker_pid])
+                    else:
+                        self._pickle_one_task()
                 else:
                     break
         self._select_and_process_fds(wait=True)
@@ -359,7 +373,9 @@ class _PoolRunner:
         else:
             poll_timeout = None
 
+        # print(f'[{datetime.now()}] select_and_process_fds: timeout={poll_timeout} wait={wait}', file=sys.stderr)
         events = self._event_selector.select(timeout=poll_timeout)
+        # print(f'[{datetime.now()}] select_and_process_fds: events={len(events)}', file=sys.stderr)
         for selector_key, _event_mask in events:
             handler: Callable
             args: tuple
@@ -374,7 +390,7 @@ class _PoolRunner:
             aborts = self._shared_state.scheduled_aborts
             self._shared_state.scheduled_aborts = []
 
-        # print(f'[{datetime.now()}] event: added_tasks={added_tasks} aborts={len(aborts)} tasks={len(self._task_queue)} pickled_tasks={len(self._pickled_task_queue)}', file=sys.stderr)
+        # print(f'[{datetime.now()}] event: aborts={len(aborts)} tasks={len(self._shared_task_queue)} pickled_tasks={len(self._pickled_task_queue)}', file=sys.stderr)
 
         need_recreate = 0
         for task_future in aborts:
@@ -386,12 +402,8 @@ class _PoolRunner:
         self._worker_creator.schedule_creation(need_recreate)
 
         if not self._pickled_task_queue:
-            while (
-                self._shared_state.task_queue
-                and self._free_worker_pids
-                and len(self._workers) - len(self._free_worker_pids) < self._max_active_workers
-            ):
-                task = self._shared_state.task_queue.popleft()
+            while self._shared_task_queue and self._busy_workers < self._max_active_workers and self._free_worker_pids:
+                task = self._shared_task_queue.popleft()
                 if task.future.cancelled():
                     continue
                 worker_pid = self._free_worker_pids.popleft()
@@ -438,7 +450,7 @@ class _PoolRunner:
         except OSError:
             self._handle_worker_conn_eof(worker)
             return
-        # print(f'read from pid={worker.pid} len={nbytes} begin={begin} end={end}', file=sys.stderr)
+        # print(f'read from pid={worker.pid} len={bytes_received} partial_recv={None if worker.partial_recv is None else len(worker.partial_recv)}', file=sys.stderr)
         if not bytes_received:
             self._handle_worker_conn_eof(worker)
             return
@@ -467,6 +479,8 @@ class _PoolRunner:
                 tracked_pid = self._future_to_worker_pid.pop(original_future)
                 assert tracked_pid == pid
                 worker.active_task_future = None
+                self._busy_workers -= 1
+                assert self._busy_workers >= 0
                 self._send_task_or_mark_free(worker)  # eagerly send a new task
                 message = pickle.loads(raw_message)
                 if isinstance(message, Exception):
@@ -496,6 +510,7 @@ class _PoolRunner:
         if worker.sock is None:
             self._workers.pop(worker.pid)
             self._stopping_workers -= 1
+            self._busy_workers -= 1
             assert self._stopping_workers >= 0
             self._maybe_send_task_to_free_worker()
 
@@ -513,27 +528,26 @@ class _PoolRunner:
             packet = packet[nbytes:]
         assert worker.active_task_future is None
         worker.active_task_future = task.future
+        self._busy_workers += 1
         timeout_when = time.monotonic() + task.timeout
         heapq.heappush(self._timeouts_heap, _TimeoutsHeapNode(when=timeout_when, task_future=task.future))
         self._future_to_worker_pid[task.future] = worker.pid
         # print(f'[{datetime.now()}] {"send_task" if isinstance(task, _Task) else "send_pickled_task"} task to pid={worker.pid}', file=sys.stderr)
 
     def _send_task_or_mark_free(self, worker: _Worker) -> None:
-        if len(self._workers) - len(self._free_worker_pids) <= self._max_active_workers:
+        if self._busy_workers < self._max_active_workers:
             if self._pickled_task_queue:
                 self._send_task(self._pickled_task_queue.popleft(), worker)
                 return
-            if self._shared_state.task_queue:
-                self._send_task(self._shared_state.task_queue.popleft(), worker)
+            if self._shared_task_queue:
+                self._send_task(self._shared_task_queue.popleft(), worker)
                 return
         self._free_worker_pids.append(worker.pid)
 
     def _maybe_send_task_to_free_worker(self) -> None:
-        if self._free_worker_pids and (self._shared_state.task_queue or self._pickled_task_queue):
+        if self._free_worker_pids and (self._shared_task_queue or self._pickled_task_queue):
             worker_pid = self._free_worker_pids.popleft()
-            self._send_task(
-                (self._pickled_task_queue or self._shared_state.task_queue).popleft(), self._workers[worker_pid]
-            )
+            self._send_task((self._pickled_task_queue or self._shared_task_queue).popleft(), self._workers[worker_pid])
 
     def _trigger_worker_stop(self, worker_pid: int) -> None:
         worker = self._workers[worker_pid]
@@ -550,10 +564,10 @@ class _PoolRunner:
         )
 
     def _pickle_one_task(self) -> None:
-        task = self._shared_state.task_queue.popleft()
+        task = self._shared_task_queue.popleft()
         packet = bytes(_create_packet((task.f, task.args)))
         self._pickled_task_queue.append(_PickledTask(packet=packet, future=task.future, timeout=task.timeout))
-        # print(f'[{datetime.now()}] pickle_one_task: tasks={len(self._task_queue)} pickled_tasks={len(self._pickled_task_queue)}', file=sys.stderr)
+        # print(f'[{datetime.now()}] pickle_one_task: tasks={len(self._shared_task_queue)} pickled_tasks={len(self._pickled_task_queue)}', file=sys.stderr)
 
     def _mark_timed_out_tasks(self) -> None:
         now = time.monotonic()
@@ -583,6 +597,7 @@ class _PoolRunner:
         if worker.process is None:
             self._workers.pop(worker.pid)
             self._stopping_workers -= 1
+            self._busy_workers -= 1
             self._maybe_send_task_to_free_worker()
 
 
