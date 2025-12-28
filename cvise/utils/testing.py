@@ -7,6 +7,7 @@ import logging
 import math
 import msgspec
 import multiprocessing
+import multiprocessing.managers
 import os
 import platform
 import queue
@@ -22,6 +23,7 @@ from enum import Enum, auto, unique
 from pathlib import Path
 from typing import Any
 
+import pebble
 from cvise.cvise import CVise
 from cvise.passes.abstract import AbstractPass, PassResult
 from cvise.passes.hint_based import HintBasedPass, HintState
@@ -1335,10 +1337,11 @@ def override_tmpdir_env(old_env: Mapping[str, str], tmp_override: Path) -> Mappi
 
 def do_stress(args):
     profiling = os.environ.get('PROF')
-    N = 10000 if profiling else 30000
+    N = (10000 * args.n // 64) if profiling else 30000
     REP = 1 if profiling else args.max_improvement
     CANCEL_EVERY = N // 3 if profiling else N // 10
     OVERCOMMIT = 1
+    IMPL = os.environ.get('IMPL', '')
     from cvise.utils import processpool, sigmonitor
     from cvise.passes import hint_based, blank
     from concurrent.futures import wait
@@ -1350,8 +1353,9 @@ def do_stress(args):
 
     sigmonitor.init(sigmonitor.Mode.QUICK_EXIT, sigchld=False)
     durs = []
+    qps = []
     p = blank.BlankPass()
-    for _ in range(REP):
+    for iter in range(REP):
         arg_arr = [
             hint_based.HintState.create(
                 tmp_dir=Path('kjfajshfsakjhfakjfhdskjhkjfhadf'),
@@ -1367,9 +1371,20 @@ def do_stress(args):
             )
             for j in range(9)
         ]
+        extra_args = []
+        # if IMPL == 'PEBBLE':
+        #     mgr = multiprocessing.managers.SyncManager()
+        #     mgr.start()
+        #     q = mgr.Queue()
+        #     extra_args += [q]
+        sleeping = iter % 2 == 0
         start = time.monotonic()
         futures = []
-        with processpool.ProcessPool(max_active_workers=args.n) as pool:
+        with (
+            pebble.ProcessPool(max_workers=args.n)
+            if IMPL == 'PEBBLE'
+            else processpool.ProcessPool(max_active_workers=args.n)
+        ) as pool:
             for i in range(N):
                 arg = TestEnvironment(
                     state=random.choice(arg_arr),
@@ -1382,9 +1397,13 @@ def do_stress(args):
                     transform=p.transform,
                 )
                 # print(f'enqueue task', file=sys.stderr)
-                futures.append(pool.schedule(_stress, args=(arg,), timeout=100))
-                if i and i % CANCEL_EVERY == 0:
-                    pool.cancel_all(futures)
+                futures.append(pool.schedule(_stress, args=[arg, sleeping, *extra_args], timeout=100))
+                if i and sleeping and i % CANCEL_EVERY == 0:
+                    if IMPL == 'PEBBLE':
+                        for f in futures:
+                            f.cancel()
+                    else:
+                        pool.cancel_all(futures)
                     futures.clear()
                 elif len(futures) >= args.n + OVERCOMMIT:
                     # print('wait begin', file=sys.stderr)
@@ -1395,25 +1414,23 @@ def do_stress(args):
                     futures = list(futures)
             wait(futures)
         dur = (time.monotonic() - start) / N
-        durs.append(dur)
-        print(f'{dur * 1000:.4f}ms min={min(durs) * 1000:.4f}ms')
+        if sleeping:
+            durs.append(dur)
+        else:
+            qps.append(round(1 / dur))
+        print(f'{dur * 1000:.4f}ms min={min(durs) * 1000:.4f}ms{"" if sleeping else f" qps={round(1 / dur)}"}')
         time.sleep(args.timeout)
     dur = min(durs)
     overhead = dur * args.n - 0.01
-    print(f'min={dur * 1000:.4f}ms overhead_per_task={overhead * 1000:.4f}ms')
+    print(f'min={dur * 1000:.4f}ms overhead_per_task={overhead * 1000:.4f}ms max_qps={max(qps)}')
 
 
-from cvise.utils import process
-
-
-def _stress(a: TestEnvironment):
-    time.sleep(0.01)
-    # for _ in range(len(a.state.per_type_states)):
-    #     try:
-    #         sigmonitor.get_future().result(timeout=0.001)
-    #     except TimeoutError:
-    #         pass
-    # process.ProcessEventNotifier().check_output('ls ~', shell=True)
+def _stress(a: TestEnvironment, sleeping: bool, q=None):
+    if sleeping:
+        time.sleep(0.01)
+    if q:
+        q.put(None)
+        q.put(None)
     return TestResult(
         test_script=Path('dadsdadsadaaljafdjfasf'),
         folder=Path('fdakjlkfdjfsakjafkdjsfkjfdsfdsfsdfds'),

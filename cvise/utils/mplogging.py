@@ -4,18 +4,18 @@ import copy
 import io
 import logging
 import multiprocessing
-import multiprocessing.connection
 import multiprocessing.reduction
 import os
+import socket
 import struct
 from typing import Any
 
 
-def init_in_worker(logging_level: int, server_conn: multiprocessing.connection.Connection) -> None:
+def init_in_worker(logging_level: int, server_sock: socket.socket) -> None:
     root = logging.getLogger()
     root.setLevel(logging_level)
     root.handlers.clear()
-    root.addHandler(_MPConnSendingHandler(server_conn))
+    root.addHandler(_MPConnSendingHandler(server_sock))
 
 
 def maybe_handle_message_from_worker(message: Any) -> bool:
@@ -33,9 +33,9 @@ def _emit_log_from_worker(record: logging.LogRecord) -> None:
 class _MPConnSendingHandler(logging.Handler):
     """Sends all logs into the multiprocessing connection."""
 
-    def __init__(self, server_conn: multiprocessing.connection.Connection):
+    def __init__(self, server_sock: socket.socket):
         super().__init__()
-        self._server_conn = server_conn
+        self._server_sock = server_sock
 
     def emit(self, record: logging.LogRecord) -> None:
         prepared = self._prepare_record(record)
@@ -46,7 +46,7 @@ class _MPConnSendingHandler(logging.Handler):
         struct.Struct('i').pack_into(view, 0, len(view) - 5)
         while view:
             try:
-                nbytes = os.write(self._server_conn.fileno(), view)
+                nbytes = self._server_sock.send(view)
             except OSError:
                 # most likely it's due to the main process closing the connection and about to terminate us
                 break
