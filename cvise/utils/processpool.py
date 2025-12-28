@@ -264,7 +264,6 @@ class _PoolRunner:
         '_future_to_worker_pid',
         '_free_worker_pids',
         '_max_active_workers',
-        '_task_queue',
         '_pickled_task_queue',
         '_read_buf',
         '_shared_state',
@@ -280,7 +279,6 @@ class _PoolRunner:
         self._shared_state = shared_state
         self._worker_creator = worker_creator
         self._workers: dict[int, _Worker] = {}
-        self._task_queue: deque[_Task] = deque()
         self._pickled_task_queue: deque[_PickledTask] = deque()
         self._free_worker_pids: deque[int] = deque()
         self._stopping_workers: int = 0
@@ -315,10 +313,10 @@ class _PoolRunner:
         # assert sum(1 for w in self._workers.values() if w.active_task_future is not None) <= self._max_active_workers
 
         self._mark_timed_out_tasks()
-        if self._task_queue:
+        if self._shared_state.task_queue:
             while True:
                 self._select_and_process_fds(wait=False)
-                if self._task_queue:
+                if self._shared_state.task_queue:
                     self._pickle_one_task()
                 else:
                     break
@@ -377,10 +375,6 @@ class _PoolRunner:
 
         with self._shared_state.lock:
             self._shutdown = self._shared_state.shutdown
-            added_tasks = bool(self._shared_state.task_queue)
-            if added_tasks:
-                self._task_queue.extend(self._shared_state.task_queue)
-                self._shared_state.task_queue.clear()
             aborts = self._shared_state.scheduled_aborts
             self._shared_state.scheduled_aborts = []
 
@@ -395,13 +389,13 @@ class _PoolRunner:
                 need_recreate += 1
         self._worker_creator.schedule_creation(need_recreate)
 
-        if added_tasks and not self._pickled_task_queue:
+        if not self._pickled_task_queue:
             while (
-                self._task_queue
+                self._shared_state.task_queue
                 and self._free_worker_pids
                 and len(self._workers) - len(self._free_worker_pids) < self._max_active_workers
             ):
-                task = self._task_queue.popleft()
+                task = self._shared_state.task_queue.popleft()
                 if task.future.cancelled():
                     continue
                 worker_pid = self._free_worker_pids.popleft()
@@ -533,15 +527,17 @@ class _PoolRunner:
             if self._pickled_task_queue:
                 self._send_task(self._pickled_task_queue.popleft(), worker)
                 return
-            if self._task_queue:
-                self._send_task(self._task_queue.popleft(), worker)
+            if self._shared_state.task_queue:
+                self._send_task(self._shared_state.task_queue.popleft(), worker)
                 return
         self._free_worker_pids.append(worker.pid)
 
     def _maybe_send_task_to_free_worker(self) -> None:
-        if self._free_worker_pids and (self._task_queue or self._pickled_task_queue):
+        if self._free_worker_pids and (self._shared_state.task_queue or self._pickled_task_queue):
             worker_pid = self._free_worker_pids.popleft()
-            self._send_task((self._pickled_task_queue or self._task_queue).popleft(), self._workers[worker_pid])
+            self._send_task(
+                (self._pickled_task_queue or self._shared_state.task_queue).popleft(), self._workers[worker_pid]
+            )
 
     def _trigger_worker_stop(self, worker_pid: int) -> None:
         worker = self._workers[worker_pid]
@@ -558,7 +554,7 @@ class _PoolRunner:
         )
 
     def _pickle_one_task(self) -> None:
-        task = self._task_queue.popleft()
+        task = self._shared_state.task_queue.popleft()
         packet = bytes(_create_packet((task.f, task.args)))
         self._pickled_task_queue.append(_PickledTask(packet=packet, future=task.future, timeout=task.timeout))
         # print(f'[{datetime.now()}] pickle_one_task: tasks={len(self._task_queue)} pickled_tasks={len(self._pickled_task_queue)}', file=sys.stderr)
