@@ -149,10 +149,8 @@ class _SharedState(msgspec.Struct):
         with self.lock:
             if self.shutdown:
                 return False
-            should_notify = not self.task_queue and not self.scheduled_aborts
             self.task_queue.append(task)
-        if should_notify:
-            self._notify()
+        self._notify()
         return True
 
     def enqueue_cancels(self, task_futures: list[Future]) -> None:
@@ -161,10 +159,8 @@ class _SharedState(msgspec.Struct):
         with self.lock:
             if self.shutdown:
                 return
-            should_notify = not self.task_queue and not self.scheduled_aborts
             self.scheduled_aborts.extend(task_futures)
-        if should_notify:
-            self._notify()
+        self._notify()
 
     def enqueue_new_worker(
         self,
