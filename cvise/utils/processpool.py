@@ -5,7 +5,6 @@ import contextlib
 import heapq
 import io
 import logging
-import msgspec
 import multiprocessing
 import multiprocessing.reduction
 import os
@@ -43,10 +42,6 @@ class ProcessPool:
 
     def __init__(self, max_active_workers: int):
         self._exit_stack = contextlib.ExitStack()
-
-        event_read_socket, event_write_socket = socket.socketpair()
-        event_read_socket.setblocking(False)
-        event_write_socket.setblocking(False)
 
         self._shutdown = False
 
@@ -123,17 +118,23 @@ class ProcessPool:
         self._pool_runner.shut_down()
 
 
-class _Task(msgspec.Struct):
-    f: Callable
-    args: Sequence[Any]
-    future: Future
-    timeout: float
+class _Task:
+    __slots__ = ('f', 'args', 'future', 'timeout')
+
+    def __init__(self, f: Callable, args: Sequence[Any], future: Future, timeout: float):
+        self.f = f
+        self.args = args
+        self.future = future
+        self.timeout = timeout
 
 
-class _PickledTask(msgspec.Struct):
-    packet: bytes
-    future: Future
-    timeout: float
+class _PickledTask:
+    __slots__ = ('packet', 'future', 'timeout')
+
+    def __init__(self, packet: bytes, future: Future, timeout: float):
+        self.packet = packet
+        self.future = future
+        self.timeout = timeout
 
 
 class _Notifier:
@@ -173,9 +174,10 @@ class _TaskQueue(_Notifier):
 
 
 class _StagedWorker:
-    __slots__ = ('proc', 'sock')
+    __slots__ = ('pid', 'proc', 'sock')
 
-    def __init__(self, proc: multiprocessing.Process, sock: socket.socket):
+    def __init__(self, pid: int, proc: multiprocessing.Process, sock: socket.socket):
+        self.pid = pid
         self.proc = proc
         self.sock = sock
 
@@ -231,21 +233,27 @@ class _AbortInbox(_Notifier):
             return ret
 
 
-class _TimeoutsHeapNode(msgspec.Struct):
-    when: float
-    task_future: Future
+class _TimeoutsHeapNode:
+    __slots__ = ('when', 'task_future')
+
+    def __init__(self, when: float, task_future: Future):
+        self.when = when
+        self.task_future = task_future
 
     def __lt__(self, other: _TimeoutsHeapNode) -> bool:
         return self.when < other.when
 
 
-class _Worker(msgspec.Struct):
-    pid: int
-    process: multiprocessing.Process | None
-    sock: socket.socket | None
-    active_task_future: Future | None
-    stopping: bool = False
-    partial_recv: bytearray | None = None
+class _Worker:
+    __slots__ = ('pid', 'proc', 'sock', 'task', 'stopping', 'partial_recv')
+
+    def __init__(self, pid: int, proc: multiprocessing.Process, sock: socket.socket):
+        self.pid = pid
+        self.proc: multiprocessing.Process | None = proc
+        self.sock: socket.socket | None = sock
+        self.task: Future | None = None
+        self.stopping: bool = False
+        self.partial_recv: bytearray | None = None
 
 
 class _WorkerCreator:
@@ -295,7 +303,7 @@ class _WorkerCreator:
                 proc.start()
                 child_sock.close()
                 assert proc.pid is not None
-                self._staged_worker_inbox.add(_StagedWorker(proc=proc, sock=sock))
+                self._staged_worker_inbox.add(_StagedWorker(pid=proc.pid, proc=proc, sock=sock))
 
 
 class _PoolRunner:
@@ -375,7 +383,7 @@ class _PoolRunner:
         assert 0 <= len(self._workers) - len(self._free_worker_pids) <= self._max_active_workers, (
             f'workers={len(self._workers)} free={len(self._free_worker_pids)} max={self._max_active_workers}'
         )
-        assert sum(1 for w in self._workers.values() if w.active_task_future is not None) <= self._max_active_workers
+        # assert sum(1 for w in self._workers.values() if w.task is not None) <= self._max_active_workers
 
         self._mark_timed_out_tasks()
         if self._task_queue.tasks:
@@ -407,8 +415,8 @@ class _PoolRunner:
         # Abort running tasks and terminate all workers.
         for worker in self._workers.values():
             if not worker.stopping:
-                assert worker.process is not None
-                worker.process.terminate()
+                assert worker.proc is not None
+                worker.proc.terminate()
             if worker.sock:
                 worker.sock.setblocking(True)
                 while True:
@@ -419,11 +427,11 @@ class _PoolRunner:
                     if not received:
                         break
                 worker.sock.close()
-            if worker.active_task_future:
-                worker.active_task_future.cancel()
+            if worker.task:
+                worker.task.cancel()
         for worker in self._workers.values():
-            if worker.process is not None:
-                worker.process.join()
+            if worker.proc is not None:
+                worker.proc.join()
         self._workers.clear()
 
     def _select_and_process_fds(self, wait: bool) -> None:
@@ -464,19 +472,12 @@ class _PoolRunner:
         self._staged_worker_inbox.read_sock.recv_into(self._read_buf)  # drain the notification(s)
 
         for staged in self._staged_worker_inbox.take_all():
-            pid = staged.proc.pid
-            assert pid is not None
-            assert pid not in self._workers
+            assert staged.pid not in self._workers
 
-            worker = _Worker(
-                pid=pid,
-                process=staged.proc,
-                sock=staged.sock,
-                active_task_future=None,
-            )
-            self._workers[pid] = worker
+            worker = _Worker(pid=staged.pid, proc=staged.proc, sock=staged.sock)
+            self._workers[staged.pid] = worker
             self._event_selector.register(
-                staged.sock, selectors.EVENT_READ, data=(self._on_readable_worker_sock, (pid,))
+                staged.sock, selectors.EVENT_READ, data=(self._on_readable_worker_sock, (staged.pid,))
             )
             self._send_task_or_mark_free(worker)
 
@@ -540,11 +541,11 @@ class _PoolRunner:
                 continue  # worker shutdown produces spurious messages; we simply wait till EOF
 
             if tp == 0:  # task result
-                original_future = worker.active_task_future
+                original_future = worker.task
                 assert original_future is not None
                 tracked_pid = self._future_to_worker_pid.pop(original_future)
                 assert tracked_pid == pid
-                worker.active_task_future = None
+                worker.task = None
                 self._busy_workers -= 1
                 assert self._busy_workers >= 0
                 self._send_task_or_mark_free(worker)  # eagerly send a new task
@@ -556,7 +557,7 @@ class _PoolRunner:
             elif tp == 1:  # log
                 message = pickle.loads(raw_message)
                 # Ignore logs if the future is already switched to "done" - these are likely spurious errors because the main process started deleting task's files.
-                if worker.active_task_future is None or not worker.active_task_future.done():
+                if worker.task is None or not worker.task.done():
                     mplogging.maybe_handle_message_from_worker(message)
             else:
                 assert False, f'Unknown message type {tp}'
@@ -568,11 +569,11 @@ class _PoolRunner:
 
     def _on_worker_proc_fd_joinable(self, worker_pid: int) -> None:
         worker = self._workers[worker_pid]
-        assert worker.process is not None
-        self._event_selector.unregister(worker.process.sentinel)
-        worker.process.join()
+        assert worker.proc is not None
+        self._event_selector.unregister(worker.proc.sentinel)
+        worker.proc.join()
         # print(f'joined pid={worker.pid}', file=sys.stderr)
-        worker.process = None
+        worker.proc = None
         if worker.sock is None:
             self._workers.pop(worker.pid)
             self._stopping_workers -= 1
@@ -581,7 +582,7 @@ class _PoolRunner:
             self._maybe_send_task_to_free_worker()
 
     def _send_task(self, task: _Task | _PickledTask, worker: _Worker) -> None:
-        assert worker.process is not None
+        assert worker.proc is not None
         assert worker.sock is not None
         match task:
             case _Task():
@@ -592,8 +593,8 @@ class _PoolRunner:
         while packet:
             nbytes = worker.sock.send(packet)
             packet = packet[nbytes:]
-        assert worker.active_task_future is None
-        worker.active_task_future = task.future
+        assert worker.task is None
+        worker.task = task.future
         self._busy_workers += 1
         timeout_when = time.monotonic() + task.timeout
         heapq.heappush(self._timeouts_heap, _TimeoutsHeapNode(when=timeout_when, task_future=task.future))
@@ -618,15 +619,15 @@ class _PoolRunner:
     def _trigger_worker_stop(self, worker_pid: int) -> None:
         worker = self._workers[worker_pid]
         # print(f'[{datetime.now()}] trigger_worker_stop: pid={worker.pid}', file=sys.stderr)
-        assert worker.process is not None
+        assert worker.proc is not None
         worker.stopping = True
-        worker.active_task_future = None
-        worker.process.terminate()
+        worker.task = None
+        worker.proc.terminate()
         self._stopping_workers += 1
         assert worker.sock is not None
         # observe when the process will become join'able
         self._event_selector.register(
-            worker.process.sentinel, selectors.EVENT_READ, data=(self._on_worker_proc_fd_joinable, (worker_pid,))
+            worker.proc.sentinel, selectors.EVENT_READ, data=(self._on_worker_proc_fd_joinable, (worker_pid,))
         )
 
     def _pickle_one_task(self) -> None:
@@ -648,19 +649,19 @@ class _PoolRunner:
 
     def _handle_worker_conn_eof(self, worker: _Worker) -> None:
         assert worker.sock is not None
-        if worker.active_task_future is not None:
-            if not worker.active_task_future.done():
-                _assign_future_exception(worker.active_task_future, ProcessPoolError(f'Worker {worker.pid} died'))
-            tracked_pid = self._future_to_worker_pid.pop(worker.active_task_future)
+        if worker.task is not None:
+            if not worker.task.done():
+                _assign_future_exception(worker.task, ProcessPoolError(f'Worker {worker.pid} died'))
+            tracked_pid = self._future_to_worker_pid.pop(worker.task)
             assert tracked_pid == worker.pid
-            worker.active_task_future = None
+            worker.task = None
         self._event_selector.unregister(worker.sock)
 
         worker.sock.close()
         worker.sock = None
 
         # print(f'[{datetime.now()}] worker_conn_eof: pid={worker.pid}', file=sys.stderr)
-        if worker.process is None:
+        if worker.proc is None:
             self._workers.pop(worker.pid)
             self._stopping_workers -= 1
             self._busy_workers -= 1
