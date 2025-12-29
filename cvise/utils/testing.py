@@ -858,10 +858,13 @@ class TestManager:
         self.release_all_jobs()
 
     def cancel_job(self, job: Job) -> None:
-        self.worker_pool.cancel_all([job.future])
+        job.future.cancel()
+        self.worker_pool.abort(job.future)
 
     def cancel_jobs(self, jobs: list[Job]) -> None:
-        self.worker_pool.cancel_all([job.future for job in jobs])
+        for job in jobs:
+            job.future.cancel()
+        self.worker_pool.abort_all([job.future for job in jobs])
 
     def run_parallel_tests(self) -> None:
         assert self.worker_pool
@@ -1399,11 +1402,10 @@ def do_stress(args):
                 # print(f'enqueue task', file=sys.stderr)
                 futures.append(pool.schedule(_stress, args=[arg, sleeping, *extra_args], timeout=100))
                 if i and sleeping and i % CANCEL_EVERY == 0:
-                    if IMPL == 'PEBBLE':
-                        for f in futures:
-                            f.cancel()
-                    else:
-                        pool.cancel_all(futures)
+                    for f in futures:
+                        f.cancel()
+                    if IMPL == '':
+                        pool.abort_all(futures)
                     futures.clear()
                 elif len(futures) >= args.n + OVERCOMMIT:
                     # print('wait begin', file=sys.stderr)

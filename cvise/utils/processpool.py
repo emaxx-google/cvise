@@ -17,7 +17,7 @@ import sys
 import threading
 import time
 from collections import deque
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from concurrent.futures import Future
 from datetime import datetime
 from typing import Any
@@ -25,7 +25,7 @@ from typing import Any
 from cvise.utils import mplogging, sigmonitor
 
 
-_RECV_BUF_SIZE = 63536
+_RECV_BUF_SIZE = 65536
 
 
 class ProcessPoolError(Exception):
@@ -42,27 +42,36 @@ class ProcessPool:
     """
 
     def __init__(self, max_active_workers: int):
+        self._exit_stack = contextlib.ExitStack()
+
         event_read_socket, event_write_socket = socket.socketpair()
         event_read_socket.setblocking(False)
         event_write_socket.setblocking(False)
 
-        new_workers_event_read_socket, new_workers_event_write_socket = socket.socketpair()
-        new_workers_event_read_socket.setblocking(False)
-        new_workers_event_write_socket.setblocking(False)
+        self._shutdown = False
 
-        self._shared_state = _SharedState(
-            event_read_socket=event_read_socket,
-            event_write_socket=event_write_socket,
-            lock=threading.Lock(),
-            shutdown=False,
-            task_queue=deque(),
-            scheduled_aborts=[],
-            new_workers=[],
-            new_workers_event_read_socket=new_workers_event_read_socket,
-            new_workers_event_write_socket=new_workers_event_write_socket,
+        self._shutdown_notifier = _Notifier()
+        self._exit_stack.enter_context(self._shutdown_notifier)
+
+        self._task_queue = _TaskQueue()
+        self._exit_stack.enter_context(self._task_queue)
+
+        self._staged_worker_inbox = _StagedWorkerInbox()
+        self._exit_stack.enter_context(self._staged_worker_inbox)
+
+        self._abort_inbox = _AbortInbox()
+        self._exit_stack.enter_context(self._abort_inbox)
+
+        self._worker_creator = _WorkerCreator(self._staged_worker_inbox)
+
+        self._pool_runner = _PoolRunner(
+            max_active_workers=max_active_workers,
+            shutdown_notifier=self._shutdown_notifier,
+            task_queue=self._task_queue,
+            staged_worker_inbox=self._staged_worker_inbox,
+            abort_inbox=self._abort_inbox,
+            worker_creator=self._worker_creator,
         )
-        self._worker_creator = _WorkerCreator(self._shared_state)
-        self._pool_runner = _PoolRunner(max_active_workers, self._shared_state, worker_creator=self._worker_creator)
         self._pool_runner_thread = threading.Thread(target=self._pool_thread_main, name='PoolThread', daemon=True)
 
     def __enter__(self):
@@ -75,24 +84,39 @@ class ProcessPool:
         self._pool_runner_thread.join(60)
         if self._pool_runner_thread.is_alive():
             logging.warning('Failed to stop process pool thread')
-        self._shared_state.close()
+        self._exit_stack.__exit__(exc_type, exc_val, exc_tb)
+
+        # Clear leftovers:
+
+        for task in self._task_queue.tasks:
+            task.future.cancel()
+
+        staged_workers = self._staged_worker_inbox.take_all()
+        for staged in staged_workers:
+            staged.proc.terminate()
+        for staged in staged_workers:
+            staged.proc.join()
 
     def stop(self) -> None:
         """Initiates cancellation of pending tasks and termination of already running ones."""
-        self._shared_state.notify_shutdown()
+        self._shutdown = True
+        self._shutdown_notifier.notify()
         self._worker_creator.notify_shutdown()
 
     def schedule(self, f: Callable, args: Sequence[Any], timeout: float) -> Future:
         future = Future()
-        task = _Task(f=f, args=args, future=future, timeout=timeout)
-        if not self._shared_state.enqueue_task(task):
-            future.cancel()  # we're in shutdown
+        if self._shutdown:
+            future.cancel()
+        else:
+            task = _Task(f=f, args=args, future=future, timeout=timeout)
+            self._task_queue.enqueue(task)
         return future
 
-    def cancel_all(self, futures: list[Future]) -> None:
-        self._shared_state.enqueue_cancels(futures)
-        for future in futures:
-            future.cancel()
+    def abort(self, future: Future) -> None:
+        self._abort_inbox.add(future)
+
+    def abort_all(self, futures: list[Future]) -> None:
+        self._abort_inbox.add_all(futures)
 
     def _pool_thread_main(self) -> None:
         self._pool_runner.run()
@@ -112,72 +136,99 @@ class _PickledTask(msgspec.Struct):
     timeout: float
 
 
-class _SharedState(msgspec.Struct):
-    """State shared between the pool runner thread and other threads.
+class _Notifier:
+    __slots__ = ('read_sock', '_write_sock')
 
-    Most importantly, this is used to deliver newly scheduled tasks and task cancellations.
-    """
+    def __init__(self):
+        self.read_sock: socket.socket
+        self._write_sock: socket.socket
 
-    event_read_socket: socket.socket
-    event_write_socket: socket.socket
-    lock: threading.Lock
-    shutdown: bool
-    task_queue: deque[_Task]
-    scheduled_aborts: list[Future]
-    new_workers: list[tuple[multiprocessing.Process, socket.socket]]
-    new_workers_event_read_socket: socket.socket
-    new_workers_event_write_socket: socket.socket
+    def __enter__(self) -> _Notifier:
+        self.read_sock, self._write_sock = socket.socketpair()
+        self.read_sock.setblocking(False)
+        self._write_sock.setblocking(False)
+        return self
 
-    def close(self) -> None:
-        self.event_read_socket.close()
-        self.event_write_socket.close()
-        self.new_workers_event_read_socket.close()
-        self.new_workers_event_write_socket.close()
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+        self.read_sock.close()
+        self._write_sock.close()
 
-    def take_all_tasks(self) -> list[_Task]:
-        with self.lock:
-            tasks = list(self.task_queue)
-            self.task_queue.clear()
-        return tasks
+    def notify(self) -> None:
+        try:
+            self._write_sock.send(b'\0')
+        except BlockingIOError:
+            pass  # no need in excessive notifications
 
-    def notify_shutdown(self) -> None:
-        with self.lock:
-            self.shutdown = True
-        self._notify()
 
-    def enqueue_task(self, task: _Task) -> bool:
-        with self.lock:
-            if self.shutdown:
-                return False
-            self.task_queue.append(task)
-        self._notify()
-        return True
+class _TaskQueue(_Notifier):
+    __slots__ = ('tasks',)
 
-    def enqueue_cancels(self, task_futures: list[Future]) -> None:
-        if not task_futures:
-            return
-        with self.lock:
-            if self.shutdown:
-                return
-            self.scheduled_aborts.extend(task_futures)
-        self._notify()
+    def __init__(self):
+        super().__init__()
+        self.tasks: deque[_Task] = deque()
 
-    def enqueue_new_worker(
-        self,
-        proc: multiprocessing.Process,
-        sock: socket.socket,
-    ) -> bool:
-        with self.lock:
-            if self.shutdown:
-                return False
-            should_notify = not self.new_workers
-            self.new_workers.append((proc, sock))
+    def enqueue(self, task: _Task) -> None:
+        self.tasks.append(task)
+        self.notify()
+
+
+class _StagedWorker:
+    __slots__ = ('proc', 'sock')
+
+    def __init__(self, proc: multiprocessing.Process, sock: socket.socket):
+        self.proc = proc
+        self.sock = sock
+
+
+class _StagedWorkerInbox(_Notifier):
+    __slots__ = ('_lock', '_workers')
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._workers: list[_StagedWorker] = []
+
+    def add(self, worker: _StagedWorker) -> None:
+        with self._lock:
+            should_notify = not self._workers  # no need in notifying more than once
+            self._workers.append(worker)
         if should_notify:
-            self.new_workers_event_write_socket.send(b'\0')
-        return True
+            self.notify()
 
-    def _notify(self) -> None:
-        self.event_write_socket.send(b'\0')
+    def take_all(self) -> list[_StagedWorker]:
+        with self._lock:
+            ret = self._workers
+            self._workers = []
+        return ret
+
+
+class _AbortInbox(_Notifier):
+    __slots__ = ('_lock', '_aborts')
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._aborts: list[Future] = []
+
+    def add(self, abort: Future) -> None:
+        with self._lock:
+            should_notify = not self._aborts  # no need in notifying more than once
+            self._aborts.append(abort)
+        if should_notify:
+            self.notify()
+
+    def add_all(self, aborts: Collection[Future]) -> None:
+        if not aborts:
+            return
+        with self._lock:
+            should_notify = not self._aborts  # no need in notifying more than once
+            self._aborts.extend(aborts)
+        if should_notify:
+            self.notify()
+
+    def take_all(self) -> list[Future]:
+        with self._lock:
+            ret = self._aborts
+            self._aborts = []
+            return ret
 
 
 class _TimeoutsHeapNode(msgspec.Struct):
@@ -198,8 +249,8 @@ class _Worker(msgspec.Struct):
 
 
 class _WorkerCreator:
-    def __init__(self, shared_state: _SharedState):
-        self._shared_state = shared_state
+    def __init__(self, staged_worker_inbox: _StagedWorkerInbox):
+        self._staged_worker_inbox = staged_worker_inbox
         self._cond = threading.Condition()
         self._scheduled_count = 0
         self._shutdown = False
@@ -244,18 +295,14 @@ class _WorkerCreator:
                 proc.start()
                 child_sock.close()
                 assert proc.pid is not None
-                if not self._shared_state.enqueue_new_worker(proc, sock):
-                    # shutdown
-                    sock.close()
-                    proc.terminate()
-                    proc.join()
-                    return
+                self._staged_worker_inbox.add(_StagedWorker(proc=proc, sock=sock))
 
 
 class _PoolRunner:
     """Implements the process pool event loop; is expected to be used on a background thread."""
 
     __slots__ = (
+        '_abort_inbox',
         '_busy_workers',
         '_event_selector',
         '_future_to_worker_pid',
@@ -263,20 +310,31 @@ class _PoolRunner:
         '_max_active_workers',
         '_pickled_task_queue',
         '_read_buf',
-        '_shared_state',
-        '_shared_task_queue',
         '_shutdown',
+        '_shutdown_notifier',
+        '_staged_worker_inbox',
         '_stopping_workers',
+        '_task_queue',
         '_timeouts_heap',
         '_worker_creator',
         '_workers',
     )
 
-    def __init__(self, max_worker_count: int, shared_state: _SharedState, worker_creator: _WorkerCreator):
-        self._max_active_workers = max_worker_count
-        self._shared_state = shared_state
+    def __init__(
+        self,
+        max_active_workers: int,
+        shutdown_notifier: _Notifier,
+        task_queue: _TaskQueue,
+        staged_worker_inbox: _StagedWorkerInbox,
+        abort_inbox: _AbortInbox,
+        worker_creator: _WorkerCreator,
+    ):
+        self._max_active_workers = max_active_workers
+        self._shutdown_notifier = shutdown_notifier
+        self._task_queue = task_queue
+        self._staged_worker_inbox = staged_worker_inbox
+        self._abort_inbox = abort_inbox
         self._worker_creator = worker_creator
-        self._shared_task_queue = shared_state.task_queue
         self._workers: dict[int, _Worker] = {}
         self._pickled_task_queue: deque[_PickledTask] = deque()
         self._busy_workers: int = 0
@@ -285,14 +343,18 @@ class _PoolRunner:
         self._timeouts_heap: list[_TimeoutsHeapNode] = []
         self._event_selector = selectors.DefaultSelector()
         self._event_selector.register(
-            self._shared_state.event_read_socket, selectors.EVENT_READ, data=(self._handle_shared_state_fd, ())
+            self._shutdown_notifier.read_sock, selectors.EVENT_READ, data=(self._handle_shutdown_fd, ())
+        )
+        self._event_selector.register(
+            self._task_queue.read_sock, selectors.EVENT_READ, data=(self._handle_task_queue_fd, ())
+        )
+        self._event_selector.register(
+            self._staged_worker_inbox.read_sock, selectors.EVENT_READ, data=(self._handle_staged_worker_inbox_fd, ())
+        )
+        self._event_selector.register(
+            self._abort_inbox.read_sock, selectors.EVENT_READ, data=(self._handle_abort_inbox_fd, ())
         )
         self._read_buf = bytearray(_RECV_BUF_SIZE)
-        self._event_selector.register(
-            self._shared_state.new_workers_event_read_socket,
-            selectors.EVENT_READ,
-            data=(self._handle_new_workers_fd, ()),
-        )
         self._shutdown = False
         self._future_to_worker_pid: dict[Future, int] = {}
 
@@ -316,13 +378,13 @@ class _PoolRunner:
         assert sum(1 for w in self._workers.values() if w.active_task_future is not None) <= self._max_active_workers
 
         self._mark_timed_out_tasks()
-        if self._shared_task_queue:
+        if self._task_queue.tasks:
             while True:
                 self._select_and_process_fds(wait=False)
-                if self._shared_task_queue:
+                if self._task_queue.tasks:
                     if self._busy_workers < self._max_active_workers and self._free_worker_pids:
                         assert not self._pickled_task_queue
-                        task = self._shared_task_queue.popleft()
+                        task = self._task_queue.tasks.popleft()
                         if not task.future.cancelled():
                             worker_pid = self._free_worker_pids.popleft()
                             self._send_task(task, self._workers[worker_pid])
@@ -339,7 +401,8 @@ class _PoolRunner:
         for task in self._pickled_task_queue:
             task.future.cancel()
         self._pickled_task_queue.clear()
-        for task in self._shared_state.take_all_tasks():
+        while self._task_queue.tasks:
+            task = self._task_queue.tasks.popleft()
             task.future.cancel()
         # Abort running tasks and terminate all workers.
         for worker in self._workers.values():
@@ -382,53 +445,56 @@ class _PoolRunner:
             handler, args = selector_key.data
             handler(*args)
 
-    def _handle_shared_state_fd(self) -> None:
-        self._shared_state.event_read_socket.recv_into(self._read_buf)  # drain the notification(s)
+    def _handle_shutdown_fd(self) -> None:
+        self._shutdown_notifier.read_sock.recv_into(self._read_buf)  # drain the notification(s)
+        self._shutdown = True
 
-        with self._shared_state.lock:
-            self._shutdown = self._shared_state.shutdown
-            aborts = self._shared_state.scheduled_aborts
-            self._shared_state.scheduled_aborts = []
-
-        # print(f'[{datetime.now()}] event: aborts={len(aborts)} tasks={len(self._shared_task_queue)} pickled_tasks={len(self._pickled_task_queue)}', file=sys.stderr)
-
-        need_recreate = 0
-        for task_future in aborts:
-            worker_pid = self._future_to_worker_pid.pop(task_future, None)
-            if worker_pid is not None:
-                # the task is actually running currently
-                self._trigger_worker_stop(worker_pid)
-                need_recreate += 1
-        self._worker_creator.schedule_creation(need_recreate)
+    def _handle_task_queue_fd(self) -> None:
+        self._task_queue.read_sock.recv_into(self._read_buf)  # drain the notification(s)
 
         if not self._pickled_task_queue:
-            while self._shared_task_queue and self._busy_workers < self._max_active_workers and self._free_worker_pids:
-                task = self._shared_task_queue.popleft()
+            while self._task_queue.tasks and self._busy_workers < self._max_active_workers and self._free_worker_pids:
+                task = self._task_queue.tasks.popleft()
                 if task.future.cancelled():
                     continue
                 worker_pid = self._free_worker_pids.popleft()
                 self._send_task(task, self._workers[worker_pid])
 
-    def _handle_new_workers_fd(self) -> None:
-        self._shared_state.new_workers_event_read_socket.recv_into(self._read_buf)  # drain the notification(s)
+    def _handle_staged_worker_inbox_fd(self) -> None:
+        self._staged_worker_inbox.read_sock.recv_into(self._read_buf)  # drain the notification(s)
 
-        with self._shared_state.lock:
-            new_workers = self._shared_state.new_workers
-            self._shared_state.new_workers = []
-
-        for proc, sock in new_workers:
-            assert proc.pid is not None
-            assert proc.pid not in self._workers
+        for staged in self._staged_worker_inbox.take_all():
+            pid = staged.proc.pid
+            assert pid is not None
+            assert pid not in self._workers
 
             worker = _Worker(
-                pid=proc.pid,
-                process=proc,
-                sock=sock,
+                pid=pid,
+                process=staged.proc,
+                sock=staged.sock,
                 active_task_future=None,
             )
-            self._workers[proc.pid] = worker
-            self._event_selector.register(sock, selectors.EVENT_READ, data=(self._on_readable_worker_sock, (proc.pid,)))
+            self._workers[pid] = worker
+            self._event_selector.register(
+                staged.sock, selectors.EVENT_READ, data=(self._on_readable_worker_sock, (pid,))
+            )
             self._send_task_or_mark_free(worker)
+
+    def _handle_abort_inbox_fd(self) -> None:
+        self._abort_inbox.read_sock.recv_into(self._read_buf)  # drain the notification(s)
+
+        # print(f'[{datetime.now()}] event: aborts={len(aborts)} tasks={len(self._task_queue.tasks)} pickled_tasks={len(self._pickled_task_queue)}', file=sys.stderr)
+
+        workers_to_create = 0
+        for task_future in self._abort_inbox.take_all():
+            worker_pid = self._future_to_worker_pid.pop(task_future, None)
+            if worker_pid is None:
+                # the task hasn't started or already finished
+                continue
+            self._trigger_worker_stop(worker_pid)
+            workers_to_create += 1
+        if workers_to_create:
+            self._worker_creator.schedule_creation(workers_to_create)
 
     def _on_readable_worker_sock(self, pid: int) -> None:
         worker = self._workers[pid]
@@ -539,15 +605,15 @@ class _PoolRunner:
             if self._pickled_task_queue:
                 self._send_task(self._pickled_task_queue.popleft(), worker)
                 return
-            if self._shared_task_queue:
-                self._send_task(self._shared_task_queue.popleft(), worker)
+            if self._task_queue.tasks:
+                self._send_task(self._task_queue.tasks.popleft(), worker)
                 return
         self._free_worker_pids.append(worker.pid)
 
     def _maybe_send_task_to_free_worker(self) -> None:
-        if self._free_worker_pids and (self._shared_task_queue or self._pickled_task_queue):
+        if self._free_worker_pids and (self._task_queue.tasks or self._pickled_task_queue):
             worker_pid = self._free_worker_pids.popleft()
-            self._send_task((self._pickled_task_queue or self._shared_task_queue).popleft(), self._workers[worker_pid])
+            self._send_task((self._pickled_task_queue or self._task_queue.tasks).popleft(), self._workers[worker_pid])
 
     def _trigger_worker_stop(self, worker_pid: int) -> None:
         worker = self._workers[worker_pid]
@@ -564,10 +630,10 @@ class _PoolRunner:
         )
 
     def _pickle_one_task(self) -> None:
-        task = self._shared_task_queue.popleft()
+        task = self._task_queue.tasks.popleft()
         packet = bytes(_create_packet((task.f, task.args)))
         self._pickled_task_queue.append(_PickledTask(packet=packet, future=task.future, timeout=task.timeout))
-        # print(f'[{datetime.now()}] pickle_one_task: tasks={len(self._shared_task_queue)} pickled_tasks={len(self._pickled_task_queue)}', file=sys.stderr)
+        # print(f'[{datetime.now()}] pickle_one_task: tasks={len(self._task_queue.tasks)} pickled_tasks={len(self._pickled_task_queue)}', file=sys.stderr)
 
     def _mark_timed_out_tasks(self) -> None:
         now = time.monotonic()
@@ -578,7 +644,7 @@ class _PoolRunner:
             heapq.heappop(self._timeouts_heap)
             if not node.task_future.done():
                 _assign_future_exception(node.task_future, TimeoutError('Job timed out'))
-                self._shared_state.enqueue_cancels([node.task_future])
+                self._abort_inbox.add(node.task_future)
 
     def _handle_worker_conn_eof(self, worker: _Worker) -> None:
         assert worker.sock is not None
