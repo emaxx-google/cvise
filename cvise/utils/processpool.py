@@ -18,10 +18,11 @@ import time
 from collections import deque
 from collections.abc import Callable, Collection, Sequence
 from concurrent.futures import Future
+from copy import copy
 from datetime import datetime
 from typing import Any
 
-from cvise.utils import mplogging, sigmonitor
+from cvise.utils import sigmonitor
 
 
 _DEFAULT_RECV_BUF_SIZE = 65536
@@ -306,8 +307,7 @@ class _WorkerCreator:
                 sock.setblocking(False)
                 child_sock.setblocking(True)
                 proc = multiprocessing.Process(
-                    target=_worker_process_main,
-                    args=(self._recv_buf_size, logging.getLogger().getEffectiveLevel(), child_sock),
+                    target=_WorkerRunner(self._recv_buf_size, logging.getLogger().getEffectiveLevel(), child_sock).run
                 )
                 proc.start()
                 child_sock.close()
@@ -400,7 +400,7 @@ class _PoolRunner:
         self._mark_timed_out_tasks()
         while self._task_queue.tasks:
             self._select_and_process_fds(wait=False)
-            self._maybe_send_or_marshal_one_task()
+            self._maybe_send_or_marshal_single_task()
         self._select_and_process_fds(wait=True)
 
     def shut_down(self) -> None:
@@ -511,7 +511,7 @@ class _PoolRunner:
                 worker.partial_recv.extend(chunk)
                 view = memoryview(worker.partial_recv)
         except (BlockingIOError, TimeoutError):
-            raise
+            raise  # we expect the file descriptor to be in non-blocking mode
         except OSError:
             self._handle_worker_conn_eof(worker)
             return
@@ -556,7 +556,9 @@ class _PoolRunner:
                 message = pickle.loads(raw_message)
                 # Ignore logs if the future is already switched to "done" - these are likely spurious errors because the main process started deleting task's files.
                 if worker.task_future is None or not worker.task_future.done():
-                    mplogging.maybe_handle_message_from_worker(message)
+                    record: logging.LogRecord = message
+                    logger = logging.getLogger(record.name)
+                    logger.handle(record)
             else:
                 assert False, f'Unknown message type {tp}'
 
@@ -628,7 +630,7 @@ class _PoolRunner:
             worker.proc.sentinel, selectors.EVENT_READ, data=(self._on_worker_proc_fd_joinable, (worker_pid,))
         )
 
-    def _maybe_send_or_marshal_one_task(self) -> None:
+    def _maybe_send_or_marshal_single_task(self) -> None:
         if not self._task_queue.tasks:
             return
         task = self._task_queue.tasks.popleft()
@@ -676,81 +678,99 @@ class _PoolRunner:
             self._maybe_send_task_to_free_worker()
 
 
-def _worker_process_main(
-    recv_buf_size: int,
-    logging_level: int,
-    sock: socket.socket,
-) -> None:
-    # print(f'worker[{os.getpid()}]: started', file=sys.stderr)
-    sigmonitor.init(sigmonitor.Mode.QUICK_EXIT, sigint=False, sigchld=True)
-    mplogging.init_in_worker(logging_level=logging_level, server_sock=sock)
-    wakeup_fd = sigmonitor.get_wakeup_fd()
-    recv_buf = bytearray(recv_buf_size)
-    with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND):
-        with sock:
+class _WorkerRunner:
+    __slots__ = ('_logging_level', '_recv_buf', '_recv_buf_size', '_shutdown', '_sock_to_server')
+
+    def __init__(self, recv_buf_size: int, logging_level: int, sock_to_server: socket.socket):
+        self._recv_buf_size = recv_buf_size
+        self._logging_level = logging_level
+        self._sock_to_server = sock_to_server
+        self._shutdown: bool = False
+        self._recv_buf: bytearray  # to be initialized in the child process
+
+    def _init_in_child_process(self) -> None:
+        sigmonitor.init(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND, sigint=False, sigchld=True)
+
+        root = logging.getLogger()
+        root.setLevel(self._logging_level)
+        root.handlers.clear()
+        root.addHandler(_LogSender(self._sock_to_server))
+
+        self._recv_buf = bytearray(self._recv_buf_size)
+
+    def run(self) -> None:
+        self._init_in_child_process()
+        # print(f'worker[{os.getpid()}]: started', file=sys.stderr)
+        # with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND):
+        with self._sock_to_server:
             with selectors.DefaultSelector() as event_selector:
-                event_selector.register(sock, selectors.EVENT_READ)
-                event_selector.register(wakeup_fd, selectors.EVENT_READ)
-                # Handle incoming tasks in an infinite loop (until stopped by a signal).
-                while True:
+                event_selector.register(
+                    self._sock_to_server, selectors.EVENT_READ, data=(self._handle_sock_to_server_fd, ())
+                )
+                wakeup_fd = sigmonitor.get_wakeup_fd()
+                event_selector.register(
+                    wakeup_fd, selectors.EVENT_READ, data=(self._handle_sigmonitor_wakeup_fd, (wakeup_fd,))
+                )
+                # Handle incoming tasks in an infinite loop (until stopped by a signal or the socket closure).
+                while not self._shutdown:
                     events = event_selector.select()
-                    can_recv = False
                     for selector_key, _event_mask in events:
-                        if selector_key.fileobj == wakeup_fd:
-                            try:
-                                os.read(wakeup_fd, 1024)
-                            except (BlockingIOError, TimeoutError):
-                                raise
-                            except OSError:
-                                pass
-                            sigmonitor.maybe_retrigger_action()
-                        else:
-                            can_recv = True
-                    if can_recv:
-                        sz: int | None = None
-                        total = 0
-                        while True:
-                            if total == len(recv_buf):
-                                recv_buf.extend(b'\0' * len(recv_buf))
-                            view = memoryview(recv_buf)
-                            try:
-                                nbytes = sock.recv_into(view[total:])
-                            except (BlockingIOError, TimeoutError):
-                                raise
-                            except OSError:
-                                return
-                            if not nbytes:
-                                return
-                            total += nbytes
-                            if sz is None:
-                                assert total >= 4
-                                sz = view[:4].cast('i')[0]
-                            if total >= 5 + sz:
-                                break
-                            view.release()
-                        assert total == 5 + sz
-                        assert view[4] == 0  # tp
-                        # print(f'worker[{os.getpid()}]: received sz={sz}', file=sys.stderr)
-                        raw_message = view[5:total]
-                        view.release()
-                        f, args = pickle.loads(raw_message)
-                        raw_message.release()
-                        # print(f'worker[{os.getpid()}]: task begin', file=sys.stderr)
-                        try:
-                            result = f(*args)
-                        except Exception as e:
-                            result = e
-                        # print(f'worker[{os.getpid()}]: task end', file=sys.stderr)
-                        sigmonitor.maybe_retrigger_action()
-                        wire_bytes = _marshal_task(result)
-                        # print(f'worker[{os.getpid()}]: task reply size={len(packet)}', file=sys.stderr)
-                        try:
-                            sock.sendall(wire_bytes)
-                        except (BlockingIOError, TimeoutError):
-                            raise
-                        except OSError:
-                            break
-                        wire_bytes.release()
+                        handler: Callable
+                        args: tuple
+                        handler, args = selector_key.data
+                        handler(*args)
+
+    def _handle_sigmonitor_wakeup_fd(self, sigmonitor_wakeup_fd: int) -> None:
+        sigmonitor.eat_wakeup_fd_notifications()
+        sigmonitor.maybe_retrigger_action()
+
+    def _handle_sock_to_server_fd(self) -> None:
+        sz: int | None = None
+        total = 0
+        while True:
+            if total == len(self._recv_buf):
+                self._recv_buf.extend(b'\0' * len(self._recv_buf))
+            view = memoryview(self._recv_buf)
+            try:
+                nbytes = self._sock_to_server.recv_into(view[total:])
+            except (BlockingIOError, TimeoutError):
+                raise  # we expect the file descriptor to be in non-blocking mode
+            except OSError:
+                self._shutdown = True
+                return
+            if not nbytes:
+                self._shutdown = True
+                return
+            total += nbytes
+            if sz is None:
+                assert total >= 4
+                sz = view[:4].cast('i')[0]
+            if total >= 5 + sz:
+                break
+            view.release()
+        assert total == 5 + sz
+        assert view[4] == 0  # tp
+        # print(f'worker[{os.getpid()}]: received sz={sz}', file=sys.stderr)
+        raw_message = view[5:total]
+        view.release()
+        f, args = pickle.loads(raw_message)
+        raw_message.release()
+        # print(f'worker[{os.getpid()}]: task begin', file=sys.stderr)
+        try:
+            result = f(*args)
+        except Exception as e:
+            result = e
+        # print(f'worker[{os.getpid()}]: task end', file=sys.stderr)
+        sigmonitor.maybe_retrigger_action()
+        wire_bytes = _marshal_task(result)
+        # print(f'worker[{os.getpid()}]: task reply size={len(packet)}', file=sys.stderr)
+        try:
+            self._sock_to_server.sendall(wire_bytes)
+        except BlockingIOError:
+            raise  # we expect the file descriptor to be in non-blocking mode
+        except OSError:
+            self._shutdown = True
+        wire_bytes.release()
 
 
 _pickler_bytes_io: io.BytesIO | None = None
@@ -789,3 +809,38 @@ def _assign_future_exception(future: Future, exc: BaseException) -> None:
     with contextlib.suppress(concurrent.futures.InvalidStateError):  # cover against concurrent changes
         future.set_exception(exc)
         # print(f'set_exception', file=sys.stderr)
+
+
+class _LogSender(logging.Handler):
+    """Sends all logs into the multiprocessing connection."""
+
+    def __init__(self, sock_to_server: socket.socket):
+        super().__init__()
+        self._sock_to_server = sock_to_server
+
+    def emit(self, record: logging.LogRecord) -> None:
+        prepared = self._prepare_record(record)
+        buf = io.BytesIO()
+        buf.write(b'\0\0\0\0\1')
+        multiprocessing.reduction.ForkingPickler(buf).dump(prepared)
+        view = buf.getbuffer()
+        struct.Struct('i').pack_into(view, 0, len(view) - 5)
+        try:
+            self._sock_to_server.sendall(view)
+        except BlockingIOError:
+            raise  # we expect the file descriptor to be in non-blocking mode
+        except OSError:
+            # most likely it's due to the main process closing the connection and about to terminate us
+            pass
+
+    def _prepare_record(self, record: logging.LogRecord) -> logging.LogRecord:
+        """Formats the message, removes unpickleable fields and those not necessary for formatting."""
+        formatted = self.format(record)
+        record = copy(record)
+        record.message = formatted
+        record.msg = formatted
+        record.args = None
+        record.exc_info = None
+        record.exc_text = None
+        record.stack_info = None
+        return record

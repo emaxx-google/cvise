@@ -135,7 +135,6 @@ set(SOURCE_FILES
   "utils/folding.py"
   "utils/hint.py"
   "utils/makefileparser.py"
-  "utils/mplogging.py"
   "utils/nestedmatcher.py"
   "utils/process.py"
   "utils/processpool.py"

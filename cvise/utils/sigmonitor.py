@@ -30,6 +30,9 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
+_WAKEUP_READ_BUF_SIZE = 1024
+
+
 @enum.unique
 class Mode(enum.Enum):
     OFF = enum.auto()
@@ -44,23 +47,24 @@ _sigterm_observed: bool = False
 _future: Future | None = None
 _wakeup_read_fd: int | None = None
 _wakeup_write_fd: int | None = None
+_wakeup_read_buf: bytearray | None = None
 
 
 def init(mode: Mode, sigint: bool = True, sigchld: bool = True) -> None:
     global _mode
     _mode = mode
 
-    global _wakeup_read_fd, _wakeup_write_fd
+    global _wakeup_read_fd, _wakeup_write_fd, _wakeup_read_buf
     if _wakeup_read_fd is None:
         read_socket, write_socket = socket.socketpair()
         read_socket.setblocking(False)
         write_socket.setblocking(False)
         _wakeup_read_fd = read_socket.detach()
         _wakeup_write_fd = write_socket.detach()
+        _wakeup_read_buf = bytearray(_WAKEUP_READ_BUF_SIZE)
     else:
-        # Pump previous wakeup FD notifications (presumably only relevant for tests that reuse the same process).
-        with contextlib.suppress(OSError):
-            os.read(_wakeup_read_fd, 1024)
+        # Discard previous wakeup FD notifications (presumably only relevant for tests that reuse the same process).
+        eat_wakeup_fd_notifications(ignore_blocking=True)
     assert _wakeup_write_fd is not None
     signal.set_wakeup_fd(_wakeup_write_fd, warn_on_full_buffer=False)
 
@@ -112,6 +116,18 @@ def get_future() -> Future:
 def get_wakeup_fd() -> int:
     assert _wakeup_read_fd is not None
     return _wakeup_read_fd
+
+
+def eat_wakeup_fd_notifications(ignore_blocking: bool = False) -> None:
+    assert _wakeup_read_fd is not None
+    assert _wakeup_read_buf
+    try:
+        os.readv(_wakeup_read_fd, (_wakeup_read_buf,))
+    except (BlockingIOError, TimeoutError):
+        if not ignore_blocking:
+            raise
+    except OSError:
+        pass
 
 
 def signal_observed_for_testing() -> bool:
