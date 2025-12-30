@@ -24,7 +24,7 @@ from typing import Any
 from cvise.utils import mplogging, sigmonitor
 
 
-_RECV_BUF_SIZE = 65536
+_DEFAULT_RECV_BUF_SIZE = 65536
 
 
 class ProcessPoolError(Exception):
@@ -40,7 +40,7 @@ class ProcessPool:
     take place in C-Vise).
     """
 
-    def __init__(self, max_active_workers: int):
+    def __init__(self, max_active_workers: int, recv_buf_size: int = _DEFAULT_RECV_BUF_SIZE):
         self._exit_stack = contextlib.ExitStack()
 
         self._shutdown = False
@@ -57,10 +57,11 @@ class ProcessPool:
         self._abort_inbox = _AbortInbox()
         self._exit_stack.enter_context(self._abort_inbox)
 
-        self._worker_creator = _WorkerCreator(self._staged_worker_inbox)
+        self._worker_creator = _WorkerCreator(recv_buf_size, self._staged_worker_inbox)
 
         self._pool_runner = _PoolRunner(
             max_active_workers=max_active_workers,
+            recv_buf_size=recv_buf_size,
             shutdown_notifier=self._shutdown_notifier,
             task_queue=self._task_queue,
             staged_worker_inbox=self._staged_worker_inbox,
@@ -69,13 +70,13 @@ class ProcessPool:
         )
         self._pool_runner_thread = threading.Thread(target=self._pool_thread_main, name='PoolThread', daemon=True)
 
-    def __enter__(self):
+    def __enter__(self) -> ProcessPool:
         self._pool_runner_thread.start()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.stop()
-        self._worker_creator.join()
+        self._worker_creator.join_thread()
         self._pool_runner_thread.join(60)
         if self._pool_runner_thread.is_alive():
             logging.warning('Failed to stop process pool thread')
@@ -159,6 +160,9 @@ class _Notifier:
             self._write_sock.send(b'\0')
         except BlockingIOError:
             pass  # no need in excessive notifications
+
+    def eat_notifications(self, buf: bytearray) -> None:
+        self.read_sock.recv_into(buf)
 
 
 class _TaskQueue(_Notifier):
@@ -261,7 +265,8 @@ class _Worker:
 
 
 class _WorkerCreator:
-    def __init__(self, staged_worker_inbox: _StagedWorkerInbox):
+    def __init__(self, recv_buf_size: int, staged_worker_inbox: _StagedWorkerInbox):
+        self._recv_buf_size = recv_buf_size
         self._staged_worker_inbox = staged_worker_inbox
         self._cond = threading.Condition()
         self._scheduled_count = 0
@@ -279,7 +284,7 @@ class _WorkerCreator:
             self._shutdown = True
             self._cond.notify()
 
-    def join(self):
+    def join_thread(self) -> None:
         self._thread.join(60)
         if self._thread.is_alive():
             logging.warning('Failed to stop WorkerCreator thread')
@@ -302,7 +307,7 @@ class _WorkerCreator:
                 child_sock.setblocking(True)
                 proc = multiprocessing.Process(
                     target=_worker_process_main,
-                    args=(logging.getLogger().getEffectiveLevel(), child_sock),
+                    args=(self._recv_buf_size, logging.getLogger().getEffectiveLevel(), child_sock),
                 )
                 proc.start()
                 child_sock.close()
@@ -321,7 +326,8 @@ class _PoolRunner:
         '_idle_worker_pids',
         '_marshalled_task_queue',
         '_max_active_workers',
-        '_read_buf',
+        '_recv_buf',
+        '_recv_buf_size',
         '_shutdown_notifier',
         '_shutdown',
         '_staged_worker_inbox',
@@ -335,6 +341,7 @@ class _PoolRunner:
     def __init__(
         self,
         max_active_workers: int,
+        recv_buf_size: int,
         shutdown_notifier: _Notifier,
         task_queue: _TaskQueue,
         staged_worker_inbox: _StagedWorkerInbox,
@@ -342,6 +349,7 @@ class _PoolRunner:
         worker_creator: _WorkerCreator,
     ):
         self._max_active_workers = max_active_workers
+        self._recv_buf_size = recv_buf_size
         self._shutdown_notifier = shutdown_notifier
         self._task_queue = task_queue
         self._staged_worker_inbox = staged_worker_inbox
@@ -366,7 +374,7 @@ class _PoolRunner:
         self._event_selector.register(
             self._abort_inbox.read_sock, selectors.EVENT_READ, data=(self._handle_abort_inbox_fd, ())
         )
-        self._read_buf = bytearray(_RECV_BUF_SIZE)
+        self._recv_buf = bytearray(self._recv_buf_size)
         self._shutdown = False
         self._future_to_worker_pid: dict[Future, int] = {}
 
@@ -414,7 +422,7 @@ class _PoolRunner:
                 worker.sock.setblocking(True)
                 while True:
                     try:
-                        received = worker.sock.recv(_RECV_BUF_SIZE)
+                        received = worker.sock.recv_into(self._recv_buf)
                     except (EOFError, OSError):
                         break
                     if not received:
@@ -447,12 +455,11 @@ class _PoolRunner:
             handler(*args)
 
     def _handle_shutdown_fd(self) -> None:
-        self._shutdown_notifier.read_sock.recv_into(self._read_buf)  # drain the notification(s)
+        self._shutdown_notifier.eat_notifications(self._recv_buf)
         self._shutdown = True
 
     def _handle_task_queue_fd(self) -> None:
-        self._task_queue.read_sock.recv_into(self._read_buf)  # drain the notification(s)
-
+        self._task_queue.eat_notifications(self._recv_buf)
         if not self._marshalled_task_queue:
             while self._task_queue.tasks and self._busy_workers < self._max_active_workers and self._idle_worker_pids:
                 task = self._task_queue.tasks.popleft()
@@ -462,7 +469,7 @@ class _PoolRunner:
                 self._send_task(task, self._workers[worker_pid])
 
     def _handle_staged_worker_inbox_fd(self) -> None:
-        self._staged_worker_inbox.read_sock.recv_into(self._read_buf)  # drain the notification(s)
+        self._staged_worker_inbox.eat_notifications(self._recv_buf)
 
         for staged in self._staged_worker_inbox.take_all():
             assert staged.pid not in self._workers
@@ -475,7 +482,7 @@ class _PoolRunner:
             self._send_task_or_mark_free(worker)
 
     def _handle_abort_inbox_fd(self) -> None:
-        self._abort_inbox.read_sock.recv_into(self._read_buf)  # drain the notification(s)
+        self._abort_inbox.eat_notifications(self._recv_buf)
 
         # print(f'[{datetime.now()}] event: aborts={len(aborts)} tasks={len(self._task_queue.tasks)} pickled_tasks={len(self._marshalled_task_queue)}', file=sys.stderr)
 
@@ -496,14 +503,12 @@ class _PoolRunner:
         # print(f'[{datetime.now()}] on_readable_worker_conn: pid={pid}', file=sys.stderr)
 
         try:
+            nbytes = worker.sock.recv_into(self._recv_buf)
+            chunk = memoryview(self._recv_buf)[:nbytes]
             if worker.partial_recv is None:
-                view = memoryview(self._read_buf)
-                bytes_received = worker.sock.recv_into(view)
-                view = view[:bytes_received]
+                view = chunk
             else:
-                new_buf = worker.sock.recv(_RECV_BUF_SIZE)
-                bytes_received = len(new_buf)
-                worker.partial_recv.extend(new_buf)
+                worker.partial_recv.extend(chunk)
                 view = memoryview(worker.partial_recv)
         except (BlockingIOError, TimeoutError):
             raise
@@ -511,7 +516,7 @@ class _PoolRunner:
             self._handle_worker_conn_eof(worker)
             return
         # print(f'read from pid={worker.pid} len={bytes_received} partial_recv={None if worker.partial_recv is None else len(worker.partial_recv)}', file=sys.stderr)
-        if not bytes_received:
+        if not chunk:
             self._handle_worker_conn_eof(worker)
             return
 
@@ -672,6 +677,7 @@ class _PoolRunner:
 
 
 def _worker_process_main(
+    recv_buf_size: int,
     logging_level: int,
     sock: socket.socket,
 ) -> None:
@@ -679,7 +685,7 @@ def _worker_process_main(
     sigmonitor.init(sigmonitor.Mode.QUICK_EXIT, sigint=False, sigchld=True)
     mplogging.init_in_worker(logging_level=logging_level, server_sock=sock)
     wakeup_fd = sigmonitor.get_wakeup_fd()
-    read_buf = bytearray(_RECV_BUF_SIZE)
+    recv_buf = bytearray(recv_buf_size)
     with sigmonitor.scoped_mode(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND):
         with sock:
             with selectors.DefaultSelector() as event_selector:
@@ -704,9 +710,9 @@ def _worker_process_main(
                         sz: int | None = None
                         total = 0
                         while True:
-                            if total == len(read_buf):
-                                read_buf.extend(b'\0' * len(read_buf))
-                            view = memoryview(read_buf)
+                            if total == len(recv_buf):
+                                recv_buf.extend(b'\0' * len(recv_buf))
+                            view = memoryview(recv_buf)
                             try:
                                 nbytes = sock.recv_into(view[total:])
                             except (BlockingIOError, TimeoutError):
