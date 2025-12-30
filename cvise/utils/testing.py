@@ -889,18 +889,18 @@ class TestManager:
 
         ready_hint_types = self.get_fully_initialized_hint_types()
         while self.jobs or any(c.can_start_job_now(ready_hint_types) for c in self.pass_contexts):
-            sigmonitor.maybe_retrigger_action()
+            sigmonitor.maybe_raise_exc()
 
             # schedule new jobs, as long as there are free workers
             ready_hint_types = self.get_fully_initialized_hint_types()
             while len(self.jobs) < self.parallel_tests + self.OVERCOMMIT_JOBS and self.maybe_schedule_job(
                 ready_hint_types
             ):
-                sigmonitor.maybe_retrigger_action()
+                sigmonitor.maybe_raise_exc()
 
             # no more jobs could be scheduled at the moment - wait for some results
             wait([j.future for j in self.jobs] + [sigmonitor.get_future()], return_when=FIRST_COMPLETED)
-            sigmonitor.maybe_retrigger_action()
+            sigmonitor.maybe_raise_exc()
 
             self.process_done_futures()
 
@@ -1354,7 +1354,7 @@ def do_stress(args):
     multiprocessing.set_forkserver_preload(['__main__'] + list(sys.modules.keys()))
     multiprocessing.forkserver.ensure_running()
 
-    sigmonitor.init(sigmonitor.Mode.QUICK_EXIT, sigchld=False)
+    sigmonitor.init(sigchld=False)
     durs = []
     qps = []
     p = blank.BlankPass()
@@ -1421,7 +1421,10 @@ def do_stress(args):
         else:
             qps.append(round(1 / dur))
         print(f'{dur * 1000:.4f}ms min={min(durs) * 1000:.4f}ms{"" if sleeping else f" qps={round(1 / dur)}"}')
+        sigmonitor.maybe_raise_exc()
         time.sleep(args.timeout)
+        sigmonitor.maybe_raise_exc()
+
     dur = min(durs)
     overhead = dur * args.n - 0.01
     print(f'min={dur * 1000:.4f}ms overhead_per_task={overhead * 1000:.4f}ms max_qps={max(qps)}')

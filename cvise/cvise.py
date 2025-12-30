@@ -121,7 +121,7 @@ class CVise:
     }
 
     def __init__(self, test_manager, skip_interestingness_test_check):
-        sigmonitor.init(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND)
+        sigmonitor.init()
         self.test_manager = test_manager
         self.skip_interestingness_test_check = skip_interestingness_test_check
         self.tidy = False
@@ -235,7 +235,7 @@ class CVise:
         self._check_prerequisites(pass_group)
         if not self.skip_interestingness_test_check:
             self.test_manager.check_sanity()
-        sigmonitor.update_sigchld(False)
+        sigmonitor.init(sigchld=False)
 
         logging.info(f'===< {os.getpid()} >===')
         logging.info(

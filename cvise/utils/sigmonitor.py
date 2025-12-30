@@ -16,171 +16,185 @@ and letting the code raise the exception to trigger the shutdown.
 
 from __future__ import annotations
 
+import atexit
 import concurrent.futures
 import contextlib
-import enum
 import os
 import signal
 import socket
-import sys
-import weakref
-from collections.abc import Iterator
 from concurrent.futures import Future
-from contextlib import contextmanager
-from pathlib import Path
+from dataclasses import dataclass
 
 
-_WAKEUP_READ_BUF_SIZE = 1024
+_SOCK_READ_BUF_SIZE = 1024
 
 
-@enum.unique
-class Mode(enum.Enum):
-    OFF = enum.auto()
-    RAISE_EXCEPTION = enum.auto()
-    QUICK_EXIT = enum.auto()
-    RAISE_EXCEPTION_ON_DEMAND = enum.auto()
+@dataclass(slots=True)
+class _Context:
+    sigchld_monitored: bool
+    future: Future
+    read_buf: bytearray
+    # File descriptors for triggering the "wakeup" whenever any signal arrives.
+    wakeup_read_sock: socket.socket
+    wakeup_write_sock: socket.socket
+    # File descriptors for notifying SIGINT/SIGTERM specifically.
+    sigintterm_read_sock: socket.socket
+    sigintterm_write_sock: socket.socket
+    # File descriptors for notifying SIGCHLD specifically.
+    sigchld_read_sock: socket.socket
+    sigchld_write_sock: socket.socket
+    # Whether a signal was observed that needs to be handled later.
+    sigint_observed: bool = False
+    sigterm_observed: bool = False
 
 
-_mode: Mode = Mode.OFF
-_sigint_observed: bool = False
-_sigterm_observed: bool = False
-_future: Future | None = None
-_wakeup_read_fd: int | None = None
-_wakeup_write_fd: int | None = None
-_wakeup_read_buf: bytearray | None = None
+_context: _Context | None = None
 
 
-def init(mode: Mode, sigint: bool = True, sigchld: bool = True) -> None:
-    global _mode
-    _mode = mode
+def init(sigint: bool = True, sigchld: bool = True) -> None:
+    global _context
+    if _context is None:
+        wakeup_socks = socket.socketpair()
+        sigintterm_socks = socket.socketpair()
+        sigchld_socks = socket.socketpair()
 
-    global _wakeup_read_fd, _wakeup_write_fd, _wakeup_read_buf
-    if _wakeup_read_fd is None:
-        read_socket, write_socket = socket.socketpair()
-        read_socket.setblocking(False)
-        write_socket.setblocking(False)
-        _wakeup_read_fd = read_socket.detach()
-        _wakeup_write_fd = write_socket.detach()
-        _wakeup_read_buf = bytearray(_WAKEUP_READ_BUF_SIZE)
-    else:
-        # Discard previous wakeup FD notifications (presumably only relevant for tests that reuse the same process).
-        eat_wakeup_fd_notifications(ignore_blocking=True)
-    assert _wakeup_write_fd is not None
-    signal.set_wakeup_fd(_wakeup_write_fd, warn_on_full_buffer=False)
+        for socks in (wakeup_socks, sigintterm_socks, sigchld_socks):
+            for sock in socks:
+                sock.setblocking(False)
 
-    global _future
-    _future = Future()
+        _context = _Context(
+            sigchld_monitored=sigchld,
+            future=Future(),
+            read_buf=bytearray(_SOCK_READ_BUF_SIZE),
+            wakeup_read_sock=wakeup_socks[0],
+            wakeup_write_sock=wakeup_socks[1],
+            sigintterm_read_sock=sigintterm_socks[0],
+            sigintterm_write_sock=sigintterm_socks[1],
+            sigchld_read_sock=sigchld_socks[0],
+            sigchld_write_sock=sigchld_socks[1],
+        )
 
-    # Ignore old signal handlers (in tests, the old handler could've been installed by ourselves as well; calling it
+        signal.set_wakeup_fd(_context.wakeup_write_sock.fileno(), warn_on_full_buffer=False)
+        atexit.register(_release_socks)
+
+    assert _context is not None
+    _context.sigchld_monitored = sigchld
+
+    # Overwrite old signal handlers (in tests, the old handler could've been installed by ourselves as well; calling it
     # would result in an infinite recursion).
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal if sigint else signal.SIG_IGN)
-    if sigchld:
-        signal.signal(signal.SIGCHLD, _on_signal)
+    signal.signal(signal.SIGCHLD, _on_signal if sigchld else signal.SIG_DFL)
 
 
-def update_sigchld(sigchld: bool) -> None:
-    signal.signal(signal.SIGCHLD, _on_signal if sigchld else signal.SIG_IGN)
-
-
-def maybe_retrigger_action() -> None:
+def maybe_raise_exc() -> None:
+    assert _context
     # If multiple signals occurred, prefer SIGTERM.
-    if _sigterm_observed:
-        _trigger_signal_action(signal.SIGTERM, _create_exception(signal.SIGTERM))
-    elif _sigint_observed:
-        _trigger_signal_action(signal.SIGINT, _create_exception(signal.SIGINT))
-
-
-@contextmanager
-def scoped_mode(new_mode: Mode) -> Iterator[None]:
-    global _mode
-
-    # It's unlikely to happen, but cheap to check: no need to enter the scope if we know we'll terminate afterwards.
-    _implicit_maybe_retrigger_action()
-
-    previous_mode = _mode
-    try:
-        _mode = new_mode
-        yield
-    finally:
-        _mode = previous_mode
-        # Let the signals, if any, propagate according to the new mode.
-        _implicit_maybe_retrigger_action()
+    if _context.sigterm_observed:
+        raise _create_exception(signal.SIGTERM)
+    elif _context.sigint_observed:
+        raise _create_exception(signal.SIGINT)
 
 
 def get_future() -> Future:
-    assert _future is not None
-    return _future
+    assert _context is not None
+    return _context.future
 
 
-def get_wakeup_fd() -> int:
-    assert _wakeup_read_fd is not None
-    return _wakeup_read_fd
+def get_wakeup_sock() -> socket.socket:
+    assert _context is not None
+    return _context.wakeup_read_sock
 
 
-def eat_wakeup_fd_notifications(ignore_blocking: bool = False) -> None:
-    assert _wakeup_read_fd is not None
-    assert _wakeup_read_buf
+def get_sigintterm_sock() -> socket.socket:
+    assert _context is not None
+    return _context.sigintterm_read_sock
+
+
+def get_sigchld_sock() -> socket.socket:
+    assert _context is not None
+    return _context.sigchld_read_sock
+
+
+def assert_sigchld_monitored() -> None:
+    assert _context is not None
+    assert _context.sigchld_monitored
+
+
+def handle_readable_wakeup_fd(sock: socket.socket) -> None:
+    """To be called when the corresponding FD is readable."""
+    # Drain the socket.
+    assert _context is not None
     try:
-        os.readv(_wakeup_read_fd, (_wakeup_read_buf,))
+        nbytes = os.readv(sock.fileno(), (_context.read_buf,))
     except (BlockingIOError, TimeoutError):
-        if not ignore_blocking:
-            raise
+        raise  # we expect the file descriptor to be in non-blocking mode
     except OSError:
-        pass
+        return
+
+    # In case of the common wakeup FD, copy the notification(s) into corresponding dedicated sockets, so that we support
+    # multiple overlapping select() calls as long as they consume different sockets.
+    if sock != _context.wakeup_read_sock:
+        return
+    contents = memoryview(_context.read_buf)[:nbytes]
+    sigchld_notified = False
+    sigintterm_notified = False
+    for b in contents:
+        match b:
+            case signal.SIGCHLD if not sigchld_notified:
+                sigchld_notified = True
+                _notify_sock(_context.sigchld_write_sock)
+            case signal.SIGINT | signal.SIGTERM if not sigintterm_notified:
+                sigintterm_notified = True
+                _notify_sock(_context.sigintterm_write_sock)
 
 
 def signal_observed_for_testing() -> bool:
-    return _sigint_observed or _sigterm_observed
+    assert _context is not None
+    return _context.sigint_observed or _context.sigterm_observed
+
+
+def _release_socks() -> None:
+    if _context is None:
+        return
+    signal.set_wakeup_fd(-1)
+    for sock in (
+        _context.wakeup_read_sock,
+        _context.wakeup_write_sock,
+        _context.sigintterm_read_sock,
+        _context.sigintterm_write_sock,
+        _context.sigchld_read_sock,
+        _context.sigchld_write_sock,
+    ):
+        sock.close()
+
+
+def _notify_sock(sock: socket.socket) -> None:
+    try:
+        sock.send(b'\0')
+    except BlockingIOError:
+        pass  # discard the notification - it's sufficient to have nonzero number of pending bytes
 
 
 def _on_signal(signum: int, frame) -> None:
     # print(f'[{os.getpid()}] on_signal {signum}', file=sys.stderr)
-    global _sigint_observed
-    global _sigterm_observed
+    assert _context
+    repeated = _context.sigterm_observed or _context.sigint_observed
     match signum:
         case signal.SIGTERM:
-            _sigterm_observed = True
+            _context.sigterm_observed = True
         case signal.SIGINT:
-            _sigint_observed = True
+            _context.sigint_observed = True
         case signal.SIGCHLD:
             return  # no action needed besides notifying the wakeup fd
 
     exception = _create_exception(signum)
     # Set the exception on the future, unless it's already done. We don't use done() because it'd be potentially racy.
     with contextlib.suppress(concurrent.futures.InvalidStateError):
-        _future.set_exception(exception)
+        _context.future.set_exception(exception)
 
-    match _mode:
-        case _ if _is_on_demand_mode():
-            pass
-        case Mode.RAISE_EXCEPTION if not _can_raise_in_frame(frame):
-            # No immediate exception - to avoid the "Exception ignored in" log spam.
-            pass
-        case Mode.RAISE_EXCEPTION if signum == signal.SIGINT:
-            # Prefer the standard signal handler in case there's some nontrivial logic in it (e.g., not raising an
-            # exception depending on stack frame contents).
-            signal.default_int_handler(signum, frame)
-        case _:
-            _trigger_signal_action(signum, exception)
-    # no code after this point - the action above might've raised the exception or terminated the process
-
-
-def _is_on_demand_mode() -> bool:
-    return _mode == Mode.RAISE_EXCEPTION_ON_DEMAND
-
-
-def _implicit_maybe_retrigger_action() -> None:
-    if _mode != Mode.OFF and not _is_on_demand_mode():
-        maybe_retrigger_action()
-
-
-def _trigger_signal_action(signum: int, exception: BaseException) -> None:
-    if _mode == Mode.QUICK_EXIT:
-        os._exit(1)
-    else:
+    if repeated:
         raise exception
-    # no code after this point - this is unreachable
 
 
 def _create_exception(signum: int) -> BaseException:
@@ -191,14 +205,3 @@ def _create_exception(signum: int) -> BaseException:
             return SystemExit(1)
         case _:
             raise ValueError('No signal')
-
-
-def _can_raise_in_frame(frame) -> bool:
-    while frame is not None:
-        if frame.f_code:
-            if frame.f_code.co_name == '__del__':
-                return False
-            if frame.f_code.co_filename and Path(frame.f_code.co_filename).stem == Path(weakref.__file__).stem:
-                return False
-        frame = frame.f_back
-    return True
