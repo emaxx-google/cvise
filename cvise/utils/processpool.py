@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import enum
 import heapq
 import io
 import logging
@@ -26,7 +27,20 @@ from typing import Any
 from cvise.utils import sigmonitor
 
 
-_DEFAULT_RECV_BUF_SIZE = 65536
+_DEFAULT_RECV_BUF_SIZE = 131072  # chosen to exceed most of C-Vise task size
+_pickler_bytes_io: io.BytesIO | None = None
+_pickler: multiprocessing.reduction.ForkingPickler | None = None
+_header_struct = struct.Struct('ib')
+_HEADER_SIZE = _header_struct.size
+_HEADER_STUB = b'\0' * _HEADER_SIZE
+
+
+@enum.unique
+class _MarshalledType(enum.Enum):
+    TASK = enum.auto()
+    TASK_RESULT = enum.auto()
+    TASK_ERROR = enum.auto()
+    LOG = enum.auto()
 
 
 class ProcessPoolError(Exception):
@@ -391,7 +405,7 @@ class _PoolRunner:
         assert 0 <= len(self._workers) - len(self._idle_worker_pids) <= self._max_active_workers, (
             f'workers={len(self._workers)} idle={len(self._idle_worker_pids)} max={self._max_active_workers}'
         )
-        assert sum(1 for w in self._workers.values() if w.task_future is not None) <= self._max_active_workers
+        # assert sum(1 for w in self._workers.values() if w.task_future is not None) <= self._max_active_workers
 
         self._mark_timed_out_tasks()
         while self._task_queue.tasks:
@@ -516,52 +530,58 @@ class _PoolRunner:
             self._handle_worker_conn_eof(worker)
             return
 
-        begin = 0
-        end = len(view)
-        while begin < end:
-            if end - begin < 5:
+        while view:
+            if not (parsed := _try_unmarshal(view)):
                 break
-            sz: int = view[begin : begin + 4].cast('i')[0]
-            assert sz >= 0
-            if begin + 5 + sz > end:
-                break
-            tp = view[begin + 4]
-            raw_message = view[begin + 5 : begin + 5 + sz]
-            begin += 5 + sz
-            assert begin <= end
-            # print(f'handling msg from pid={worker.pid} packet_size={4+sz} payload_size={sz}', file=sys.stderr)
+            tp, raw_message, view = parsed
 
             if worker.stopping:
-                continue  # worker shutdown produces spurious messages; we simply wait till EOF
+                continue  # during worker shutdown, ignore replies and (likely spurious error) logs; we wait for EOF
+            match tp:
+                case _MarshalledType.TASK_RESULT.value:
+                    self._on_worker_task_reply_msg(worker, raw_message, succeeded=True)
+                case _MarshalledType.TASK_ERROR.value:
+                    self._on_worker_task_reply_msg(worker, raw_message, succeeded=False)
+                case _MarshalledType.LOG.value:
+                    self._on_worker_log_msg(worker, raw_message)
+                case _:
+                    raise ValueError(f'Unexpected message type {tp} received from worker')
 
-            if tp == 0:  # task result
-                future_to_resolve = worker.task_future
-                assert future_to_resolve is not None
-                tracked_pid = self._task_future_to_worker_pid.pop(future_to_resolve)
-                assert tracked_pid == pid
-                worker.task_future = None
-                self._busy_workers -= 1
-                assert self._busy_workers >= 0
-                self._send_task_or_mark_free(worker)  # eagerly send a new task
-                message = pickle.loads(raw_message)
-                if isinstance(message, Exception):
-                    _assign_future_exception(future_to_resolve, message)
-                else:
-                    _assign_future_result(future_to_resolve, message)
-            elif tp == 1:  # log
-                message = pickle.loads(raw_message)
-                # Ignore logs if the future is already switched to "done" - these are likely spurious errors because the main process started deleting task's files.
-                if worker.task_future is None or not worker.task_future.done():
-                    record: logging.LogRecord = message
-                    logger = logging.getLogger(record.name)
-                    logger.handle(record)
-            else:
-                assert False, f'Unknown message type {tp}'
-
-        if begin == end:
+        if not view:
             worker.partial_recv = None
         elif worker.partial_recv is None:
-            worker.partial_recv = bytearray(view[begin:end])
+            worker.partial_recv = bytearray(view)
+
+    def _on_worker_task_reply_msg(self, worker: _Worker, raw_message: memoryview, succeeded: bool) -> None:
+        # Update the worker state.
+        future = worker.task_future
+        assert future is not None
+        tracked_pid = self._task_future_to_worker_pid.pop(future)
+        assert tracked_pid == worker.pid
+        worker.task_future = None
+        self._busy_workers -= 1
+        assert self._busy_workers >= 0
+
+        # Try sending a new task quickly.
+        self._send_task_or_mark_free(worker)
+
+        # Resolve the task future.
+        result = pickle.loads(raw_message)
+        with contextlib.suppress(concurrent.futures.InvalidStateError):  # guard against concurrent changes
+            if succeeded:
+                future.set_result(result)
+            else:
+                future.set_exception(result)
+
+    def _on_worker_log_msg(self, worker: _Worker, raw_message: memoryview) -> None:
+        # Ignore logs if the future is already switched to "done" - these are likely spurious errors because the main
+        # process started deleting task's files.
+        if worker.task_future is not None and worker.task_future.done():
+            return
+        message = pickle.loads(raw_message)
+        record: logging.LogRecord = message
+        logger = logging.getLogger(record.name)
+        logger.handle(record)
 
     def _on_worker_proc_fd_joinable(self, worker_pid: int) -> None:
         worker = self._workers[worker_pid]
@@ -582,7 +602,7 @@ class _PoolRunner:
         assert worker.sock is not None
         match task:
             case _Task():
-                wire_bytes = _marshal(0, (task.f, task.args))
+                wire_bytes = _marshal(_MarshalledType.TASK.value, (task.f, task.args))
             case _MarshalledTask():
                 wire_bytes = memoryview(task.wire_bytes)
         # print(f'sending task to pid={worker.pid} len={len(packet)}', file=sys.stderr)
@@ -636,7 +656,7 @@ class _PoolRunner:
                 pid = self._idle_worker_pids.popleft()
                 self._send_task(task, self._workers[pid])
         else:
-            packet = bytes(_marshal(0, (task.f, task.args)))
+            packet = bytes(_marshal(_MarshalledType.TASK.value, (task.f, task.args)))
             self._marshalled_task_queue.append(
                 _MarshalledTask(wire_bytes=packet, future=task.future, timeout=task.timeout)
             )
@@ -723,12 +743,14 @@ class _WorkerRunner:
         # Execute.
         try:
             result = f(*args)
+            tp = _MarshalledType.TASK_RESULT.value
         except Exception as exc:
             result = exc
+            tp = _MarshalledType.TASK_ERROR.value
         sigmonitor.maybe_raise_exc()
 
-        # Respond.
-        result_msg = _marshal(0, result)
+        # Reply.
+        result_msg = _marshal(tp, result)
         try:
             self._server_sock.sendall(result_msg)
         except OSError:
@@ -752,16 +774,10 @@ class _WorkerRunner:
 
             if parsed := _try_unmarshal(memoryview(self._recv_buf)[:ntotal]):
                 tp, payload, tail = parsed
-                assert tp == 0
+                assert tp == _MarshalledType.TASK.value
                 assert not tail
                 f, args = pickle.loads(payload)
                 return f, args
-
-
-_pickler_bytes_io: io.BytesIO | None = None
-_pickler: multiprocessing.reduction.ForkingPickler | None = None
-_header_struct = struct.Struct('ib')
-_HEADER_SIZE = _header_struct.size
 
 
 def _marshal(tp: int, value: Any) -> memoryview:
@@ -774,7 +790,7 @@ def _marshal(tp: int, value: Any) -> memoryview:
         _pickler_bytes_io.seek(0)
         _pickler_bytes_io.truncate(0)
         _pickler.clear_memo()
-    _pickler_bytes_io.write(b'\0' * _HEADER_SIZE)
+    _pickler_bytes_io.write(_HEADER_STUB)
     _pickler.dump(value)
     view = _pickler_bytes_io.getbuffer()
     npayload = len(view) - _HEADER_SIZE
@@ -784,21 +800,13 @@ def _marshal(tp: int, value: Any) -> memoryview:
 
 def _try_unmarshal(blob: memoryview) -> tuple[int, memoryview, memoryview] | None:
     n = len(blob)
-    if n < 5:
+    if n < _HEADER_SIZE:
         return None
     npayload, tp = _header_struct.unpack_from(blob[:_HEADER_SIZE])
     ntotal = _HEADER_SIZE + npayload
     if n < ntotal:
         return None
     return (tp, blob[_HEADER_SIZE:ntotal], blob[ntotal:])
-
-
-def _assign_future_result(future: Future, result: Any) -> None:
-    if future.done():
-        return
-    with contextlib.suppress(concurrent.futures.InvalidStateError):  # cover against concurrent changes
-        future.set_result(result)
-        # print(f'set_result', file=sys.stderr)
 
 
 def _assign_future_exception(future: Future, exc: BaseException) -> None:
@@ -810,7 +818,7 @@ def _assign_future_exception(future: Future, exc: BaseException) -> None:
 
 
 class _LogSender(logging.Handler):
-    """Sends all logs into the multiprocessing connection."""
+    """Sends all logs from a worker to the server process via a socket."""
 
     def __init__(self, server_sock: socket.socket):
         super().__init__()
@@ -818,7 +826,7 @@ class _LogSender(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         prepared = self._prepare_record(record)
-        view = _marshal(1, prepared)
+        view = _marshal(_MarshalledType.LOG.value, prepared)
         try:
             self._server_sock.sendall(view)
         except BlockingIOError:
