@@ -8,12 +8,10 @@ import io
 import logging
 import multiprocessing
 import multiprocessing.reduction
-import os
 import pickle
 import selectors
 import socket
 import struct
-import sys
 import threading
 import time
 from collections import deque
@@ -21,22 +19,22 @@ from collections.abc import Callable, Collection, Sequence
 from concurrent.futures import Future
 from copy import copy
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any
 
 from cvise.utils import sigmonitor
 
 
 _DEFAULT_RECV_BUF_SIZE = 131072  # chosen to exceed most of C-Vise task size
+_TIMEOUTS_HEAP_REPACK_FACTOR = 10  # to prevent excessively big heap size
 _pickler_bytes_io: io.BytesIO | None = None
 _pickler: multiprocessing.reduction.ForkingPickler | None = None
-_header_struct = struct.Struct('ib')
+_header_struct = struct.Struct('bi')
 _HEADER_SIZE = _header_struct.size
 _HEADER_STUB = b'\0' * _HEADER_SIZE
 
 
 @enum.unique
-class _MarshalledType(enum.Enum):
+class _MarshalledType(enum.IntEnum):
     TASK = enum.auto()
     TASK_RESULT = enum.auto()
     TASK_ERROR = enum.auto()
@@ -92,13 +90,14 @@ class ProcessPool:
 
     def __exit__(self, exc_type, exc_val, exc_tb) -> None:
         self.stop()
+
         self._worker_creator.join_thread()
-        self._pool_runner_thread.join(60)
+        self._pool_runner_thread.join(60)  # semi-arbitrary timeout to prevent possibility of deadlocks
         if self._pool_runner_thread.is_alive():
             logging.warning('Failed to stop process pool thread')
         self._exit_stack.__exit__(exc_type, exc_val, exc_tb)
 
-        # Clear leftovers:
+        # Clear leftovers after the threads has been shut down.
 
         for task in self._task_queue.tasks:
             task.future.cancel()
@@ -151,6 +150,8 @@ class _MarshalledTask:
 
 
 class _Notifier:
+    """Implements basic notification pattern that's usable with select()."""
+
     __slots__ = ('read_sock', '_write_sock')
 
     def __init__(self):
@@ -178,6 +179,11 @@ class _Notifier:
 
 
 class _TaskQueue(_Notifier):
+    """Container for storing incoming tasks and notifying the pool runner about them.
+
+    Note that the pool runner reads directly from the "tasks" property, relying on it data structure being thread-safe.
+    """
+
     __slots__ = ('tasks',)
 
     def __init__(self):
@@ -222,6 +228,8 @@ class _StagedWorkerInbox(_Notifier):
 
 
 class _AbortInbox(_Notifier):
+    """Container for delivering to-be-aborted task futures to the pool runner."""
+
     __slots__ = ('_lock', '_aborts')
 
     def __init__(self):
@@ -271,6 +279,11 @@ class _Worker:
 
 
 class _WorkerCreator:
+    """Creates multiprocessing.Process instances on a background thread.
+
+    The purpose is to avoid blocking operations (the handshake during the process creation) on the pool runner thread.
+    """
+
     def __init__(self, recv_buf_size: int, staged_worker_inbox: _StagedWorkerInbox):
         self._recv_buf_size = recv_buf_size
         self._staged_worker_inbox = staged_worker_inbox
@@ -281,6 +294,8 @@ class _WorkerCreator:
         self._thread.start()
 
     def schedule_creation(self, cnt: int) -> None:
+        if not cnt:
+            return
         with self._cond:
             self._scheduled_count += cnt
             self._cond.notify()
@@ -291,11 +306,11 @@ class _WorkerCreator:
             self._cond.notify()
 
     def join_thread(self) -> None:
-        self._thread.join(60)
+        self._thread.join(60)  # semi-arbitrary timeout to prevent possibility of deadlocks
         if self._thread.is_alive():
             logging.warning('Failed to stop WorkerCreator thread')
 
-    def _worker_creator_thread_main(self):
+    def _worker_creator_thread_main(self) -> None:
         while True:
             cnt = 0
             with self._cond:
@@ -308,27 +323,11 @@ class _WorkerCreator:
                 self._scheduled_count = 0
 
             for _ in range(cnt):
-                # Create sockets. Our end is nonblocking to allow efficient multiplexing. The worker's end is OK to be
-                # blocking, since it only handles one task at a time, and it won't deadlock on shutdown since we close
-                # the socket in addition to sending a signal.
-                sock, child_sock = socket.socketpair()
-                sock.setblocking(False)
-                child_sock.setblocking(True)
-
-                worker_runner = _WorkerRunner(
-                    recv_buf_size=self._recv_buf_size,
-                    logging_level=logging.getLogger().getEffectiveLevel(),
-                    server_sock=child_sock,
-                )
-                proc = multiprocessing.Process(target=worker_runner.run)
-                proc.start()
-                child_sock.close()
-                assert proc.pid is not None
-                self._staged_worker_inbox.add(_StagedWorker(pid=proc.pid, proc=proc, sock=sock))
+                self._staged_worker_inbox.add(_create_worker(self._recv_buf_size))
 
 
 class _PoolRunner:
-    """Implements the process pool event loop; is expected to be used on a background thread."""
+    """Implements the pool's event loop; is expected to be used on a background thread."""
 
     __slots__ = (
         '_abort_inbox',
@@ -394,7 +393,6 @@ class _PoolRunner:
             self._do_step()
 
     def _do_step(self) -> None:
-        # print(f'[{datetime.now()}] step', file=sys.stderr)
         assert len(self._idle_worker_pids) <= len(self._workers)
         assert self._busy_workers == len(self._workers) - len(self._idle_worker_pids), (
             f'workers={len(self._workers)} idle={len(self._idle_worker_pids)} busy={self._busy_workers} stopping={self._stopping_workers} max={self._max_active_workers}'
@@ -405,7 +403,7 @@ class _PoolRunner:
         assert 0 <= len(self._workers) - len(self._idle_worker_pids) <= self._max_active_workers, (
             f'workers={len(self._workers)} idle={len(self._idle_worker_pids)} max={self._max_active_workers}'
         )
-        # assert sum(1 for w in self._workers.values() if w.task_future is not None) <= self._max_active_workers
+        assert sum(1 for w in self._workers.values() if w.task_future is not None) <= self._max_active_workers
 
         self._mark_timed_out_tasks()
         while self._task_queue.tasks:
@@ -414,7 +412,6 @@ class _PoolRunner:
         self._select_and_process_fds(wait=True)
 
     def shut_down(self) -> None:
-        # print(f'[{datetime.now()}] poolrunner.shut_down: selector.close()', file=sys.stderr)
         self._selector.close()
         # Cancel pending tasks.
         for task in self._marshalled_task_queue:
@@ -455,9 +452,7 @@ class _PoolRunner:
         else:
             poll_timeout = None
 
-        # print(f'[{datetime.now()}] select_and_process_fds: timeout={poll_timeout} wait={wait}', file=sys.stderr)
         events = self._selector.select(timeout=poll_timeout)
-        # print(f'[{datetime.now()}] select_and_process_fds: events={len(events)}', file=sys.stderr)
         for selector_key, _event_mask in events:
             handler: Callable
             args: tuple
@@ -493,24 +488,19 @@ class _PoolRunner:
 
     def _handle_abort_inbox_fd(self) -> None:
         self._abort_inbox.eat_notifications(self._recv_buf)
-
-        # print(f'[{datetime.now()}] event: aborts={len(aborts)} tasks={len(self._task_queue.tasks)} pickled_tasks={len(self._marshalled_task_queue)}', file=sys.stderr)
-
-        workers_to_create = 0
+        to_create = 0
         for task_future in self._abort_inbox.take_all():
             worker_pid = self._task_future_to_worker_pid.pop(task_future, None)
             if worker_pid is None:
                 # the task hasn't started or has already finished
                 continue
             self._trigger_worker_stop(worker_pid)
-            workers_to_create += 1
-        if workers_to_create:
-            self._worker_creator.schedule_creation(workers_to_create)
+            to_create += 1
+        self._worker_creator.schedule_creation(to_create)
 
     def _on_readable_worker_sock(self, pid: int) -> None:
         worker = self._workers[pid]
         assert worker.sock is not None
-        # print(f'[{datetime.now()}] on_readable_worker_conn: pid={pid}', file=sys.stderr)
 
         try:
             nbytes = worker.sock.recv_into(self._recv_buf)
@@ -523,16 +513,15 @@ class _PoolRunner:
         except (BlockingIOError, TimeoutError):
             raise  # we expect the file descriptor to be in non-blocking mode
         except OSError:
-            self._handle_worker_conn_eof(worker)
+            self._handle_worker_sock_eof(worker)
             return
-        # print(f'read from pid={worker.pid} len={bytes_received} partial_recv={None if worker.partial_recv is None else len(worker.partial_recv)}', file=sys.stderr)
         if not chunk:
-            self._handle_worker_conn_eof(worker)
+            self._handle_worker_sock_eof(worker)
             return
 
         while view:
             if not (parsed := _try_unmarshal(view)):
-                break
+                break  # the message is still incomplete - remember the read prefix and move on
             tp, raw_message, view = parsed
 
             if worker.stopping:
@@ -567,7 +556,7 @@ class _PoolRunner:
 
         # Resolve the task future.
         result = pickle.loads(raw_message)
-        with contextlib.suppress(concurrent.futures.InvalidStateError):  # guard against concurrent changes
+        with contextlib.suppress(concurrent.futures.InvalidStateError):  # it could've been canceled or time out
             if succeeded:
                 future.set_result(result)
             else:
@@ -588,7 +577,6 @@ class _PoolRunner:
         assert worker.proc is not None
         self._selector.unregister(worker.proc.sentinel)
         worker.proc.join()
-        # print(f'joined pid={worker.pid}', file=sys.stderr)
         worker.proc = None
         if worker.sock is None:
             self._workers.pop(worker.pid)
@@ -605,7 +593,6 @@ class _PoolRunner:
                 wire_bytes = _marshal(_MarshalledType.TASK.value, (task.f, task.args))
             case _MarshalledTask():
                 wire_bytes = memoryview(task.wire_bytes)
-        # print(f'sending task to pid={worker.pid} len={len(packet)}', file=sys.stderr)
         worker.sock.sendall(wire_bytes)
         assert worker.task_future is None
         worker.task_future = task.future
@@ -613,7 +600,6 @@ class _PoolRunner:
         timeout_when = time.monotonic() + task.timeout
         heapq.heappush(self._timeouts_heap, _TimeoutsHeapNode(when=timeout_when, task_future=task.future))
         self._task_future_to_worker_pid[task.future] = worker.pid
-        # print(f'[{datetime.now()}] {"send_task" if isinstance(task, _Task) else "send_pickled_task"} task to pid={worker.pid}', file=sys.stderr)
 
     def _send_task_or_mark_free(self, worker: _Worker) -> None:
         if self._busy_workers < self._max_active_workers:
@@ -634,7 +620,6 @@ class _PoolRunner:
 
     def _trigger_worker_stop(self, worker_pid: int) -> None:
         worker = self._workers[worker_pid]
-        # print(f'[{datetime.now()}] trigger_worker_stop: pid={worker.pid}', file=sys.stderr)
         assert worker.proc is not None
         worker.stopping = True
         worker.task_future = None
@@ -660,20 +645,26 @@ class _PoolRunner:
             self._marshalled_task_queue.append(
                 _MarshalledTask(wire_bytes=packet, future=task.future, timeout=task.timeout)
             )
-            # print(f'[{datetime.now()}] pickle_one_task: tasks={len(self._task_queue.tasks)} pickled_tasks={len(self._marshalled_task_queue)}', file=sys.stderr)
 
     def _mark_timed_out_tasks(self) -> None:
+        if len(self._timeouts_heap) > self._max_active_workers * _TIMEOUTS_HEAP_REPACK_FACTOR:
+            # repack the heap if it has too many completed tasks
+            self._timeouts_heap = [n for n in self._timeouts_heap if not n.task_future.done()]
+            heapq.heapify(self._timeouts_heap)
+            assert len(self._timeouts_heap) <= self._max_active_workers
+
         now = time.monotonic()
         while self._timeouts_heap:
             node = self._timeouts_heap[0]
-            if node.when > now and not node.task_future.done():
+            done = node.task_future.done()
+            if node.when > now and not done:
                 break
             heapq.heappop(self._timeouts_heap)
-            if not node.task_future.done():
+            if not done:
                 _assign_future_exception(node.task_future, TimeoutError('Job timed out'))
                 self._abort_inbox.add(node.task_future)
 
-    def _handle_worker_conn_eof(self, worker: _Worker) -> None:
+    def _handle_worker_sock_eof(self, worker: _Worker) -> None:
         assert worker.sock is not None
         if worker.task_future is not None:
             if not worker.task_future.done():
@@ -686,7 +677,6 @@ class _PoolRunner:
         worker.sock.close()
         worker.sock = None
 
-        # print(f'[{datetime.now()}] worker_conn_eof: pid={worker.pid}', file=sys.stderr)
         if worker.proc is None:
             self._workers.pop(worker.pid)
             self._stopping_workers -= 1
@@ -695,7 +685,9 @@ class _PoolRunner:
 
 
 class _WorkerRunner:
-    __slots__ = ('_logging_level', '_recv_buf', '_recv_buf_size', '_shutdown', '_server_sock')
+    """Implements the event loop in the worker process (receive-execute-reply)."""
+
+    __slots__ = ('_logging_level', '_recv_buf', '_recv_buf_size', '_server_sock', '_shutdown')
 
     def __init__(self, recv_buf_size: int, logging_level: int, server_sock: socket.socket):
         assert server_sock.getblocking()
@@ -703,7 +695,7 @@ class _WorkerRunner:
         self._logging_level = logging_level
         self._server_sock = server_sock
         self._shutdown: bool = False
-        self._recv_buf: bytearray  # initialized lazily, when in the child process
+        self._recv_buf: bytearray  # initialized later, in the child process
 
     def _init_in_child_process(self) -> None:
         sigmonitor.init(sigint=False, sigchld=True)
@@ -717,7 +709,6 @@ class _WorkerRunner:
 
     def run(self) -> None:
         self._init_in_child_process()
-        # print(f'worker[{os.getpid()}]: started', file=sys.stderr)
         with self._server_sock:
             with selectors.DefaultSelector() as selector:
                 selector.register(self._server_sock, selectors.EVENT_READ, data=(self._handle_server_sock_fd, ()))
@@ -773,14 +764,34 @@ class _WorkerRunner:
             ntotal += nchunk
 
             if parsed := _try_unmarshal(memoryview(self._recv_buf)[:ntotal]):
-                tp, payload, tail = parsed
-                assert tp == _MarshalledType.TASK.value
+                marshalling_type, payload, tail = parsed
+                assert marshalling_type == _MarshalledType.TASK.value
                 assert not tail
                 f, args = pickle.loads(payload)
                 return f, args
 
 
-def _marshal(tp: int, value: Any) -> memoryview:
+def _create_worker(recv_buf_size: int) -> _StagedWorker:
+    # Create sockets. The server's end is nonblocking to allow efficient multiplexing. The worker's end is OK to be
+    # blocking, since it only handles one task at a time.
+    sock, child_sock = socket.socketpair()
+    sock.setblocking(False)
+    child_sock.setblocking(True)
+
+    worker_runner = _WorkerRunner(
+        recv_buf_size=recv_buf_size,
+        logging_level=logging.getLogger().getEffectiveLevel(),
+        server_sock=child_sock,
+    )
+    proc = multiprocessing.Process(target=worker_runner.run)
+    proc.start()
+    child_sock.close()
+    assert proc.pid is not None
+    return _StagedWorker(pid=proc.pid, proc=proc, sock=sock)
+
+
+def _marshal(marshalling_type: int, value: Any) -> memoryview:
+    """Creates wire bytes, encoding the pickled value as well as its length and type."""
     global _pickler
     global _pickler_bytes_io
     if _pickler is None:
@@ -794,15 +805,16 @@ def _marshal(tp: int, value: Any) -> memoryview:
     _pickler.dump(value)
     view = _pickler_bytes_io.getbuffer()
     npayload = len(view) - _HEADER_SIZE
-    _header_struct.pack_into(view, 0, npayload, tp)
+    _header_struct.pack_into(view, 0, marshalling_type, npayload)
     return view
 
 
 def _try_unmarshal(blob: memoryview) -> tuple[int, memoryview, memoryview] | None:
+    """Decodes the wire bytes into the type and the pickled bytes; also returns the remaining tail."""
     n = len(blob)
     if n < _HEADER_SIZE:
         return None
-    npayload, tp = _header_struct.unpack_from(blob[:_HEADER_SIZE])
+    tp, npayload = _header_struct.unpack_from(blob[:_HEADER_SIZE])
     ntotal = _HEADER_SIZE + npayload
     if n < ntotal:
         return None
@@ -810,15 +822,16 @@ def _try_unmarshal(blob: memoryview) -> tuple[int, memoryview, memoryview] | Non
 
 
 def _assign_future_exception(future: Future, exc: BaseException) -> None:
-    if future.done():
-        return
     with contextlib.suppress(concurrent.futures.InvalidStateError):  # cover against concurrent changes
         future.set_exception(exc)
-        # print(f'set_exception', file=sys.stderr)
 
 
 class _LogSender(logging.Handler):
-    """Sends all logs from a worker to the server process via a socket."""
+    """Sends all logs from a worker to the server process via a socket.
+
+    This is used instead of letting the workers write to stderr, in order to avoid spurious errors printed by canceled
+    workers.
+    """
 
     def __init__(self, server_sock: socket.socket):
         super().__init__()
@@ -829,8 +842,6 @@ class _LogSender(logging.Handler):
         view = _marshal(_MarshalledType.LOG.value, prepared)
         try:
             self._server_sock.sendall(view)
-        except BlockingIOError:
-            raise  # we expect the file descriptor to be in non-blocking mode
         except OSError:
             # most likely it's due to the main process closing the connection and about to terminate us
             pass
