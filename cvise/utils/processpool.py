@@ -593,7 +593,10 @@ class _PoolRunner:
                 wire_bytes = _marshal(_MarshalledType.TASK.value, (task.f, task.args))
             case _MarshalledTask():
                 wire_bytes = memoryview(task.wire_bytes)
-        worker.sock.sendall(wire_bytes)
+        try:
+            worker.sock.sendall(wire_bytes)
+        finally:
+            wire_bytes.release()  # to avoid the "object cannot be re-sized" error
         assert worker.task_future is None
         worker.task_future = task.future
         self._busy_workers += 1
@@ -641,7 +644,10 @@ class _PoolRunner:
                 pid = self._idle_worker_pids.popleft()
                 self._send_task(task, self._workers[pid])
         else:
-            packet = bytes(_marshal(_MarshalledType.TASK.value, (task.f, task.args)))
+            # Marshal into a separate buffer, to allow future _marshal() calls overwrite the global buffer.
+            view = _marshal(_MarshalledType.TASK.value, (task.f, task.args))
+            packet = bytes(view)
+            view.release()  # to avoid the "object cannot be re-sized" error
             self._marshalled_task_queue.append(
                 _MarshalledTask(wire_bytes=packet, future=task.future, timeout=task.timeout)
             )
@@ -746,6 +752,8 @@ class _WorkerRunner:
             self._server_sock.sendall(result_msg)
         except OSError:
             self._shutdown = True
+        finally:
+            result_msg.release()  # to avoid the "object cannot be re-sized" error
 
     def _recv(self) -> tuple[Callable, tuple] | None:
         ntotal = 0
@@ -845,6 +853,8 @@ class _LogSender(logging.Handler):
         except OSError:
             # most likely it's due to the main process closing the connection and about to terminate us
             pass
+        finally:
+            view.release()  # to avoid the "object cannot be re-sized" error
 
     def _prepare_record(self, record: logging.LogRecord) -> logging.LogRecord:
         """Formats the message, removes unpickleable fields and those not necessary for formatting."""
