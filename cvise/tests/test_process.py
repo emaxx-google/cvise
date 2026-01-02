@@ -14,6 +14,12 @@ import pytest
 
 from cvise.utils import sigmonitor
 from cvise.utils.process import ProcessEventNotifier
+from cvise.utils import sigmonitor
+
+
+@pytest.fixture(autouse=True)
+def signal_monitor():
+    sigmonitor.init()
 
 
 # @pytest.fixture
@@ -42,7 +48,7 @@ from cvise.utils.process import ProcessEventNotifier
 
 @pytest.fixture
 def process_event_notifier() -> ProcessEventNotifier:
-    sigmonitor.init(sigmonitor.Mode.RAISE_EXCEPTION_ON_DEMAND)
+    sigmonitor.init()
     return ProcessEventNotifier(pid_queue=None)
 
 
