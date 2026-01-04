@@ -548,7 +548,7 @@ class _PoolRunner:
 
         to_create = 0
         for task_future in self._abort_inbox.take_all():
-            worker_pid = self._task_future_to_worker_pid.pop(task_future, None)
+            worker_pid = self._task_future_to_worker_pid.get(task_future, None)
             if worker_pid is None:
                 # no-op if the task already finished, but important to prevent a task from scheduling later
                 task_future.cancel()
@@ -664,7 +664,8 @@ class _PoolRunner:
         logger = logging.getLogger(record.name)
         logger.handle(record)
 
-    def _on_worker_proc_fd_joinable(self, worker_pid: int) -> None:
+    def _on_worker_proc_fd_joinable(self, worker_pid: int, selector_event_mask: int) -> None:
+        assert selector_event_mask & EVENT_READ
         worker = self._workers[worker_pid]
         assert worker.proc is not None
         self._selector.unregister(worker.proc.sentinel)
