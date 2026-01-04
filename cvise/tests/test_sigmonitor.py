@@ -84,9 +84,7 @@ def test_raise_exception_on_demand_signal_twice(
     assert process_result_queue.get() == expected_exception
 
 
-def _process_main_calling_retrigger(
-    process_ready_event: threading.Event, process_result_queue: queue.Queue
-):
+def _process_main_calling_retrigger(process_ready_event: threading.Event, process_result_queue: queue.Queue):
     sigmonitor.init()
     assert not sigmonitor.get_future().done()
     process_ready_event.set()

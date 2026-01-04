@@ -1,3 +1,5 @@
+"""Low-latency process pool with task cancellation support."""
+
 from __future__ import annotations
 
 import concurrent.futures
@@ -6,12 +8,14 @@ import enum
 import heapq
 import io
 import logging
+import os
 import multiprocessing
 import multiprocessing.reduction
 import pickle
 import selectors
 import socket
 import struct
+import sys
 import threading
 import time
 from collections import deque
@@ -19,13 +23,14 @@ from collections.abc import Callable, Collection, Sequence
 from concurrent.futures import Future
 from copy import copy
 from dataclasses import dataclass
+from selectors import EVENT_READ, EVENT_WRITE
 from typing import Any
 
 from cvise.utils import sigmonitor
 
 
-_DEFAULT_RECV_BUF_SIZE = 131072  # chosen to exceed most of C-Vise task size
-_TIMEOUTS_HEAP_REPACK_FACTOR = 10  # to prevent excessively big heap size
+_DEFAULT_RECV_BUF_SIZE = 131072  # chosen to exceed the typical size of C-Vise tasks
+_TIMEOUTS_HEAP_REPACK_FACTOR = 10  # to prevent excessively big size of the timeouts heap (no item deletion possible)
 _pickler_bytes_io: io.BytesIO | None = None
 _pickler: multiprocessing.reduction.ForkingPickler | None = None
 _header_struct = struct.Struct('bi')
@@ -48,10 +53,9 @@ class ProcessPoolError(Exception):
 class ProcessPool:
     """Multiprocessing task pool with active task cancellation support.
 
-    The worker pool is orchestrated by an event loop on a background thread. Implementation attempts to be highly
-    parallelizable, using i/o multiplexing, task pre-pickling, worker precreation (concurrently to aborted worker
-    shutdown), signals with file descriptor based handlers, and fine-tuned operation ordering (focused on workloads that
-    take place in C-Vise).
+    The worker pool is orchestrated by an event loop on a background thread. Low-latency is one of the goals (to the
+    extent possible given Python's limitations), employing i/o multiplexing, task pre-pickling and buffer reuse, worker
+    pre-creation (concurrently with shutting down canceled workers), file descriptor based signal observers.
     """
 
     def __init__(self, max_active_workers: int, recv_buf_size: int = _DEFAULT_RECV_BUF_SIZE):
@@ -62,6 +66,8 @@ class ProcessPool:
         self._shutdown_notifier = _Notifier()
         self._exit_stack.enter_context(self._shutdown_notifier)
 
+        self._crash_info = _CrashInfo()
+
         self._task_queue = _TaskQueue()
         self._exit_stack.enter_context(self._task_queue)
 
@@ -71,18 +77,23 @@ class ProcessPool:
         self._abort_inbox = _AbortInbox()
         self._exit_stack.enter_context(self._abort_inbox)
 
-        self._worker_creator = _WorkerCreator(recv_buf_size, self._staged_worker_inbox)
+        self._worker_creator = _WorkerCreator(
+            recv_buf_size=recv_buf_size, staged_worker_inbox=self._staged_worker_inbox, crash_info=self._crash_info
+        )
 
         self._pool_runner = _PoolRunner(
             max_active_workers=max_active_workers,
             recv_buf_size=recv_buf_size,
             shutdown_notifier=self._shutdown_notifier,
+            crash_info=self._crash_info,
             task_queue=self._task_queue,
             staged_worker_inbox=self._staged_worker_inbox,
             abort_inbox=self._abort_inbox,
             worker_creator=self._worker_creator,
         )
-        self._pool_runner_thread = threading.Thread(target=self._pool_thread_main, name='PoolThread', daemon=True)
+        self._pool_runner_thread = threading.Thread(
+            target=self._pool_runner.pool_runner_thread_main, name='PoolThread', daemon=True
+        )
 
     def __enter__(self) -> ProcessPool:
         self._pool_runner_thread.start()
@@ -110,13 +121,18 @@ class ProcessPool:
 
     def stop(self) -> None:
         """Initiates cancellation of pending tasks and termination of already running ones."""
+        if self._shutdown:
+            return
         self._shutdown = True
         self._shutdown_notifier.notify()
         self._worker_creator.notify_shutdown()
 
     def schedule(self, f: Callable, args: Sequence[Any], timeout: float) -> Future:
         future = Future()
-        if self._shutdown:
+        if self._crash_info.event.is_set():
+            self.stop()
+            future.set_exception(self._crash_info.exc)
+        elif self._shutdown:
             future.cancel()
         else:
             task = _Task(f=f, args=args, future=future, timeout=timeout)
@@ -129,13 +145,27 @@ class ProcessPool:
     def abort_all(self, futures: list[Future]) -> None:
         self._abort_inbox.add_all(futures)
 
-    def _pool_thread_main(self) -> None:
-        self._pool_runner.run()
-        self._pool_runner.shut_down()
+
+@dataclass(slots=True)
+class _CrashInfo:
+    """Container for propagating unexpected process pool exceptions from background threads."""
+
+    event: threading.Event = threading.Event()
+    exc: BaseException | None = None
+
+    def set(self, exc: BaseException) -> None:
+        if self.event.is_set():  # it's a racy check, but it's OK if we overwrite one exception with another
+            return
+        self.exc = exc
+        self.event.set()  # set after assigning exc, so that any other thread can read the exception if the flag is set
+        logging.exception('Process pool error')
+        # TODO: instead, set_exception on all futures
 
 
 @dataclass(slots=True)
 class _Task:
+    """A pending task."""
+
     f: Callable
     args: Sequence[Any]
     future: Future
@@ -144,6 +174,8 @@ class _Task:
 
 @dataclass(slots=True)
 class _MarshalledTask:
+    """A pending task, already marshalled - ready for immediate sending to a worker."""
+
     wire_bytes: bytes
     future: Future
     timeout: float
@@ -261,6 +293,8 @@ class _AbortInbox(_Notifier):
 
 @dataclass(slots=True)
 class _TimeoutsHeapNode:
+    """An item stored in the task timeouts heap."""
+
     when: float
     task_future: Future
 
@@ -270,12 +304,15 @@ class _TimeoutsHeapNode:
 
 @dataclass(slots=True)
 class _Worker:
+    """Information about a worker."""
+
     pid: int
-    proc: multiprocessing.Process | None
-    sock: socket.socket | None
-    task_future: Future | None = None
-    stopping: bool = False
-    partial_recv: bytearray | None = None
+    proc: multiprocessing.Process | None  # none after shutdown
+    sock: socket.socket | None  # none after the IPC channel is closed
+    task_future: Future | None = None  # currently running task
+    stopping: bool = False  # whether cancellation started
+    incomplete_send: memoryview | None = None  # stores data to be sent to the worker if it didn't fit into one send()
+    incomplete_recv: bytearray | None = None  # stores data received from the worker if it wasn't a complete message
 
 
 class _WorkerCreator:
@@ -284,9 +321,20 @@ class _WorkerCreator:
     The purpose is to avoid blocking operations (the handshake during the process creation) on the pool runner thread.
     """
 
-    def __init__(self, recv_buf_size: int, staged_worker_inbox: _StagedWorkerInbox):
+    __slots__ = (
+        '_cond',
+        '_crash_info',
+        '_recv_buf_size',
+        '_scheduled_count',
+        '_shutdown',
+        '_staged_worker_inbox',
+        '_thread',
+    )
+
+    def __init__(self, recv_buf_size: int, staged_worker_inbox: _StagedWorkerInbox, crash_info: _CrashInfo):
         self._recv_buf_size = recv_buf_size
         self._staged_worker_inbox = staged_worker_inbox
+        self._crash_info = crash_info
         self._cond = threading.Condition()
         self._scheduled_count = 0
         self._shutdown = False
@@ -311,19 +359,22 @@ class _WorkerCreator:
             logging.warning('Failed to stop WorkerCreator thread')
 
     def _worker_creator_thread_main(self) -> None:
-        while True:
-            cnt = 0
-            with self._cond:
-                if self._shutdown:
-                    return
-                if not self._scheduled_count:
-                    self._cond.wait()
-                    continue
-                cnt = self._scheduled_count
-                self._scheduled_count = 0
+        try:
+            while True:
+                cnt = 0
+                with self._cond:
+                    if self._shutdown:
+                        return
+                    if not self._scheduled_count:
+                        self._cond.wait()
+                        continue
+                    cnt = self._scheduled_count
+                    self._scheduled_count = 0
 
-            for _ in range(cnt):
-                self._staged_worker_inbox.add(_create_worker(self._recv_buf_size))
+                for _ in range(cnt):
+                    self._staged_worker_inbox.add(_create_worker(self._recv_buf_size))
+        except Exception as exc:
+            self._crash_info.set(exc)
 
 
 class _PoolRunner:
@@ -332,17 +383,18 @@ class _PoolRunner:
     __slots__ = (
         '_abort_inbox',
         '_busy_workers',
-        '_selector',
-        '_task_future_to_worker_pid',
+        '_crash_info',
         '_idle_worker_pids',
         '_marshalled_task_queue',
         '_max_active_workers',
-        '_recv_buf',
         '_recv_buf_size',
+        '_recv_buf',
+        '_selector',
         '_shutdown_notifier',
         '_shutdown',
         '_staged_worker_inbox',
         '_stopping_workers',
+        '_task_future_to_worker_pid',
         '_task_queue',
         '_timeouts_heap',
         '_worker_creator',
@@ -354,6 +406,7 @@ class _PoolRunner:
         max_active_workers: int,
         recv_buf_size: int,
         shutdown_notifier: _Notifier,
+        crash_info: _CrashInfo,
         task_queue: _TaskQueue,
         staged_worker_inbox: _StagedWorkerInbox,
         abort_inbox: _AbortInbox,
@@ -362,6 +415,7 @@ class _PoolRunner:
         self._max_active_workers = max_active_workers
         self._recv_buf_size = recv_buf_size
         self._shutdown_notifier = shutdown_notifier
+        self._crash_info = crash_info
         self._task_queue = task_queue
         self._staged_worker_inbox = staged_worker_inbox
         self._abort_inbox = abort_inbox
@@ -373,24 +427,25 @@ class _PoolRunner:
         self._stopping_workers: int = 0
         self._timeouts_heap: list[_TimeoutsHeapNode] = []
         self._selector = selectors.DefaultSelector()
+        self._selector.register(self._shutdown_notifier.read_sock, EVENT_READ, data=(self._handle_shutdown_fd, ()))
+        self._selector.register(self._task_queue.read_sock, EVENT_READ, data=(self._handle_task_queue_fd, ()))
         self._selector.register(
-            self._shutdown_notifier.read_sock, selectors.EVENT_READ, data=(self._handle_shutdown_fd, ())
+            self._staged_worker_inbox.read_sock, EVENT_READ, data=(self._handle_staged_worker_inbox_fd, ())
         )
-        self._selector.register(self._task_queue.read_sock, selectors.EVENT_READ, data=(self._handle_task_queue_fd, ()))
-        self._selector.register(
-            self._staged_worker_inbox.read_sock, selectors.EVENT_READ, data=(self._handle_staged_worker_inbox_fd, ())
-        )
-        self._selector.register(
-            self._abort_inbox.read_sock, selectors.EVENT_READ, data=(self._handle_abort_inbox_fd, ())
-        )
+        self._selector.register(self._abort_inbox.read_sock, EVENT_READ, data=(self._handle_abort_inbox_fd, ()))
         self._recv_buf = bytearray(self._recv_buf_size)
         self._shutdown = False
         self._task_future_to_worker_pid: dict[Future, int] = {}
 
-    def run(self) -> None:
-        self._worker_creator.schedule_creation(self._max_active_workers)
-        while not self._shutdown:
-            self._do_step()
+    def pool_runner_thread_main(self) -> None:
+        try:
+            self._worker_creator.schedule_creation(self._max_active_workers)
+            while not self._shutdown:
+                self._do_step()
+        except Exception as exc:
+            self._crash_info.set(exc)
+        finally:
+            self._shut_down()
 
     def _do_step(self) -> None:
         assert len(self._idle_worker_pids) <= len(self._workers)
@@ -411,7 +466,7 @@ class _PoolRunner:
             self._maybe_send_or_marshal_single_task()
         self._select_and_process_fds(wait=True)
 
-    def shut_down(self) -> None:
+    def _shut_down(self) -> None:
         self._selector.close()
         # Cancel pending tasks.
         for task in self._marshalled_task_queue:
@@ -453,17 +508,19 @@ class _PoolRunner:
             poll_timeout = None
 
         events = self._selector.select(timeout=poll_timeout)
-        for selector_key, _event_mask in events:
+        for selector_key, event_mask in events:
             handler: Callable
             args: tuple
             handler, args = selector_key.data
-            handler(*args)
+            handler(*args, event_mask)
 
-    def _handle_shutdown_fd(self) -> None:
+    def _handle_shutdown_fd(self, selector_event_mask: int) -> None:
+        assert selector_event_mask & EVENT_READ
         self._shutdown_notifier.eat_notifications(self._recv_buf)
         self._shutdown = True
 
-    def _handle_task_queue_fd(self) -> None:
+    def _handle_task_queue_fd(self, selector_event_mask: int) -> None:
+        assert selector_event_mask & EVENT_READ
         self._task_queue.eat_notifications(self._recv_buf)
         if not self._marshalled_task_queue:
             while self._task_queue.tasks and self._busy_workers < self._max_active_workers and self._idle_worker_pids:
@@ -473,7 +530,8 @@ class _PoolRunner:
                 worker_pid = self._idle_worker_pids.popleft()
                 self._send_task(task, self._workers[worker_pid])
 
-    def _handle_staged_worker_inbox_fd(self) -> None:
+    def _handle_staged_worker_inbox_fd(self, selector_event_mask: int) -> None:
+        assert selector_event_mask & EVENT_READ
         self._staged_worker_inbox.eat_notifications(self._recv_buf)
 
         for staged in self._staged_worker_inbox.take_all():
@@ -481,42 +539,76 @@ class _PoolRunner:
 
             worker = _Worker(pid=staged.pid, proc=staged.proc, sock=staged.sock)
             self._workers[staged.pid] = worker
-            self._selector.register(
-                staged.sock, selectors.EVENT_READ, data=(self._on_readable_worker_sock, (staged.pid,))
-            )
+            self._selector.register(staged.sock, EVENT_READ, data=(self._handle_readable_worker_fd, (staged.pid,)))
             self._send_task_or_mark_free(worker)
 
-    def _handle_abort_inbox_fd(self) -> None:
+    def _handle_abort_inbox_fd(self, selector_event_mask: int) -> None:
+        assert selector_event_mask & EVENT_READ
         self._abort_inbox.eat_notifications(self._recv_buf)
+
         to_create = 0
         for task_future in self._abort_inbox.take_all():
             worker_pid = self._task_future_to_worker_pid.pop(task_future, None)
             if worker_pid is None:
-                # the task hasn't started or has already finished
+                # no-op if the task already finished, but important to prevent a task from scheduling later
+                task_future.cancel()
                 continue
+            # initiate the worker termination; afterwards, the future will be canceled
             self._trigger_worker_stop(worker_pid)
             to_create += 1
         self._worker_creator.schedule_creation(to_create)
 
-    def _on_readable_worker_sock(self, pid: int) -> None:
+    def _handle_readable_or_writable_worker_fd(self, pid: int, selector_event_mask: int) -> None:
+        if selector_event_mask & EVENT_READ:
+            self._handle_readable_worker_fd(pid, selector_event_mask)
+        if selector_event_mask & EVENT_WRITE:
+            self._handle_writable_worker_fd(pid)
+
+    def _handle_writable_worker_fd(self, pid: int) -> None:
+        worker = self._workers[pid]
+        assert worker.sock is not None
+        assert worker.incomplete_send is not None
+
+        try:
+            nbytes = worker.sock.send(worker.incomplete_send)
+        except (BlockingIOError, TimeoutError):
+            raise  # we expect the file descriptor to be in non-blocking mode
+        except OSError:
+            self._handle_worker_sock_closed(worker)
+            return
+        if not nbytes:
+            self._handle_worker_sock_closed(worker)
+            return
+
+        remaining = worker.incomplete_send[nbytes:]
+        if remaining:
+            # Will continue sending after the socket becomes available for writing.
+            worker.incomplete_send = remaining
+        else:
+            # Everything has been sent; stop monitoring the write availability of the socket.
+            worker.incomplete_send = None
+            self._selector.modify(worker.sock, events=EVENT_READ, data=(self._handle_readable_worker_fd, (pid,)))
+
+    def _handle_readable_worker_fd(self, pid: int, selector_event_mask: int) -> None:
+        assert selector_event_mask & EVENT_READ
         worker = self._workers[pid]
         assert worker.sock is not None
 
         try:
             nbytes = worker.sock.recv_into(self._recv_buf)
             chunk = memoryview(self._recv_buf)[:nbytes]
-            if worker.partial_recv is None:
+            if worker.incomplete_recv is None:
                 view = chunk
             else:
-                worker.partial_recv.extend(chunk)
-                view = memoryview(worker.partial_recv)
+                worker.incomplete_recv.extend(chunk)
+                view = memoryview(worker.incomplete_recv)
         except (BlockingIOError, TimeoutError):
             raise  # we expect the file descriptor to be in non-blocking mode
         except OSError:
-            self._handle_worker_sock_eof(worker)
+            self._handle_worker_sock_closed(worker)
             return
         if not chunk:
-            self._handle_worker_sock_eof(worker)
+            self._handle_worker_sock_closed(worker)
             return
 
         while view:
@@ -537,9 +629,9 @@ class _PoolRunner:
                     raise ValueError(f'Unexpected message type {tp} received from worker')
 
         if not view:
-            worker.partial_recv = None
-        elif worker.partial_recv is None:
-            worker.partial_recv = bytearray(view)
+            worker.incomplete_recv = None
+        elif worker.incomplete_recv is None:
+            worker.incomplete_recv = bytearray(view)
 
     def _on_worker_task_reply_msg(self, worker: _Worker, raw_message: memoryview, succeeded: bool) -> None:
         # Update the worker state.
@@ -578,6 +670,10 @@ class _PoolRunner:
         self._selector.unregister(worker.proc.sentinel)
         worker.proc.join()
         worker.proc = None
+        if worker.task_future:
+            # Mark the future as canceled here, after the worker terminated, so that the caller knows when to clean up
+            # resources.
+            worker.task_future.cancel()
         if worker.sock is None:
             self._workers.pop(worker.pid)
             self._stopping_workers -= 1
@@ -586,23 +682,44 @@ class _PoolRunner:
             self._maybe_send_task_to_free_worker()
 
     def _send_task(self, task: _Task | _MarshalledTask, worker: _Worker) -> None:
+        # Update the worker state.
         assert worker.proc is not None
         assert worker.sock is not None
+        assert worker.task_future is None
+        assert worker.incomplete_send is None
+        worker.task_future = task.future
+        self._task_future_to_worker_pid[task.future] = worker.pid
+        self._busy_workers += 1
+
+        # Send the initial chunk.
         match task:
             case _Task():
                 wire_bytes = _marshal(_MarshalledType.TASK.value, (task.f, task.args))
             case _MarshalledTask():
                 wire_bytes = memoryview(task.wire_bytes)
         try:
-            worker.sock.sendall(wire_bytes)
-        finally:
-            wire_bytes.release()  # to avoid the "object cannot be re-sized" error
-        assert worker.task_future is None
-        worker.task_future = task.future
-        self._busy_workers += 1
+            nbytes = worker.sock.send(wire_bytes)
+        except BlockingIOError:
+            nbytes = 0
+
+        # If not everything was sent in a single go, start monitoring when the socket will become writable.
+        if nbytes < len(wire_bytes):
+            remaining = wire_bytes[nbytes:]
+            match task:
+                case _Task():
+                    worker.incomplete_send = memoryview(bytes(remaining))  # copy from the global singleton buffer
+                case _MarshalledTask():
+                    worker.incomplete_send = remaining
+            self._selector.modify(
+                worker.sock,
+                events=EVENT_READ | EVENT_WRITE,
+                data=(self._handle_readable_or_writable_worker_fd, (worker.pid,)),
+            )
+        wire_bytes.release()  # to avoid the "object cannot be re-sized" error
+
+        # TODO: do this after the whole request has been sent
         timeout_when = time.monotonic() + task.timeout
         heapq.heappush(self._timeouts_heap, _TimeoutsHeapNode(when=timeout_when, task_future=task.future))
-        self._task_future_to_worker_pid[task.future] = worker.pid
 
     def _send_task_or_mark_free(self, worker: _Worker) -> None:
         if self._busy_workers < self._max_active_workers:
@@ -625,13 +742,12 @@ class _PoolRunner:
         worker = self._workers[worker_pid]
         assert worker.proc is not None
         worker.stopping = True
-        worker.task_future = None
         worker.proc.terminate()
         self._stopping_workers += 1
         assert worker.sock is not None
         # observe when the process will become join'able
         self._selector.register(
-            worker.proc.sentinel, selectors.EVENT_READ, data=(self._on_worker_proc_fd_joinable, (worker_pid,))
+            worker.proc.sentinel, EVENT_READ, data=(self._on_worker_proc_fd_joinable, (worker_pid,))
         )
 
     def _maybe_send_or_marshal_single_task(self) -> None:
@@ -670,7 +786,7 @@ class _PoolRunner:
                 _assign_future_exception(node.task_future, TimeoutError('Job timed out'))
                 self._abort_inbox.add(node.task_future)
 
-    def _handle_worker_sock_eof(self, worker: _Worker) -> None:
+    def _handle_worker_sock_closed(self, worker: _Worker) -> None:
         assert worker.sock is not None
         if worker.task_future is not None:
             if not worker.task_future.done():
@@ -713,13 +829,13 @@ class _WorkerRunner:
 
         self._recv_buf = bytearray(self._recv_buf_size)
 
-    def run(self) -> None:
+    def worker_process_main(self) -> None:
         self._init_in_child_process()
         with self._server_sock:
             with selectors.DefaultSelector() as selector:
-                selector.register(self._server_sock, selectors.EVENT_READ, data=(self._handle_server_sock_fd, ()))
+                selector.register(self._server_sock, EVENT_READ, data=(self._handle_server_sock_fd, ()))
                 for sock in (sigmonitor.get_wakeup_sock(), sigmonitor.get_sigintterm_sock()):
-                    selector.register(sock, selectors.EVENT_READ, data=(sigmonitor.handle_readable_wakeup_fd, (sock,)))
+                    selector.register(sock, EVENT_READ, data=(sigmonitor.handle_readable_wakeup_fd, (sock,)))
                 # Receive and execute incoming tasks - until stopped by a signal or the socket closure.
                 while not self._shutdown:
                     sigmonitor.maybe_raise_exc()
@@ -791,7 +907,7 @@ def _create_worker(recv_buf_size: int) -> _StagedWorker:
         logging_level=logging.getLogger().getEffectiveLevel(),
         server_sock=child_sock,
     )
-    proc = multiprocessing.Process(target=worker_runner.run)
+    proc = multiprocessing.Process(target=worker_runner.worker_process_main)
     proc.start()
     child_sock.close()
     assert proc.pid is not None

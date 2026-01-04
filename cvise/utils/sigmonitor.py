@@ -127,10 +127,8 @@ def handle_readable_wakeup_fd(sock: socket.socket) -> None:
     assert _context is not None
     try:
         nbytes = os.readv(sock.fileno(), (_context.read_buf,))
-    except (BlockingIOError, TimeoutError):
-        raise  # we expect the file descriptor to be in non-blocking mode
     except OSError:
-        return
+        return  # data was read by another thread or shutdown started
 
     # In case of the common wakeup FD, copy the notification(s) into corresponding dedicated sockets, so that we support
     # multiple overlapping select() calls as long as they consume different sockets.
