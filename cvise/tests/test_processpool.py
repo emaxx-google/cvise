@@ -2,7 +2,7 @@ import concurrent.futures
 import multiprocessing
 import queue
 import time
-from typing import Generator
+from typing import Iterable
 
 import pytest
 
@@ -15,7 +15,7 @@ _DEFAULT_TIMEOUT = 100
 
 
 @pytest.fixture
-def pool() -> Generator[ProcessPool]:
+def pool() -> Iterable[ProcessPool]:
     pool = ProcessPool(max_active_workers=_WORKERS)
     pool.__enter__()
     yield pool
