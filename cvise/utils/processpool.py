@@ -33,7 +33,7 @@ _DEFAULT_RECV_BUF_SIZE = 131072  # chosen to exceed the typical size of C-Vise t
 _TIMEOUTS_HEAP_REPACK_FACTOR = 10  # to prevent excessively big size of the timeouts heap (no item deletion possible)
 _pickler_bytes_io: io.BytesIO | None = None
 _pickler: multiprocessing.reduction.ForkingPickler | None = None
-_header_struct = struct.Struct('bi')
+_header_struct = struct.Struct('=bi')
 _HEADER_SIZE = _header_struct.size
 _HEADER_STUB = b'\0' * _HEADER_SIZE
 
@@ -106,6 +106,7 @@ class ProcessPool:
         self._pool_runner_thread.join(60)  # semi-arbitrary timeout to prevent possibility of deadlocks
         if self._pool_runner_thread.is_alive():
             logging.warning('Failed to stop process pool thread')
+            assert 0
         self._exit_stack.__exit__(exc_type, exc_val, exc_tb)
 
         # Clear leftovers after the threads has been shut down.
@@ -389,6 +390,7 @@ class _PoolRunner:
         '_max_active_workers',
         '_recv_buf_size',
         '_recv_buf',
+        '_recv_view',
         '_selector',
         '_shutdown_notifier',
         '_shutdown',
@@ -434,6 +436,7 @@ class _PoolRunner:
         )
         self._selector.register(self._abort_inbox.read_sock, EVENT_READ, data=(self._handle_abort_inbox_fd, ()))
         self._recv_buf = bytearray(self._recv_buf_size)
+        self._recv_view = memoryview(self._recv_buf)
         self._shutdown = False
         self._task_future_to_worker_pid: dict[Future, int] = {}
 
@@ -445,7 +448,7 @@ class _PoolRunner:
         except Exception as exc:
             self._crash_info.set(exc)
         finally:
-            self._shut_down()
+            self._stop_and_wait()
 
     def _do_step(self) -> None:
         assert len(self._idle_worker_pids) <= len(self._workers)
@@ -464,9 +467,10 @@ class _PoolRunner:
         while self._task_queue.tasks:
             self._select_and_process_fds(wait=False)
             self._maybe_send_or_marshal_single_task()
-        self._select_and_process_fds(wait=True)
+        if not self._shutdown:
+            self._select_and_process_fds(wait=True)
 
-    def _shut_down(self) -> None:
+    def _stop_and_wait(self) -> None:
         self._selector.close()
         # Cancel pending tasks.
         for task in self._marshalled_task_queue:
@@ -481,14 +485,6 @@ class _PoolRunner:
                 assert worker.proc is not None
                 worker.proc.terminate()
             if worker.sock:
-                worker.sock.setblocking(True)
-                while True:
-                    try:
-                        received = worker.sock.recv_into(self._recv_buf)
-                    except (EOFError, OSError):
-                        break
-                    if not received:
-                        break
                 worker.sock.close()
             if worker.task_future:
                 worker.task_future.cancel()
@@ -561,6 +557,8 @@ class _PoolRunner:
     def _handle_readable_or_writable_worker_fd(self, pid: int, selector_event_mask: int) -> None:
         if selector_event_mask & EVENT_READ:
             self._handle_readable_worker_fd(pid, selector_event_mask)
+            if self._workers[pid].sock is None:
+                return  # the socket has gotten closed
         if selector_event_mask & EVENT_WRITE:
             self._handle_writable_worker_fd(pid)
 
@@ -596,7 +594,7 @@ class _PoolRunner:
 
         try:
             nbytes = worker.sock.recv_into(self._recv_buf)
-            chunk = memoryview(self._recv_buf)[:nbytes]
+            chunk = self._recv_view[:nbytes]
             if worker.incomplete_recv is None:
                 view = chunk
             else:
@@ -789,6 +787,7 @@ class _PoolRunner:
 
     def _handle_worker_sock_closed(self, worker: _Worker) -> None:
         assert worker.sock is not None
+        assert worker.pid not in self._idle_worker_pids  # TODO: expensive!
         if worker.task_future is not None:
             if not worker.task_future.done():
                 _assign_future_exception(worker.task_future, ProcessPoolError(f'Worker {worker.pid} died'))
@@ -810,7 +809,7 @@ class _PoolRunner:
 class _WorkerRunner:
     """Implements the event loop in the worker process (receive-execute-reply)."""
 
-    __slots__ = ('_logging_level', '_recv_buf', '_recv_buf_size', '_server_sock', '_shutdown')
+    __slots__ = ('_logging_level', '_recv_buf', '_recv_buf_size', '_recv_view', '_server_sock', '_shutdown')
 
     def __init__(self, recv_buf_size: int, logging_level: int, server_sock: socket.socket):
         assert server_sock.getblocking()
@@ -818,7 +817,9 @@ class _WorkerRunner:
         self._logging_level = logging_level
         self._server_sock = server_sock
         self._shutdown: bool = False
-        self._recv_buf: bytearray  # initialized later, in the child process
+        # initialized later, in the child process:
+        self._recv_buf: bytearray
+        self._recv_view: memoryview
 
     def _init_in_child_process(self) -> None:
         sigmonitor.init(sigint=False, sigchld=True)
@@ -829,6 +830,7 @@ class _WorkerRunner:
         root.addHandler(_LogSender(self._server_sock))
 
         self._recv_buf = bytearray(self._recv_buf_size)
+        self._recv_view = memoryview(self._recv_buf)
 
     def worker_process_main(self) -> None:
         self._init_in_child_process()
@@ -877,18 +879,21 @@ class _WorkerRunner:
         while True:
             sigmonitor.maybe_raise_exc()
 
-            if ntotal == len(self._recv_buf):  # double the buffer on exhaustion
-                self._recv_buf.extend(b'\0' * ntotal)
+            if ntotal == len(self._recv_buf):
+                # Increase the buffer on exhaustion.
+                self._recv_view.release()
+                _double_buf(self._recv_buf)
+                self._recv_view = memoryview(self._recv_buf)
 
             try:
-                nchunk = self._server_sock.recv_into(memoryview(self._recv_buf)[ntotal:])
+                nchunk = self._server_sock.recv_into(self._recv_view[ntotal:])
             except OSError:
                 return None
             if not nchunk:
                 return None
             ntotal += nchunk
 
-            if parsed := _try_unmarshal(memoryview(self._recv_buf)[:ntotal]):
+            if parsed := _try_unmarshal(self._recv_view[:ntotal]):
                 marshalling_type, payload, tail = parsed
                 assert marshalling_type == _MarshalledType.TASK.value
                 assert not tail
@@ -939,7 +944,7 @@ def _try_unmarshal(blob: memoryview) -> tuple[int, memoryview, memoryview] | Non
     n = len(blob)
     if n < _HEADER_SIZE:
         return None
-    tp, npayload = _header_struct.unpack_from(blob[:_HEADER_SIZE])
+    tp, npayload = _header_struct.unpack_from(blob)
     ntotal = _HEADER_SIZE + npayload
     if n < ntotal:
         return None
@@ -954,8 +959,7 @@ def _assign_future_exception(future: Future, exc: BaseException) -> None:
 class _LogSender(logging.Handler):
     """Sends all logs from a worker to the server process via a socket.
 
-    This is used instead of letting the workers write to stderr, in order to avoid spurious errors printed by canceled
-    workers.
+    This is used instead of letting the workers write to stderr, in order to avoid spurious errors    workers.
     """
 
     def __init__(self, server_sock: socket.socket):
@@ -984,3 +988,13 @@ class _LogSender(logging.Handler):
         record.exc_text = None
         record.stack_info = None
         return record
+
+
+if hasattr(bytearray, 'resize'):  # 3.14+
+
+    def _double_buf(buf: bytearray) -> None:
+        buf.resize(2 * len(buf))
+else:
+
+    def _double_buf(buf: bytearray) -> None:
+        buf.extend(buf)

@@ -1340,7 +1340,8 @@ def override_tmpdir_env(old_env: Mapping[str, str], tmp_override: Path) -> Mappi
 
 def do_stress(args):
     profiling = os.environ.get('PROF')
-    N = (10000 * args.n // 64) if profiling else 30000
+    huge = os.environ.get('HUGE')
+    N = (10000 if profiling else 30000) * args.n // 64 // (30 if huge else 1)
     REP = 1 if profiling else args.max_improvement
     CANCEL_EVERY = N // 3 if profiling else N // 10
     OVERCOMMIT = 1
@@ -1364,7 +1365,7 @@ def do_stress(args):
                 tmp_dir=Path('kjfajshfsakjhfakjfhdskjhkjfhadf'),
                 per_type_states=[
                     hint_based.PerTypeHintState(
-                        type=b'foo' + str(i).encode(),
+                        type=b'foo' + str(i).encode() + ('0' * 10000000 if huge else '').encode(),
                         hints_file_name=Path('akjfdkjfhdakjfhfjhfjhfdjkhfajkhjsadhafkjh'),
                         underlying_state=hint_based.BinaryState.create(100),
                     )
