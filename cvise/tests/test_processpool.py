@@ -125,5 +125,7 @@ def _sleep_and_push_queue_events(duration: float, event_queue: queue.Queue[int])
     try:
         # Don't use time.sleep() since it'd ignore signals.
         sigmonitor.get_future().result(timeout=duration)
+    except TimeoutError:
+        pass
     finally:
         event_queue.put(-1)

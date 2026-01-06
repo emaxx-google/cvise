@@ -23,6 +23,10 @@ import psutil
 from cvise.utils import sigmonitor
 
 
+# How many seconds to let a subprocess shut down after SIGTERM; afterwards SIGKILL will be sent.
+_SIGTERM_TIMEOUT = 30
+
+
 class ProcessEventNotifier:
     """Runs a subprocess and reports its PID as start/finish events on the PID queue.
 
@@ -55,7 +59,7 @@ class ProcessEventNotifier:
             env=env,
             **kwargs,
         ) as proc:
-            # print(f'[{os.getpid()}] run_process begin pid={proc.pid}', file=sys.stderr)
+            print(f'[{os.getpid()}] run_process launched pid={proc.pid}', file=sys.stderr)
             with _auto_kill_descendants(proc):
                 stdout_data, stderr_data = self._communicate_with_sig_checks(proc, input, timeout)
             # print(f'[{os.getpid()}] run_process end pid={proc.pid}', file=sys.stderr)
@@ -156,7 +160,7 @@ class ProcessEventNotifier:
                     selector.unregister(proc.stdout)
                 if proc.stderr and not proc.stderr.closed:
                     selector.unregister(proc.stderr)
-                # print(f'[{os.getpid()}] _communicate_with_sig_checks_posix: timeout', file=sys.stderr)
+                print(f'[{os.getpid()}] _communicate_with_sig_checks_posix: timeout pid={proc.pid}', file=sys.stderr)
                 raise subprocess.TimeoutExpired(
                     cmd=proc.args,
                     timeout=timeout,
@@ -170,7 +174,7 @@ class ProcessEventNotifier:
                 f, args = key.data
                 f(*args)
 
-        # print(f'[{os.getpid()}] _communicate_with_sig_checks_posix: finish', file=sys.stderr)
+        print(f'[{os.getpid()}] _communicate_with_sig_checks_posix: finished pid={proc.pid}', file=sys.stderr)
         return b''.join(stdout_chunks), b''.join(stderr_chunks)
 
     def _communicate_with_sig_checks_portable(
@@ -241,10 +245,10 @@ def _auto_kill_descendants(proc: subprocess.Popen) -> Iterator[None]:
                 proc.stderr.close()
             if proc.stdout:
                 proc.stdout.close()
-            # print(f'[{os.getpid()}] run_process kill_subtree pid={proc.pid}', file=sys.stderr)
+            print(f'[{os.getpid()}] run_process kill_subtree pid={proc.pid}', file=sys.stderr)
             _kill_subtree(proc.pid)
             proc.wait()
-            # print(f'[{os.getpid()}] run_process killed_subtree pid={proc.pid}', file=sys.stderr)
+            print(f'[{os.getpid()}] run_process killed_subtree pid={proc.pid}', file=sys.stderr)
 
 
 def _kill_subtree(pid: int) -> None:
@@ -260,13 +264,15 @@ def _kill_subtree(pid: int) -> None:
     alive_children: list[psutil.Process] = []
     for child in children:
         try:
+            print(f'[{os.getpid()}] SIGTERM to pid={child.pid}', file=sys.stderr)
             child.terminate()
         except psutil.NoSuchProcess:
             pass
         else:
             alive_children.append(child)
 
-    _gone, alive = psutil.wait_procs(alive_children, timeout=3)
+    _gone, alive = psutil.wait_procs(alive_children, timeout=_SIGTERM_TIMEOUT)
     for child in alive:
         with contextlib.suppress(psutil.NoSuchProcess):
+            print(f'[{os.getpid()}] SIGKILL to pid={child.pid}', file=sys.stderr)
             child.kill()

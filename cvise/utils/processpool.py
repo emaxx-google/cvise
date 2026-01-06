@@ -17,6 +17,7 @@ import socket
 import struct
 import sys
 import threading
+import traceback
 import time
 from collections import deque
 from collections.abc import Callable, Collection, Sequence
@@ -482,6 +483,7 @@ class _PoolRunner:
         # Abort running tasks and terminate all workers.
         for worker in self._workers.values():
             if not worker.stopping:
+                print(f'stop_and_wait: terminating worker pid={worker.pid}', file=sys.stderr)
                 assert worker.proc is not None
                 worker.proc.terminate()
             if worker.sock:
@@ -663,6 +665,7 @@ class _PoolRunner:
         logger.handle(record)
 
     def _on_worker_proc_fd_joinable(self, worker_pid: int, selector_event_mask: int) -> None:
+        print(f'on_worker_proc_fd_joinable pid={worker_pid}', file=sys.stderr)
         assert selector_event_mask & EVENT_READ
         worker = self._workers[worker_pid]
         assert worker.proc is not None
@@ -738,6 +741,7 @@ class _PoolRunner:
             )
 
     def _trigger_worker_stop(self, worker_pid: int) -> None:
+        print(f'trigger_worker_stop: terminating worker pid={worker_pid}', file=sys.stderr)
         worker = self._workers[worker_pid]
         assert worker.proc is not None
         worker.stopping = True
@@ -861,6 +865,8 @@ class _WorkerRunner:
             result = f(*args)
             tp = _MarshalledType.TASK_RESULT.value
         except Exception as exc:
+            print(f'[{os.getpid()}] Task error: {exc}', file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
             result = exc
             tp = _MarshalledType.TASK_ERROR.value
         sigmonitor.maybe_raise_exc()
@@ -917,6 +923,7 @@ def _create_worker(recv_buf_size: int) -> _StagedWorker:
     proc.start()
     child_sock.close()
     assert proc.pid is not None
+    print(f'created worker pid={proc.pid}', file=sys.stderr)
     return _StagedWorker(pid=proc.pid, proc=proc, sock=sock)
 
 
