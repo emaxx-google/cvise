@@ -111,8 +111,8 @@ class TestResult(msgspec.Struct):
     folder: Path
     all_test_cases: set[Path]
     test_case: Path
-    pass_result: PassResult
-    updated_state: Any
+    pass_result: PassResult | None = None
+    updated_state: Any = None
     test_exitcode: int | None = None
     size_improvement: int | None = None
 
@@ -155,6 +155,13 @@ class TestEnvironment(msgspec.Struct):
             fileutil.copy_test_case(test_case, self.folder)
 
     def run(self):
+        result = TestResult(
+            test_script=self.test_script,
+            folder=self.folder,
+            all_test_cases=self.all_test_cases,
+            test_case=self.test_case,
+        )
+
         try:
             # If the pass needs this, copy files to the created folder (e.g., hint-based passes don't need this).
             if self.should_copy_test_cases:
@@ -162,22 +169,14 @@ class TestEnvironment(msgspec.Struct):
 
             # transform by state
             written_paths: set[Path] = set()
-            (pass_result, updated_state) = self.transform(
+            (result.pass_result, result.updated_state) = self.transform(
                 self.test_case_path,
                 self.state,
                 process_event_notifier=ProcessEventNotifier(),
                 original_test_case=self.test_case.resolve(),
                 written_paths=written_paths,
             )
-            result = TestResult(
-                test_script=self.test_script,
-                folder=self.folder,
-                all_test_cases=self.all_test_cases,
-                test_case=self.test_case,
-                pass_result=pass_result,
-                updated_state=updated_state,
-            )
-            if pass_result != PassResult.OK:
+            if result.pass_result != PassResult.OK:
                 return result
 
             # run test script
@@ -193,11 +192,11 @@ class TestEnvironment(msgspec.Struct):
         except UnicodeDecodeError:
             # most likely the pass is incompatible with non-UTF files - terminate it
             logging.debug('Skipping pass due to a unicode issue')
-            self.result = PassResult.STOP
-            return self
+            result.pass_result = PassResult.STOP
+            return result
         except Exception:
             logging.exception('Unexpected TestEnvironment::run failure')
-            return self
+            return result
 
     def run_test(self, verbose):
         # Make the job use our custom temp dir instead of the standard one, so that the standard location doesn't get

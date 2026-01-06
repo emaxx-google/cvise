@@ -128,7 +128,10 @@ def handle_readable_wakeup_fd(sock: socket.socket) -> None:
     assert _context is not None
     try:
         nbytes = os.readv(sock.fileno(), (_context.read_buf,))
-        os.write(sys.stderr.fileno(), f'[{os.getpid()}] handle_readable_wakeup_fd: bytes={_context.read_buf[:nbytes]}'.encode())
+        os.write(
+            sys.stderr.fileno(),
+            f'[{os.getpid()}] handle_readable_wakeup_fd: bytes={_context.read_buf[:nbytes]}\n'.encode(),
+        )
     except OSError:
         return  # data was read by another thread or shutdown started
 
@@ -177,7 +180,7 @@ def _notify_sock(sock: socket.socket) -> None:
 
 
 def _on_signal(signum: int, frame) -> None:
-    print(f'[{os.getpid()}] on_signal {signum}', file=sys.stderr)
+    os.write(sys.stderr.fileno(), f'[{os.getpid()}] on_signal {signum}\n'.encode())
     assert _context
     repeated = _context.sigterm_observed or _context.sigint_observed
     match signum:
