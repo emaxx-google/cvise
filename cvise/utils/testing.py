@@ -854,6 +854,7 @@ class TestManager:
     def terminate_all(self) -> None:
         self.cancel_jobs(self.jobs)
         self.worker_pool.stop()
+        self.worker_pool.wait_until_shutdown()
         self.release_all_jobs()
 
     def cancel_job(self, job: Job) -> None:

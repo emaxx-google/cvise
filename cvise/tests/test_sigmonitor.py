@@ -89,8 +89,8 @@ def _process_main_calling_retrigger(process_ready_event: threading.Event, proces
     assert not sigmonitor.get_future().done()
     process_ready_event.set()
     for _ in range(_SLEEP_INFINITY):
-        time.sleep(1)
         try:
+            time.sleep(1)
             sigmonitor.maybe_raise_exc()
         except BaseException as e:
             assert type(sigmonitor.get_future().exception(timeout=0)) is type(e)
