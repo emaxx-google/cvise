@@ -324,7 +324,7 @@ class _Worker:
     proc: multiprocessing.Process | None  # none after shutdown
     sock: socket.socket | None  # none after the IPC channel is closed
     task_future: Future | None = None  # currently running task
-    stopping: bool = False  # whether cancellation started
+    aborting: bool = False  # whether task abortion started
     incomplete_send: memoryview | None = None  # stores data to be sent to the worker if it didn't fit into one send()
     incomplete_recv: bytearray | None = None  # stores data received from the worker if it wasn't a complete message
 
@@ -494,9 +494,10 @@ class _PoolRunner:
         while self._task_queue.tasks:
             task = self._task_queue.tasks.popleft()
             task.future.cancel()
-        # Abort running tasks and terminate all workers.
+        # Terminate all workers (the signal is broadcasted first to let workers shut down concurrently) and abort active
+        # tasks afterwards.
         for worker in self._workers.values():
-            if not worker.stopping:
+            if not worker.aborting:
                 if VLOG:
                     print(f'stop_and_wait: terminating worker pid={worker.pid}', file=sys.stderr)
                 assert worker.proc is not None
@@ -508,7 +509,6 @@ class _PoolRunner:
                 if VLOG:
                     print(f'[{os.getpid()}] stop_and_wait: joining pid={worker.pid}', file=sys.stderr)
                 worker.proc.join()
-        for worker in self._workers.values():
             if worker.task_future:
                 worker.task_future.cancel()
         self._workers.clear()
@@ -638,7 +638,7 @@ class _PoolRunner:
                 break  # the message is still incomplete - remember the read prefix and move on
             tp, raw_message, view = parsed
 
-            if worker.stopping:
+            if worker.aborting:
                 continue  # during worker shutdown, ignore replies and (likely spurious error) logs; we wait for EOF
             match tp:
                 case _MarshalledType.TASK_RESULT.value:
@@ -695,16 +695,9 @@ class _PoolRunner:
         self._selector.unregister(worker.proc.sentinel)
         worker.proc.join()
         worker.proc = None
-        if worker.task_future:
-            # Mark the future as canceled here, after the worker terminated, so that the caller knows when to clean up
-            # resources.
-            worker.task_future.cancel()
-        if worker.sock is None:
-            self._workers.pop(worker.pid)
-            self._stopping_workers -= 1
-            self._busy_workers -= 1
-            assert self._stopping_workers >= 0
-            self._maybe_send_task_to_free_worker()
+
+        self._maybe_abort_worker_task(worker)
+        self._maybe_retire_worker(worker)
 
     def _send_task(self, task: _Task | _MarshalledTask, worker: _Worker) -> None:
         # Update the worker state.
@@ -768,7 +761,7 @@ class _PoolRunner:
             print(f'trigger_worker_stop: terminating worker pid={worker_pid}', file=sys.stderr)
         worker = self._workers[worker_pid]
         assert worker.proc is not None
-        worker.stopping = True
+        worker.aborting = True
         worker.proc.terminate()
         self._stopping_workers += 1
         assert worker.sock is not None
@@ -816,22 +809,33 @@ class _PoolRunner:
     def _handle_worker_sock_closed(self, worker: _Worker) -> None:
         assert worker.sock is not None
         assert worker.pid not in self._idle_worker_pids  # TODO: expensive!
-        if worker.task_future is not None:
-            if not worker.task_future.done():
-                _assign_future_exception(worker.task_future, ProcessPoolError(f'Worker {worker.pid} died'))
-            tracked_pid = self._task_future_to_worker_pid.pop(worker.task_future)
-            assert tracked_pid == worker.pid
-            worker.task_future = None
         self._selector.unregister(worker.sock)
-
         worker.sock.close()
         worker.sock = None
 
-        if worker.proc is None:
-            self._workers.pop(worker.pid)
-            self._stopping_workers -= 1
-            self._busy_workers -= 1
-            self._maybe_send_task_to_free_worker()
+        self._maybe_abort_worker_task(worker)
+        self._maybe_retire_worker(worker)
+
+    def _maybe_abort_worker_task(self, worker: _Worker) -> None:
+        if worker.task_future is None:
+            return
+        if worker.aborting:
+            worker.task_future.cancel()
+        else:
+            _assign_future_exception(worker.task_future, ProcessPoolError(f'Worker {worker.pid} died'))
+        tracked_pid = self._task_future_to_worker_pid.pop(worker.task_future)
+        assert tracked_pid == worker.pid
+        worker.task_future = None
+
+    def _maybe_retire_worker(self, worker: _Worker) -> None:
+        if worker.proc is not None or worker.sock is not None:
+            return
+        self._workers.pop(worker.pid)
+        self._stopping_workers -= 1
+        self._busy_workers -= 1
+        assert self._busy_workers >= 0
+        assert self._stopping_workers >= 0
+        self._maybe_send_task_to_free_worker()
 
 
 class _WorkerRunner:

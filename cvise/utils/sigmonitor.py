@@ -19,6 +19,7 @@ from __future__ import annotations
 import atexit
 import concurrent.futures
 import contextlib
+import datetime
 import os
 import signal
 import socket
@@ -126,6 +127,11 @@ def assert_sigchld_monitored() -> None:
 
 def handle_readable_wakeup_fd(sock: socket.socket) -> None:
     """To be called when the corresponding FD is readable."""
+    if VLOG:
+        os.write(
+            sys.stderr.fileno(),
+            f'[{os.getpid()} {datetime.datetime.now()}] handle_readable_wakeup_fd: sock={sock.fileno()}\n'.encode(),
+        )
     # Drain the socket.
     assert _context is not None
     try:
@@ -133,26 +139,31 @@ def handle_readable_wakeup_fd(sock: socket.socket) -> None:
         if VLOG:
             os.write(
                 sys.stderr.fileno(),
-                f'[{os.getpid()}] handle_readable_wakeup_fd: bytes={_context.read_buf[:nbytes]}\n'.encode(),
+                f'[{os.getpid()} {datetime.datetime.now()}] handle_readable_wakeup_fd: pumped bytes={_context.read_buf[:nbytes]}\n'.encode(),
             )
     except OSError:
         return  # data was read by another thread or shutdown started
 
-    # In case of the common wakeup FD, copy the notification(s) into corresponding dedicated sockets, so that we support
-    # multiple overlapping select() calls as long as they consume different sockets.
+    # In case of the common wakeup FD, copy the notification(s) into corresponding dedicated sockets (so that we support
+    # multiple overlapping select() calls as long as they consume different sockets) and set the future (to unblock the
+    # main thread if it's waiting on futures).
     if sock != _context.wakeup_read_sock:
         return
     contents = memoryview(_context.read_buf)[:nbytes]
     sigchld_notified = False
     sigintterm_notified = False
-    for b in contents:
-        match b:
+    for signum in contents:
+        match signum:
             case signal.SIGCHLD if not sigchld_notified:
                 sigchld_notified = True
                 _notify_sock(_context.sigchld_write_sock)
             case signal.SIGINT | signal.SIGTERM if not sigintterm_notified:
                 sigintterm_notified = True
                 _notify_sock(_context.sigintterm_write_sock)
+                # Set the exception on the future, unless it's already done. We don't use done() because it'd be
+                # potentially racy.
+                with contextlib.suppress(concurrent.futures.InvalidStateError):
+                    _context.future.set_exception(_create_exception(signum))
 
 
 def signal_observed_for_testing() -> bool:
@@ -184,7 +195,7 @@ def _notify_sock(sock: socket.socket) -> None:
 
 def _on_signal(signum: int, frame) -> None:
     if VLOG:
-        os.write(sys.stderr.fileno(), f'[{os.getpid()}] on_signal {signum}\n'.encode())
+        os.write(sys.stderr.fileno(), f'[{os.getpid()} {datetime.datetime.now()}] on_signal {signum}\n'.encode())
     assert _context
     repeated = _context.sigterm_observed or _context.sigint_observed
     match signum:
