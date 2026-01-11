@@ -68,7 +68,7 @@ class HungPass(StubPass):
         INFINITY = 1000
         for _ in range(INFINITY):
             time.sleep(1)
-            sigmonitor.maybe_retrigger_action()
+            sigmonitor.maybe_raise_exc()
         return (PassResult.INVALID, state)
 
 
