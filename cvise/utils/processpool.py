@@ -149,8 +149,7 @@ class ProcessPool:
         elif self._shutdown:
             future.cancel()
         else:
-            wire_bytes = _marshal(_MarshalledType.TASK, (f, args))
-            task = _MarshalledTask(wire_bytes=bytes(wire_bytes), future=future, timeout=timeout)
+            task = _Task(f=f, args=args, future=future, timeout=timeout)
             self._task_queue.enqueue(task)
         return future
 
@@ -235,9 +234,9 @@ class _TaskQueue(_Notifier):
 
     def __init__(self):
         super().__init__()
-        self.tasks: deque[_MarshalledTask] = deque()
+        self.tasks: deque[_Task] = deque()
 
-    def enqueue(self, task: _MarshalledTask) -> None:
+    def enqueue(self, task: _Task) -> None:
         self.tasks.append(task)
         self.notify()
 
@@ -400,6 +399,7 @@ class _PoolRunner:
         '_busy_workers',
         '_crash_info',
         '_idle_worker_pids',
+        '_marshalled_task_queue',
         '_max_active_workers',
         '_recv_buf_size',
         '_recv_buf',
@@ -436,6 +436,7 @@ class _PoolRunner:
         self._abort_inbox = abort_inbox
         self._worker_creator = worker_creator
         self._workers: dict[int, _Worker] = {}
+        self._marshalled_task_queue: deque[_MarshalledTask] = deque()
         self._busy_workers: int = 0
         self._idle_worker_pids: deque[int] = deque()
         self._stopping_workers: int = 0
@@ -487,6 +488,9 @@ class _PoolRunner:
             print(f'[{os.getpid()}] stop_and_wait: begin', file=sys.stderr)
         self._selector.close()
         # Cancel pending tasks.
+        for task in self._marshalled_task_queue:
+            task.future.cancel()
+        self._marshalled_task_queue.clear()
         while self._task_queue.tasks:
             task = self._task_queue.tasks.popleft()
             task.future.cancel()
@@ -538,12 +542,13 @@ class _PoolRunner:
     def _handle_task_queue_fd(self, selector_event_mask: int) -> None:
         assert selector_event_mask & EVENT_READ
         self._task_queue.eat_notifications(self._recv_buf)
-        while self._task_queue.tasks and self._busy_workers < self._max_active_workers and self._idle_worker_pids:
-            task = self._task_queue.tasks.popleft()
-            if task.future.cancelled():
-                continue
-            worker_pid = self._idle_worker_pids.popleft()
-            self._send_task(task, self._workers[worker_pid])
+        if not self._marshalled_task_queue:
+            while self._task_queue.tasks and self._busy_workers < self._max_active_workers and self._idle_worker_pids:
+                task = self._task_queue.tasks.popleft()
+                if task.future.cancelled():
+                    continue
+                worker_pid = self._idle_worker_pids.popleft()
+                self._send_task(task, self._workers[worker_pid])
 
     def _handle_staged_worker_inbox_fd(self, selector_event_mask: int) -> None:
         assert selector_event_mask & EVENT_READ
@@ -736,15 +741,20 @@ class _PoolRunner:
 
     def _send_task_or_mark_free(self, worker: _Worker) -> None:
         if self._busy_workers < self._max_active_workers:
+            if self._marshalled_task_queue:
+                self._send_task(self._marshalled_task_queue.popleft(), worker)
+                return
             if self._task_queue.tasks:
                 self._send_task(self._task_queue.tasks.popleft(), worker)
                 return
         self._idle_worker_pids.append(worker.pid)
 
     def _maybe_send_task_to_free_worker(self) -> None:
-        if self._idle_worker_pids and self._task_queue.tasks:
+        if self._idle_worker_pids and (self._task_queue.tasks or self._marshalled_task_queue):
             worker_pid = self._idle_worker_pids.popleft()
-            self._send_task(self._task_queue.tasks.popleft(), self._workers[worker_pid])
+            self._send_task(
+                (self._marshalled_task_queue or self._task_queue.tasks).popleft(), self._workers[worker_pid]
+            )
 
     def _trigger_worker_stop(self, worker_pid: int) -> None:
         if VLOG:
@@ -761,11 +771,22 @@ class _PoolRunner:
         )
 
     def _maybe_send_or_marshal_single_task(self) -> None:
-        if self._task_queue.tasks and self._busy_workers < self._max_active_workers and self._idle_worker_pids:
-            task = self._task_queue.tasks.popleft()
+        if not self._task_queue.tasks:
+            return
+        task = self._task_queue.tasks.popleft()
+        if self._busy_workers < self._max_active_workers and self._idle_worker_pids:
+            assert not self._marshalled_task_queue
             if not task.future.cancelled():
                 pid = self._idle_worker_pids.popleft()
                 self._send_task(task, self._workers[pid])
+        else:
+            # Marshal into a separate buffer, to allow future _marshal() calls overwrite the global buffer.
+            view = _marshal(_MarshalledType.TASK.value, (task.f, task.args))
+            packet = bytes(view)
+            view.release()  # to avoid the "object cannot be re-sized" error
+            self._marshalled_task_queue.append(
+                _MarshalledTask(wire_bytes=packet, future=task.future, timeout=task.timeout)
+            )
 
     def _mark_timed_out_tasks(self) -> None:
         if len(self._timeouts_heap) > self._max_active_workers * _TIMEOUTS_HEAP_REPACK_FACTOR:
