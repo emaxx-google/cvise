@@ -26,6 +26,7 @@ import socket
 import sys
 from concurrent.futures import Future
 from dataclasses import dataclass
+from signal import SIGCHLD, SIGINT, SIGTERM
 
 
 _SOCK_READ_BUF_SIZE = 1024
@@ -38,6 +39,7 @@ class _Context:
     sigchld_monitored: bool
     future: Future
     read_buf: bytearray
+    read_view: memoryview
     # File descriptors for triggering the "wakeup" whenever any signal arrives.
     wakeup_read_sock: socket.socket
     wakeup_write_sock: socket.socket
@@ -57,7 +59,7 @@ _context: _Context | None = None
 
 def init(sigint: bool = True, sigchld: bool = True) -> None:
     global _context
-    if _context is None:
+    if _context is None:  # if called multiple times (typically in tests, only update flags)
         wakeup_socks = socket.socketpair()
         sigintterm_socks = socket.socketpair()
         sigchld_socks = socket.socketpair()
@@ -66,10 +68,12 @@ def init(sigint: bool = True, sigchld: bool = True) -> None:
             for sock in socks:
                 sock.setblocking(False)
 
+        read_buf = bytearray(_SOCK_READ_BUF_SIZE)
         _context = _Context(
             sigchld_monitored=sigchld,
             future=Future(),
-            read_buf=bytearray(_SOCK_READ_BUF_SIZE),
+            read_buf=read_buf,
+            read_view=memoryview(read_buf),
             wakeup_read_sock=wakeup_socks[0],
             wakeup_write_sock=wakeup_socks[1],
             sigintterm_read_sock=sigintterm_socks[0],
@@ -86,18 +90,18 @@ def init(sigint: bool = True, sigchld: bool = True) -> None:
 
     # Overwrite old signal handlers (in tests, the old handler could've been installed by ourselves as well; calling it
     # would result in an infinite recursion).
-    signal.signal(signal.SIGTERM, _on_signal)
-    signal.signal(signal.SIGINT, _on_signal if sigint else signal.SIG_IGN)
-    signal.signal(signal.SIGCHLD, _on_signal if sigchld else signal.SIG_DFL)
+    signal.signal(SIGTERM, _on_signal)
+    signal.signal(SIGINT, _on_signal if sigint else signal.SIG_IGN)
+    signal.signal(SIGCHLD, _on_signal if sigchld else signal.SIG_DFL)
 
 
 def maybe_raise_exc() -> None:
     assert _context
     # If multiple signals occurred, prefer SIGTERM.
     if _context.sigterm_observed:
-        raise _create_exception(signal.SIGTERM)
+        raise _create_exception(SIGTERM)
     elif _context.sigint_observed:
-        raise _create_exception(signal.SIGINT)
+        raise _create_exception(SIGINT)
 
 
 def get_future() -> Future:
@@ -144,26 +148,19 @@ def handle_readable_wakeup_fd(sock: socket.socket) -> None:
     except OSError:
         return  # data was read by another thread or shutdown started
 
-    # In case of the common wakeup FD, copy the notification(s) into corresponding dedicated sockets (so that we support
-    # multiple overlapping select() calls as long as they consume different sockets) and set the future (to unblock the
-    # main thread if it's waiting on futures).
+    # In case of the common wakeup FD, also set corresponding global flags and copy the notifications into the dedicated
+    # sockets.
     if sock != _context.wakeup_read_sock:
         return
-    contents = memoryview(_context.read_buf)[:nbytes]
-    sigchld_notified = False
-    sigintterm_notified = False
-    for signum in contents:
-        match signum:
-            case signal.SIGCHLD if not sigchld_notified:
-                sigchld_notified = True
-                _notify_sock(_context.sigchld_write_sock)
-            case signal.SIGINT | signal.SIGTERM if not sigintterm_notified:
-                sigintterm_notified = True
-                _notify_sock(_context.sigintterm_write_sock)
-                # Set the exception on the future, unless it's already done. We don't use done() because it'd be
-                # potentially racy.
-                with contextlib.suppress(concurrent.futures.InvalidStateError):
-                    _context.future.set_exception(_create_exception(signum))
+    contents = _context.read_view[:nbytes]
+    if SIGCHLD in contents:
+        _notify_sock(_context.sigchld_write_sock)
+    if SIGINT in contents:
+        _set_future_exception(_create_exception(SIGINT))
+        _notify_sock(_context.sigintterm_write_sock)
+    if SIGTERM in contents:
+        _set_future_exception(_create_exception(SIGTERM))
+        _notify_sock(_context.sigintterm_write_sock)
 
 
 def signal_observed_for_testing() -> bool:
@@ -197,29 +194,30 @@ def _on_signal(signum: int, frame) -> None:
     if VLOG:
         os.write(sys.stderr.fileno(), f'[{os.getpid()} {datetime.datetime.now()}] on_signal {signum}\n'.encode())
     assert _context
+    if signum == SIGCHLD:
+        return  # no action needed (its only purpose is to notify the fds)
+
     repeated = _context.sigterm_observed or _context.sigint_observed
-    match signum:
-        case signal.SIGTERM:
-            _context.sigterm_observed = True
-        case signal.SIGINT:
-            _context.sigint_observed = True
-        case signal.SIGCHLD:
-            return  # no action needed besides notifying the wakeup fd
+    if signum == SIGINT:
+        _context.sigint_observed = True
+    elif signum == SIGTERM:
+        _context.sigterm_observed = True
 
-    exception = _create_exception(signum)
-    # Set the exception on the future, unless it's already done. We don't use done() because it'd be potentially racy.
-    with contextlib.suppress(concurrent.futures.InvalidStateError):
-        _context.future.set_exception(exception)
-
+    exc = _create_exception(signum)
+    _set_future_exception(exc)
     if repeated:
-        raise exception
+        raise exc
 
 
 def _create_exception(signum: int) -> BaseException:
-    match signum:
-        case signal.SIGINT:
-            return KeyboardInterrupt()
-        case signal.SIGTERM:
-            return SystemExit(1)
-        case _:
-            raise ValueError('No signal')
+    if signum == SIGINT:
+        return KeyboardInterrupt()
+    elif signum == SIGTERM:
+        return SystemExit(1)
+    else:
+        raise ValueError(f'Unexpected signal {signum}')
+
+
+def _set_future_exception(exc: BaseException) -> None:
+    with contextlib.suppress(concurrent.futures.InvalidStateError):  # no done() to avoid races
+        _context.future.set_exception(exc)

@@ -1,12 +1,14 @@
 import contextlib
-import gc
+import datetime
 import multiprocessing
 import multiprocessing.managers
 import os
 import queue
 import signal
+import sys
 import threading
 import time
+import traceback
 import weakref
 from collections.abc import Iterator
 
@@ -90,12 +92,19 @@ def _process_main_calling_retrigger(process_ready_event: threading.Event, proces
     process_ready_event.set()
     for _ in range(_SLEEP_INFINITY):
         try:
+            print(f'[{os.getpid()} {datetime.datetime.now()}] sleep\n', file=sys.stderr)
             time.sleep(1)
+            print(f'[{os.getpid()} {datetime.datetime.now()}] maybe_raise_exc\n', file=sys.stderr)
             sigmonitor.maybe_raise_exc()
         except BaseException as e:
-            assert type(sigmonitor.get_future().exception(timeout=0)) is type(e)
-            process_result_queue.put(type(e))
-            return
+            try:
+                assert type(sigmonitor.get_future().exception(timeout=0)) is type(e)
+                process_result_queue.put(type(e))
+                return
+            except BaseException as e2:
+                print(f'BAD {e2}', file=sys.stderr)
+                traceback.print_exc(file=sys.stderr)
+                raise
     process_result_queue.put(None)
 
 
