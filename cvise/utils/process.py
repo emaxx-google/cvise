@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import datetime
 import fcntl
 import os
 import queue
@@ -253,11 +254,17 @@ def _auto_kill_descendants(proc: subprocess.Popen) -> Iterator[None]:
             if proc.stdout:
                 proc.stdout.close()
             if VLOG:
-                print(f'[{os.getpid()}] run_process kill_subtree pid={proc.pid}', file=sys.stderr)
+                print(
+                    f'[{os.getpid()} {datetime.datetime.now()}] run_process kill_subtree pid={proc.pid}',
+                    file=sys.stderr,
+                )
             _kill_subtree(proc.pid)
             proc.wait()
             if VLOG:
-                print(f'[{os.getpid()}] run_process killed_subtree pid={proc.pid}', file=sys.stderr)
+                print(
+                    f'[{os.getpid()} {datetime.datetime.now()}] run_process killed_subtree pid={proc.pid}',
+                    file=sys.stderr,
+                )
 
 
 def _kill_subtree(pid: int) -> None:

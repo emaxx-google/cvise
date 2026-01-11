@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import contextlib
+import datetime
 import enum
 import heapq
 import io
@@ -688,7 +689,7 @@ class _PoolRunner:
 
     def _on_worker_proc_fd_joinable(self, worker_pid: int, selector_event_mask: int) -> None:
         if VLOG:
-            print(f'on_worker_proc_fd_joinable pid={worker_pid}', file=sys.stderr)
+            print(f'[{datetime.datetime.now()}] on_worker_proc_fd_joinable pid={worker_pid}', file=sys.stderr)
         assert selector_event_mask & EVENT_READ
         worker = self._workers[worker_pid]
         assert worker.proc is not None
