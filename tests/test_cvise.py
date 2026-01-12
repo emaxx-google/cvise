@@ -127,30 +127,25 @@ def test_simple_reduction_no_interleaving_config(tmp_path: Path, overridden_subp
 
 @pytest.mark.skipif(os.name != 'posix', reason='requires POSIX for command-line tools')
 @pytest.mark.parametrize('signum', [signal.SIGINT, signal.SIGTERM], ids=['sigint', 'sigterm'])
-@pytest.mark.parametrize('additional_delay', [0, 1, 2])
+@pytest.mark.parametrize('additional_delay', list(range(10)))
 def test_kill(tmp_path: Path, overridden_subprocess_tmpdir: Path, signum: int, additional_delay: int):
     """Test that Control-C is handled quickly, without waiting for jobs to finish."""
     MAX_SHUTDOWN = 60  # in seconds; tolerance to prevent flakiness (normally it's a fraction of a second)
-    JOB_SLOWNESS = MAX_SHUTDOWN * 2  # make a single job slower than the thresholds
     N = 5  # don't use very high parallelism since it'd skew timings
 
     shutil.copy(get_source_path('blocksort-part.c'), tmp_path)
-    flag_file = tmp_path / 'flag'
 
     with start_cvise(
         [
             'blocksort-part.c',
             '-c',
-            f'gcc -c blocksort-part.c && touch {flag_file} && sleep {JOB_SLOWNESS}',
-            '--skip-interestingness-test-check',
+            r"gcc -c blocksort-part.c && grep '\<nextHi\>' blocksort-part.c",
             '-n',
             str(N),
         ],
         tmp_path,
         overridden_subprocess_tmpdir,
     ) as proc:
-        # to make the test cover the interesting scenario, we wait until C-Vise starts at least one job
-        wait_until_file_created(flag_file)
         # extra wait for more variance in test scenarios
         time.sleep(additional_delay)
 
