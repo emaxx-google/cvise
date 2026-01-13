@@ -288,26 +288,26 @@ def _stress_test_atomicity(path_to_check: Path, init_callback: Callable, test_co
     RECHECK_ITERATIONS = 10
     TEST_HALVING_STEPS = 10
 
-    def run_subprocess(sleep: float | None):
+    def run_subprocess(sleep: float | None) -> tuple[dict[Path, str], str, str]:
         init_callback()
         # Enable tracing in the subprocess in order to slow it down, to increase chances of hitting a bug.
         code = 'from sys import settrace; ' + 'trace = lambda *args: trace; ' + 'settrace(trace); ' + test_code
 
-        proc = subprocess.Popen([sys.executable, '-c', code], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        proc = subprocess.Popen([sys.executable, '-c', code], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if sleep is not None:
             time.sleep(sleep)
             os.kill(proc.pid, signal.SIGINT)
-        proc.wait()
+        stdout, stderr = proc.communicate()
 
         contents = {}
         for p in path_to_check.rglob('*'):
             with contextlib.suppress(FileNotFoundError):
                 if p.is_file():
                     contents[p.relative_to(path_to_check)] = p.read_text()
-        return contents
+        return contents, stdout, stderr
 
     begin_time = time.monotonic()
-    assert result_callback(run_subprocess(sleep=None)) == _AtomicityResult.CONTENTS_NEW
+    assert result_callback(run_subprocess(sleep=None)[0]) == _AtomicityResult.CONTENTS_NEW
     initial_duration = time.monotonic() - begin_time
 
     # Estimate using binary search the "critical" time - how long it takes for the code-under-test to start modifying
@@ -318,8 +318,10 @@ def _stress_test_atomicity(path_to_check: Path, init_callback: Callable, test_co
         mid = (left + right) / 2
         all_initial = True
         for _ in range(RECHECK_ITERATIONS):
-            contents = run_subprocess(mid)
-            assert result_callback(contents) != _AtomicityResult.CONTENTS_UNEXPECTED
+            contents, stdout, stderr = run_subprocess(mid)
+            assert result_callback(contents) != _AtomicityResult.CONTENTS_UNEXPECTED, (
+                f'contents={contents} stdout:\n{stdout}\nstderr:\n{stderr}'
+            )
             if result_callback(contents) == _AtomicityResult.CONTENTS_NEW:
                 all_initial = False
                 break
@@ -333,8 +335,14 @@ def _stress_test_atomicity(path_to_check: Path, init_callback: Callable, test_co
     for i in range(TEST_HALVING_STEPS):
         step = critical_time / 2**i
         for j in range(min(TEST_HALVING_STEPS, i + 1)):
-            assert result_callback(run_subprocess(critical_time + step * j)) != _AtomicityResult.CONTENTS_UNEXPECTED
-            assert result_callback(run_subprocess(critical_time - step * j)) != _AtomicityResult.CONTENTS_UNEXPECTED
+            contents, stdout, stderr = run_subprocess(critical_time + step * j)
+            assert result_callback(contents) != _AtomicityResult.CONTENTS_UNEXPECTED, (
+                f'contents={contents} stdout:\n{stdout}\nstderr:\n{stderr}'
+            )
+            contents, stdout, stderr = run_subprocess(critical_time - step * j)
+            assert result_callback(contents) != _AtomicityResult.CONTENTS_UNEXPECTED, (
+                f'contents={contents} stdout:\n{stdout}\nstderr:\n{stderr}'
+            )
 
 
 def test_hash_equality_file(tmp_path: Path):
