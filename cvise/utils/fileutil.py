@@ -28,9 +28,9 @@ def CloseableTemporaryFile(mode='w+b', dir: Path | None = None):
     # Use a unique name pattern, so that if NamedTemporaryFile construction or cleanup aborted mid-way (e.g., via
     # KeyboardInterrupt), we can identify and delete the leftover file.
     prefix = _get_random_temp_file_name_prefix()
-    with _clean_up_files_on_abnormal_exit(dir, prefix):
+    with _auto_rmtree_matching(dir, prefix):
         f = tempfile.NamedTemporaryFile(mode=mode, delete=False, dir=dir, prefix=prefix)
-        with _auto_close_and_unlink(f):
+        with _auto_close(f):
             yield f
 
 
@@ -317,37 +317,34 @@ def _get_random_temp_file_name_prefix() -> str:
 
 
 @contextlib.contextmanager
-def _clean_up_files_on_abnormal_exit(dir: Path, prefix: str) -> Iterator[None]:
+def _auto_rmtree_matching(dir: Path, prefix: str) -> Iterator[None]:
     try:
         yield
-    except (KeyboardInterrupt, SystemExit):
+    finally:
         lst = list(dir.glob(f'{prefix}*'))
         for p in lst:
             if p.is_file():
                 p.unlink(missing_ok=True)
             else:
-                shutil.rmtree(p)
-        raise
+                shutil.rmtree(p, ignore_errors=True)
 
 
 @contextlib.contextmanager
-def _auto_close_and_unlink(tmp_file) -> Iterator[None]:
+def _auto_close(tmp_file) -> Iterator[None]:
     try:
         yield
     finally:
         # For Windows systems, be sure we always close the file before we remove it!
         if not tmp_file.closed:
             tmp_file.close()
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(tmp_file.name)
 
 
 @contextlib.contextmanager
 def _robust_temp_dir(dir: Path) -> Iterator[Path]:
     """Unlike TemporaryDirectory, guarantees to not leave leftovers on keyboard/exit exceptions."""
     prefix = _get_random_temp_file_name_prefix()
-    with _clean_up_files_on_abnormal_exit(dir, prefix):
-        with tempfile.TemporaryDirectory(prefix=prefix, dir=dir) as tmp_dir:
+    with _auto_rmtree_matching(dir, prefix):
+        with tempfile.TemporaryDirectory(prefix=prefix, dir=dir, ignore_cleanup_errors=False) as tmp_dir:
             yield Path(tmp_dir)
 
 
