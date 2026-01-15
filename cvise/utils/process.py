@@ -114,7 +114,10 @@ class ProcessEventNotifier:
         def handle_sigmonitor_fd(sigmonitor_sock: socket.socket, proc: subprocess.Popen) -> None:
             sigmonitor.handle_readable_wakeup_fd(sigmonitor_sock)
             proc.poll()
-            # print(f'[{os.getpid()}] handle_sigmonitor_fd: returncode={proc.returncode} proc={id(proc)}', file=sys.stderr)
+            print(
+                f'[{os.getpid()} {datetime.datetime.now()}] handle_sigmonitor_fd: returncode={proc.returncode}',
+                file=sys.stderr,
+            )
 
         def handle_stdin_fd(fileobj: IO[bytes]) -> None:
             nonlocal input_offset
@@ -126,6 +129,7 @@ class ProcessEventNotifier:
                     selector.unregister(fileobj)
                     fileobj.close()
             except OSError:
+                print(f'[{os.getpid()} {datetime.datetime.now()}] handle_stdin_fd: closing', file=sys.stderr)
                 selector.unregister(fileobj)
                 fileobj.close()
 
@@ -136,6 +140,7 @@ class ProcessEventNotifier:
             if chunk:
                 chunks.append(chunk)
             else:
+                print(f'[{os.getpid()} {datetime.datetime.now()}] handle_output_fd: closing {fileobj}', file=sys.stderr)
                 selector.unregister(fileobj)
                 fileobj.close()
 
@@ -182,7 +187,10 @@ class ProcessEventNotifier:
                 f(*args)
 
         if VLOG:
-            print(f'[{os.getpid()}] _communicate_with_sig_checks_posix: finished pid={proc.pid}', file=sys.stderr)
+            print(
+                f'[{os.getpid()} {datetime.datetime.now()}] _communicate_with_sig_checks_posix: finished pid={proc.pid}',
+                file=sys.stderr,
+            )
         return b''.join(stdout_chunks), b''.join(stderr_chunks)
 
     def _communicate_with_sig_checks_portable(
