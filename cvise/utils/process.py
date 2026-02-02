@@ -114,10 +114,11 @@ class ProcessEventNotifier:
         def handle_sigmonitor_fd(sigmonitor_sock: socket.socket, proc: subprocess.Popen) -> None:
             sigmonitor.handle_readable_wakeup_fd(sigmonitor_sock)
             proc.poll()
-            print(
-                f'[{os.getpid()} {datetime.datetime.now()}] handle_sigmonitor_fd: returncode={proc.returncode}',
-                file=sys.stderr,
-            )
+            if VLOG:
+                print(
+                    f'[{os.getpid()} {datetime.datetime.now()}] handle_sigmonitor_fd: returncode={proc.returncode}',
+                    file=sys.stderr,
+                )
 
         def handle_stdin_fd(fileobj: IO[bytes]) -> None:
             nonlocal input_offset
@@ -140,7 +141,8 @@ class ProcessEventNotifier:
             if chunk:
                 chunks.append(chunk)
             else:
-                print(f'[{os.getpid()} {datetime.datetime.now()}] handle_output_fd: closing {fileobj}', file=sys.stderr)
+                if VLOG:
+                    print(f'[{os.getpid()} {datetime.datetime.now()}] handle_output_fd: closing {fileobj}', file=sys.stderr)
                 selector.unregister(fileobj)
                 fileobj.close()
 
